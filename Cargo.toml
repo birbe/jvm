@@ -1,0 +1,9 @@
+[workspace]
+
+members = [
+    "jvm",
+    "jvm_types",
+    "parse_macro"
+]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
