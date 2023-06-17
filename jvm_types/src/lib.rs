@@ -53,6 +53,34 @@ impl_jparse!(i32);
 impl_jparse!(u64);
 impl_jparse!(i64);
 
+impl_jparse!(f32);
+impl_jparse!(f64);
+
+impl JParse for u8 {
+    type Output = u8;
+
+    fn from_bytes_prefixed<R: Read, const PREFIX: usize>(mut r: R) -> Result<Self::Output, Error> {
+        r.read_u8()
+    }
+
+    fn to_bytes_prefixed<const PREFIX: usize>(&self) -> Vec<u8> {
+        self.to_be_bytes().into()
+    }
+}
+
+impl JParse for i8 {
+    type Output = i8;
+
+    fn from_bytes_prefixed<R: Read, const PREFIX: usize>(mut r: R) -> Result<Self::Output, Error> {
+        r.read_i8()
+    }
+
+    fn to_bytes_prefixed<const PREFIX: usize>(&self) -> Vec<u8> {
+        self.to_be_bytes().into()
+    }
+}
+
+
 impl<T> JParse for Vec<T>
 where
     T: JParse<Output = T>,
@@ -93,6 +121,36 @@ where
 
         for item in self {
             out.extend(item.to_bytes_prefixed::<0>())
+        }
+
+        out
+    }
+}
+
+impl<T> JParse for Box<[T]>
+    where
+        T: JParse<Output = T>,
+{
+    type Output = Box<[T]>;
+
+    fn from_bytes_prefixed<R: Read, const PREFIX: usize>(mut r: R) -> Result<Box<[T]>, Error> {
+        Ok(<Vec<T>>::from_bytes_prefixed::<_, PREFIX>(&mut r)?.into_boxed_slice())
+    }
+
+    fn to_bytes_prefixed<const PREFIX: usize>(&self) -> Vec<u8> {
+        assert_ne!(
+            PREFIX, 0,
+            "You can't directly nest `Box<[T]>`s in a JParse derive, please use a wrapper struct"
+        );
+
+        let mut out = Vec::new();
+
+        let length = self.len().to_be_bytes();
+
+        out.extend(&length[8 - PREFIX..8]);
+
+        for index in 0..self.len() {
+            out.extend(self[index].to_bytes_prefixed::<0>())
         }
 
         out

@@ -2,9 +2,12 @@
 
 use jvm_types::JParse;
 use parse_macro::JParse;
-use std::io::Cursor;
+use std::io::{Cursor, stdout};
+use std::time::Instant;
+use crate::classfile::ClassFile;
+use crate::classfile::resolved::Class;
 
-#[derive(Debug, PartialEq, Eq, Clone, JParse)]
+#[derive(JParse, Debug, PartialEq, Eq, Clone)]
 struct TestStruct {
     pub test_field: u16,
     #[prefix = 2]
@@ -12,7 +15,7 @@ struct TestStruct {
 }
 
 #[test]
-fn test() {
+fn test_jparse() {
     let test_struct = TestStruct::from_bytes(Cursor::new([0, 15, 0, 1, 0, 12])).unwrap();
 
     assert_eq!(
@@ -27,4 +30,14 @@ fn test() {
         test_struct,
         TestStruct::from_bytes(Cursor::new(test_struct.to_bytes())).unwrap()
     );
+}
+
+#[test]
+fn parse_classfile() {
+    let file = include_bytes!("../test_classes/Main.class");
+
+    let class_file = ClassFile::from_bytes(Cursor::new(file)).unwrap();
+
+    let class = Class::init(&class_file).unwrap();
+    println!("{:#?}", class);
 }

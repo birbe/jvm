@@ -6,5 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+byteorder = "1.4.3"
 jvm_types = { path = "../jvm_types" }
 parse_macro = { path = "../parse_macro" }
+cesu8str = "0.2.4"
+discrim = "0.1.1"
