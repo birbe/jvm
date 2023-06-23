@@ -133,13 +133,13 @@ pub fn detect_irreducible_cfg(instructions: &[Instruction]) {
         scc_s.get_mut(&node.scc).unwrap().push(node.idx);
     });
 
-    scc_s
+    let multiple_entry_loops: HashMap<usize, Vec<Node>> = scc_s
         .iter()
         .filter(|(scc, nodes)| nodes.len() > 1)
-        .for_each(|(scc, node_idxs)| {
-            let total_loop_entries: usize = node_idxs
+        .map(|(scc, node_idxs)| {
+            let loop_headers: Vec<&Node> = node_idxs
                 .iter()
-                .map(|idx| {
+                .filter_map(|idx| {
                     let node = &nodes[*idx];
 
                     let is_header = node.predecessors.iter().any(|pre| {
@@ -148,13 +148,15 @@ pub fn detect_irreducible_cfg(instructions: &[Instruction]) {
                     });
 
                     if is_header {
-                        1
+                        Some(node)
                     } else {
-                        0
+                        None
                     }
                 })
-                .sum();
+                .collect();
 
-            //if total_loop_entries is more than 1, then we have irreducible control flow
-        });
+            (*scc, loop_headers)
+        }).collect();
+
+    println!("{:#?}", multiple_entry_loops);
 }
