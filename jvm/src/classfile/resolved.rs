@@ -154,25 +154,53 @@ impl Attribute {
 }
 
 pub mod attribute {
+    use crate::bytecode::Bytecode;
     use crate::classfile::attribute_info::{CodeAttributeInfo, ExceptionTableInfo};
     use crate::classfile::resolved::{Attribute, ConstantPool};
+    use std::io::{Cursor, Error};
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Instruction {
+        pub bytecode: Bytecode,
+        pub bytes_index: u32,
+        pub bytecode_index: u32,
+    }
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct Code {
         pub attribute_name: &'static str,
         pub max_stack: u16,
         pub max_locals: u16,
-        // pub code: CodeStructure,
+        pub instructions: Vec<Instruction>,
+        pub raw_instructions: Vec<u8>,
         pub exception_table: Vec<ExceptionTable>,
         pub attributes: Vec<Attribute>,
     }
 
     impl Code {
         pub fn new(code_info: &CodeAttributeInfo, constant_pool: &ConstantPool) -> Option<Self> {
+            let mut cursor = Cursor::new(&code_info.code);
+            let mut instructions = Vec::new();
+
+            loop {
+                let index = cursor.position();
+
+                instructions.push(match Bytecode::from_bytes(&mut cursor) {
+                    Ok(bytecode) => Instruction {
+                        bytecode,
+                        bytes_index: index as u32,
+                        bytecode_index: instructions.len() as u32,
+                    },
+                    Err(_) => break,
+                });
+            }
+
             Some(Self {
                 attribute_name: "Code",
                 max_stack: code_info.max_stack,
                 max_locals: code_info.max_locals,
+                instructions,
+                raw_instructions: code_info.code.clone(),
                 exception_table: code_info
                     .exception_table
                     .iter()
@@ -399,7 +427,7 @@ pub struct MethodHandle {
     pub reference: Arc<Ref>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Ref {
     pub class: Arc<String>,
     pub name_and_type: Arc<NameAndType>,
@@ -441,7 +469,7 @@ impl Ref {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NameAndType {
     pub name: Arc<String>,
     pub descriptor: Arc<String>,

@@ -12,3 +12,5 @@ parse_macro = { path = "../parse_macro" }
 cesu8str = "0.2.4"
 discrim = "0.1.1"
 bitflags = "2.3.2"
+parking_lot = "0.12.1"
+cranelift-jit = "0.97.1"
