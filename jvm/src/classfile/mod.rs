@@ -1,10 +1,10 @@
 pub mod resolved;
 
-use std::collections::HashMap;
-use std::io::{Error, Read};
 use byteorder::{BigEndian, ReadBytesExt};
 use jvm_types::JParse;
 use parse_macro::JParse;
+use std::collections::HashMap;
+use std::io::{Error, Read};
 
 #[derive(JParse, Clone, Debug, PartialEq)]
 pub struct ClassFile {
@@ -18,7 +18,7 @@ pub struct ClassFile {
     pub interfaces: Vec<constant::ClassInfo>,
     pub fields: Vec<FieldInfo>,
     pub methods: Vec<MethodInfo>,
-    // pub attributes: Vec<Attribute>
+    pub attributes: Vec<AttributeInfo>,
 }
 
 #[derive(JParse, Clone, Debug, PartialEq)]
@@ -26,12 +26,12 @@ pub struct MethodInfo {
     pub access_flags: u16,
     pub name_index: u16,
     pub descriptor_index: u16,
-    pub attributes: Vec<AttributeInfo>
+    pub attributes: Vec<AttributeInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConstantInfoPool {
-    pub constants: HashMap<u16, ConstantInfo>
+    pub constants: HashMap<u16, ConstantInfo>,
 }
 
 impl JParse for ConstantInfoPool {
@@ -46,9 +46,7 @@ impl JParse for ConstantInfoPool {
             constants.insert(id + 1, ConstantInfo::from_bytes(&mut r)?);
         }
 
-        Ok(Self {
-            constants,
-        })
+        Ok(Self { constants })
     }
 
     fn to_bytes_prefixed<const PREFIX: usize>(&self) -> Vec<u8> {
@@ -65,45 +63,47 @@ impl JParse for ConstantInfoPool {
 }
 
 pub mod constant {
+    use crate::classfile::AttributeInfo;
+    use cesu8str::Cesu8String;
+    use jvm_types::JParse;
+    use parse_macro::JParse;
     use std::fmt::{Debug, Formatter};
     use std::io::{Error, Read};
     use std::sync::Arc;
-    use cesu8str::{Cesu8String};
-    use jvm_types::JParse;
-    use parse_macro::JParse;
-    use crate::classfile::AttributeInfo;
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct ClassInfo {
-        pub name_index: u16
+        pub name_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct RefInfo {
         pub class_index: u16,
-        pub name_and_type_index: u16
+        pub name_and_type_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct StringInfo {
-        pub string_index: u16
+        pub string_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct NameAndTypeInfo {
         pub name_index: u16,
-        pub descriptor_index: u16
+        pub descriptor_index: u16,
     }
 
     #[derive(Clone, PartialEq)]
     pub struct Utf8Info {
-        pub string: Arc<String>
+        pub string: Arc<String>,
     }
 
     impl JParse for Utf8Info {
         type Output = Utf8Info;
 
-        fn from_bytes_prefixed<R: Read, const PREFIX: usize>(mut r: R) -> Result<Self::Output, Error> {
+        fn from_bytes_prefixed<R: Read, const PREFIX: usize>(
+            mut r: R,
+        ) -> Result<Self::Output, Error> {
             let vec = <Vec<u8>>::from_bytes(&mut r)?;
             //TODO proper error handling for JParse
             let string = Cesu8String::try_from_bytes(vec).unwrap();
@@ -129,37 +129,36 @@ pub mod constant {
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct MethodHandleInfo {
         pub reference_kind: u8,
-        pub reference_index: u16
+        pub reference_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct MethodTypeInfo {
-        pub descriptor_index: u16
+        pub descriptor_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct DynamicInfo {
         pub bootstrap_method_attr_index: u16,
-        pub name_and_type_index: u16
+        pub name_and_type_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct ModuleInfo {
-        pub name_index: u16
+        pub name_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct PackageInfo {
-        pub name_index: u16
+        pub name_index: u16,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
     pub struct FieldInfo {
         pub name_index: u16,
         pub descriptor_index: u16,
-        pub attributes: Vec<AttributeInfo>
+        pub attributes: Vec<AttributeInfo>,
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -180,7 +179,7 @@ pub enum ConstantInfo {
     Dynamic(constant::DynamicInfo),
     InvokeDynamic(constant::DynamicInfo),
     Module(constant::ModuleInfo),
-    Package(constant::PackageInfo)
+    Package(constant::PackageInfo),
 }
 
 impl JParse for ConstantInfo {
@@ -207,7 +206,7 @@ impl JParse for ConstantInfo {
             18 => Self::Dynamic(constant::DynamicInfo::from_bytes(&mut r)?),
             19 => Self::Module(constant::ModuleInfo::from_bytes(&mut r)?),
             20 => Self::Package(constant::PackageInfo::from_bytes(&mut r)?),
-            _ => unimplemented!()
+            _ => unimplemented!(),
         })
     }
 
@@ -221,39 +220,35 @@ pub struct FieldInfo {
     pub access_flags: u16,
     pub name_index: u16,
     pub descriptor_index: u16,
-    pub attributes: Vec<AttributeInfo>
-}
-
-#[derive(JParse, Clone, Debug, PartialEq)]
-pub struct Method {
-
+    pub attributes: Vec<AttributeInfo>,
 }
 
 #[derive(JParse, Clone, Debug, PartialEq)]
 pub struct AttributeInfo {
     pub name_index: u16,
-    #[prefix = 4] pub info: Vec<u8>
+    #[prefix = 4]
+    pub info: Vec<u8>,
 }
 
-pub mod attribute {
-    use parse_macro::JParse;
+pub mod attribute_info {
     use crate::classfile::AttributeInfo;
+    use parse_macro::JParse;
 
     #[derive(JParse, Clone, Debug, PartialEq)]
-    pub struct CodeAttribute {
+    pub struct CodeAttributeInfo {
         pub max_stack: u16,
         pub max_locals: u16,
-        #[prefix = 4] pub code: Vec<u8>,
-        pub exception_table: Vec<ExceptionInfo>,
-        pub attributes: Vec<AttributeInfo>
+        #[prefix = 4]
+        pub code: Vec<u8>,
+        pub exception_table: Vec<ExceptionTableInfo>,
+        pub attributes: Vec<AttributeInfo>,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]
-    pub struct ExceptionInfo {
+    pub struct ExceptionTableInfo {
         pub start_pc: u16,
         pub end_pc: u16,
         pub handler_pc: u16,
-        pub catch_type: u16
+        pub catch_type: u16,
     }
-
 }

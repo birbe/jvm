@@ -1,4 +1,4 @@
-mod tests;
 mod classfile;
+mod tests;
 
 pub struct JVM {}

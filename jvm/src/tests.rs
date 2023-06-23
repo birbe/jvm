@@ -1,11 +1,11 @@
 #![cfg(test)]
 
+use crate::classfile::resolved::Class;
+use crate::classfile::ClassFile;
 use jvm_types::JParse;
 use parse_macro::JParse;
-use std::io::{Cursor, stdout};
+use std::io::{stdout, Cursor};
 use std::time::Instant;
-use crate::classfile::ClassFile;
-use crate::classfile::resolved::Class;
 
 #[derive(JParse, Debug, PartialEq, Eq, Clone)]
 struct TestStruct {
@@ -39,5 +39,6 @@ fn parse_classfile() {
     let class_file = ClassFile::from_bytes(Cursor::new(file)).unwrap();
 
     let class = Class::init(&class_file).unwrap();
+    println!("{:#?}", class_file);
     println!("{:#?}", class);
 }

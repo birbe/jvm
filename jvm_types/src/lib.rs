@@ -80,7 +80,6 @@ impl JParse for i8 {
     }
 }
 
-
 impl<T> JParse for Vec<T>
 where
     T: JParse<Output = T>,
@@ -128,8 +127,8 @@ where
 }
 
 impl<T> JParse for Box<[T]>
-    where
-        T: JParse<Output = T>,
+where
+    T: JParse<Output = T>,
 {
     type Output = Box<[T]>;
 
