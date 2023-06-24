@@ -38,7 +38,7 @@ pub struct JVMInternal<'jvm> {
 
 impl<'jvm> JVMInternal<'jvm> {}
 
-fn get_method_bytecode(jvm: &JVMInternal, identifier: &MethodIdentifier) -> Vec<Instruction> {
+pub fn get_method_bytecode(jvm: &JVMInternal, identifier: &MethodIdentifier) -> Vec<Instruction> {
     let classes = jvm.classes.read();
     let class = classes.get(identifier.class.to_str().unwrap()).unwrap();
 
@@ -59,7 +59,7 @@ fn get_method_bytecode(jvm: &JVMInternal, identifier: &MethodIdentifier) -> Vec<
 #[repr(C)]
 //Some of these functions are only designated for usage in Rust. If this is the case, they're marked as such
 pub struct JVMPtrs<'jvm> {
-    jvm: *mut JVMInternal<'jvm>,
+    pub jvm: *mut JVMInternal<'jvm>,
     //Rust only
-    get_method_bytecode: fn(*mut JVMInternal, MethodIdentifier) -> (Vec<Bytecode>, Vec<u8>),
+    pub get_method_bytecode: fn(*mut JVMInternal, MethodIdentifier) -> (Vec<Bytecode>, Vec<u8>),
 }
