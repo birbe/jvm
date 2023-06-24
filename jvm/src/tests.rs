@@ -4,7 +4,7 @@ use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::classfile::resolved::{Attribute, Class};
 use crate::classfile::ClassFile;
-use crate::jit::detect_irreducible_cfg;
+use crate::jit::{find_loops, Node};
 use jvm_types::JParse;
 use parse_macro::JParse;
 use std::io::{stdout, Cursor};
@@ -48,28 +48,31 @@ fn parse_classfile() {
     std::fs::write("C:/Users/birb/Downloads/out.txt", debug).unwrap();
 }
 
-// #[test]
+#[test]
 fn jit_test() {
-    let file = include_bytes!("../test_classes/Main.class");
+    let file = include_bytes!("../test_classes/bfr.class");
 
     let class_file = ClassFile::from_bytes(Cursor::new(file)).unwrap();
 
     let class = Class::init(&class_file).unwrap();
 
-    let method = &class.methods[1];
+    class.methods.iter().for_each(|method| {
+        let attribute = if let Attribute::Code(code) = method.attributes.get("Code").unwrap() {
+            code
+        } else {
+            unreachable!()
+        };
 
-    let attribute = if let Attribute::Code(code) = method.attributes.get("Code").unwrap() {
-        code
-    } else {
-        unreachable!()
-    };
+        let (loops, nodes) = find_loops(&attribute.instructions);
 
-    // detect_irreducible_cfg(&attribute.instructions);
+        let i_cfg: Vec<&Vec<Node>> = loops.values().filter(|headers| headers.len() > 1).collect();
+        // println!("{:#?}", loops);
+    });
 }
 
-#[test]
+// #[test]
 fn jit_test_manual() {
-    detect_irreducible_cfg(&[
+    find_loops(&[
         //goto a;
         Instruction {
             bytecode: Bytecode::Goto(5),

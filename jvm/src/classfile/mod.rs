@@ -38,12 +38,25 @@ impl JParse for ConstantInfoPool {
     type Output = ConstantInfoPool;
 
     fn from_bytes_prefixed<R: Read, const PREFIX: usize>(mut r: R) -> Result<Self::Output, Error> {
-        let length = r.read_u16::<BigEndian>().unwrap() - 1;
+        let max_index = r.read_u16::<BigEndian>().unwrap() - 1;
 
         let mut constants = HashMap::new();
 
-        for id in 0..length {
-            constants.insert(id + 1, ConstantInfo::from_bytes(&mut r)?);
+        let mut slot = 0;
+
+        loop {
+            let constant = ConstantInfo::from_bytes(&mut r)?;
+
+            let inc = if matches!(constant, ConstantInfo::Long(_)) || matches!(constant, ConstantInfo::Double(_)) {
+                2
+            } else {
+                1
+            };
+
+            constants.insert(slot + 1, constant);
+            slot += inc;
+
+            if max_index == slot { break };
         }
 
         Ok(Self { constants })
@@ -106,7 +119,8 @@ pub mod constant {
         ) -> Result<Self::Output, Error> {
             let vec = <Vec<u8>>::from_bytes(&mut r)?;
             //TODO proper error handling for JParse
-            let string = Cesu8String::try_from_bytes(vec).unwrap();
+            let string = Cesu8String::try_from_bytes(vec.clone()).unwrap();
+
             Ok(Self {
                 string: Arc::new(string.into()),
             })
@@ -206,7 +220,7 @@ impl JParse for ConstantInfo {
             18 => Self::Dynamic(constant::DynamicInfo::from_bytes(&mut r)?),
             19 => Self::Module(constant::ModuleInfo::from_bytes(&mut r)?),
             20 => Self::Package(constant::PackageInfo::from_bytes(&mut r)?),
-            _ => unimplemented!(),
+            _ => Err(Error::from_raw_os_error(0))?,
         })
     }
 

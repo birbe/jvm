@@ -84,7 +84,7 @@ impl Node {
     }
 }
 
-pub fn detect_irreducible_cfg(instructions: &[Instruction]) {
+pub fn find_loops(instructions: &[Instruction]) -> (HashMap<usize, Vec<Node>>, Vec<Node>) {
     let byte_index_to_instruction_index: HashMap<u32, u32> = instructions
         .iter()
         .map(|instruction| (instruction.bytes_index, instruction.bytecode_index))
@@ -133,11 +133,11 @@ pub fn detect_irreducible_cfg(instructions: &[Instruction]) {
         scc_s.get_mut(&node.scc).unwrap().push(node.idx);
     });
 
-    let multiple_entry_loops: HashMap<usize, Vec<Node>> = scc_s
+    (scc_s
         .iter()
         .filter(|(scc, nodes)| nodes.len() > 1)
         .map(|(scc, node_idxs)| {
-            let loop_headers: Vec<&Node> = node_idxs
+            let loop_headers: Vec<Node> = node_idxs
                 .iter()
                 .filter_map(|idx| {
                     let node = &nodes[*idx];
@@ -148,7 +148,7 @@ pub fn detect_irreducible_cfg(instructions: &[Instruction]) {
                     });
 
                     if is_header {
-                        Some(node)
+                        Some(node.clone())
                     } else {
                         None
                     }
@@ -156,7 +156,5 @@ pub fn detect_irreducible_cfg(instructions: &[Instruction]) {
                 .collect();
 
             (*scc, loop_headers)
-        }).collect();
-
-    println!("{:#?}", multiple_entry_loops);
+        }).collect(), nodes)
 }
