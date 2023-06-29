@@ -35,7 +35,7 @@ fn test_jparse() {
     );
 }
 
-#[test]
+// #[test]
 fn parse_classfile() {
     let file = include_bytes!("../test_classes/aab.class");
 
@@ -50,21 +50,15 @@ fn parse_classfile() {
 
         let now = Instant::now();
 
-        label_nodes(&loops, &nodes, &scc_s);
-
-        println!("{} microseconds", Instant::now().duration_since(now).as_micros());
+        let labeled = label_nodes(&loops, &nodes, &scc_s);
     }
-
-    let debug = format!("{:#?}", class);
-
-    std::fs::write("C:/Users/birb/Downloads/out.txt", debug).unwrap();
 }
 
-// #[test]
+#[test]
 fn jit_test_manual() {
     let (loops, nodes, scc_s) = find_loops(&[
         Instruction {
-            bytecode: Bytecode::Goto(5),
+            bytecode: Bytecode::Ifnull(4),
             bytes_index: 0,
             bytecode_index: 0,
         },
@@ -79,16 +73,11 @@ fn jit_test_manual() {
             bytecode_index: 2,
         },
         Instruction {
-            bytecode: Bytecode::Goto(-1),
+            bytecode: Bytecode::Ifnull(-1),
             bytes_index: 5,
             bytecode_index: 3,
         },
-        // Instruction {
-        //     bytecode: Bytecode::Goto(-3),
-        //     bytes_index: 5,
-        //     bytecode_index: 3,
-        // },
     ]);
 
-    label_nodes(loops, nodes, scc_s);
+    let labeled = label_nodes(&loops, &nodes, &scc_s);
 }

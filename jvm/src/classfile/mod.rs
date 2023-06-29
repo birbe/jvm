@@ -127,7 +127,7 @@ pub mod constant {
         }
 
         fn to_bytes_prefixed<const PREFIX: usize>(&self) -> Vec<u8> {
-            let mut bytes = Cesu8String::from(&(*self.string)[..]).into_bytes();
+            let bytes = Cesu8String::from(&(*self.string)[..]).into_bytes();
             let mut out: Vec<u8> = (bytes.len() as u16).to_be_bytes().into();
             out.extend(bytes);
             out

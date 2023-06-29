@@ -1,6 +1,6 @@
 use crate::JVMInternal;
-use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+
+use std::ffi::{CString};
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 
@@ -55,7 +55,7 @@ impl Thread {
         args_ptr: *const i32,
         frames_length: u64,
         frames_ptr: *mut Frame,
-        jvm: *mut JVMInternal,
+        _jvm: *mut JVMInternal,
     ) -> i64 {
         let args = std::slice::from_raw_parts(args_ptr, args_length as usize);
         let frames = std::slice::from_raw_parts_mut(
@@ -77,7 +77,7 @@ impl Thread {
         frame: &mut Frame,
         frames: &mut [MaybeUninit<Frame>],
     ) -> Option<i64> {
-        let return_value = loop {
+        let _return_value = loop {
             match Self::step(args, frame, frames) {
                 ThreadStepResult::Ok => {}
                 ThreadStepResult::Error(_) => panic!(),
@@ -91,11 +91,11 @@ impl Thread {
     }
 
     pub fn step(
-        args: &[i32],
+        _args: &[i32],
         frame: &mut Frame,
-        frames: &mut [MaybeUninit<Frame>],
+        _frames: &mut [MaybeUninit<Frame>],
     ) -> ThreadStepResult {
-        let pc = frame.program_counter;
+        let _pc = frame.program_counter;
 
         frame.program_counter += 1;
 

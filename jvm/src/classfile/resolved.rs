@@ -5,10 +5,10 @@ use crate::classfile::constant::{
 };
 use crate::classfile::resolved::attribute::Code;
 use crate::classfile::{
-    constant, AttributeInfo, ClassFile, ConstantInfo, ConstantInfoPool, MethodInfo,
+    AttributeInfo, ClassFile, ConstantInfo, ConstantInfoPool, MethodInfo,
 };
 use bitflags::{bitflags, Flags};
-use cesu8str::{Cesu8Str, Cesu8String};
+
 use discrim::FromDiscriminant;
 use jvm_types::JParse;
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ impl Method {
     pub fn new(
         method_info: &MethodInfo,
         constant_pool: &ConstantPool,
-        classfile: &ClassFile,
+        _classfile: &ClassFile,
     ) -> Option<Self> {
         Some(Self {
             access_flags: AccessFlags::from_bits(method_info.access_flags)?,
@@ -157,7 +157,7 @@ pub mod attribute {
     use crate::bytecode::Bytecode;
     use crate::classfile::attribute_info::{CodeAttributeInfo, ExceptionTableInfo};
     use crate::classfile::resolved::{Attribute, ConstantPool};
-    use std::io::{Cursor, Error};
+    use std::io::{Cursor};
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct Instruction {
@@ -252,16 +252,16 @@ fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<A
             resolve_string(&constant_info_pool, *name_index)
         }
         ConstantInfo::FieldRef(RefInfo {
-            class_index,
-            name_and_type_index,
+            class_index: _,
+            name_and_type_index: _,
         }) => None,
         ConstantInfo::MethodRef(RefInfo {
-            class_index,
-            name_and_type_index,
+            class_index: _,
+            name_and_type_index: _,
         }) => None,
         ConstantInfo::InterfaceMethodRef(RefInfo {
-            class_index,
-            name_and_type_index,
+            class_index: _,
+            name_and_type_index: _,
         }) => None,
         ConstantInfo::String(StringInfo { string_index }) => {
             resolve_string(&constant_info_pool, *string_index)
@@ -273,8 +273,8 @@ fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<A
         ConstantInfo::NameAndType(_) => None,
         ConstantInfo::Utf8(Utf8Info { string }) => Some(string.clone()),
         ConstantInfo::MethodHandle(MethodHandleInfo {
-            reference_kind,
-            reference_index,
+            reference_kind: _,
+            reference_index: _,
         }) => None,
         ConstantInfo::MethodType(MethodTypeInfo { descriptor_index }) => {
             resolve_string(&constant_info_pool, *descriptor_index)
@@ -290,7 +290,7 @@ fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<A
 }
 
 fn resolve_constant(
-    classfile: &ClassFile,
+    _classfile: &ClassFile,
     cip: &ConstantInfoPool,
     new_constants: &mut HashMap<u16, Constant>,
     slot: u16,
@@ -328,11 +328,11 @@ fn resolve_constant(
             reference_kind: ReferenceKind::from_discriminant(*reference_kind).ok()?,
             reference: Ref::resolve(cip, new_constants, *reference_index).unwrap(),
         }),
-        ConstantInfo::MethodType(MethodTypeInfo { descriptor_index }) => {
+        ConstantInfo::MethodType(MethodTypeInfo { descriptor_index: _ }) => {
             Constant::MethodType(resolve_string(cip, slot)?)
         }
         ConstantInfo::Dynamic(DynamicInfo {
-            bootstrap_method_attr_index,
+            bootstrap_method_attr_index: _,
             name_and_type_index,
         }) => Constant::Dynamic(Dynamic {
             bootstrap_method_attr: (),
@@ -357,7 +357,7 @@ impl ConstantPool {
     pub fn from_constant_info_pool(classfile: &ClassFile, cip: &ConstantInfoPool) -> Option<Self> {
         let mut new_constants = HashMap::new();
 
-        for (index, constant_info) in &cip.constants {
+        for (index, _constant_info) in &cip.constants {
             let constant = resolve_constant(classfile, cip, &mut new_constants, *index)?;
             new_constants.insert(*index, constant);
         }
