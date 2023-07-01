@@ -10,12 +10,12 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-mod classfile;
+pub mod classfile;
 mod tests;
 
-mod bytecode;
+pub mod bytecode;
 pub mod execution;
-mod jit;
+pub mod jit;
 pub mod thread;
 
 #[derive(Clone)]
@@ -36,7 +36,13 @@ pub struct JVMInternal<'jvm> {
     pub heap: Heap,
 }
 
-impl<'jvm> JVMInternal<'jvm> {}
+impl<'jvm> JVMInternal<'jvm> {
+
+    fn jit_method(method: MethodIdentifier) {
+
+    }
+
+}
 
 pub fn get_method_bytecode(jvm: &JVMInternal, identifier: &MethodIdentifier) -> Vec<Instruction> {
     let classes = jvm.classes.read();

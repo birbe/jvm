@@ -6,10 +6,11 @@ use std::collections::{HashMap};
 use std::io::Read;
 use std::mem;
 use std::ops::Range;
-use std::thread::Scope;
 
 
 mod scc;
+pub mod compile;
+pub mod wasm;
 
 pub type Index = usize;
 
@@ -291,19 +292,6 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
 
     }).collect();
 
-    let zipped: Vec<_> = nodes.iter().zip(labeled.iter()).collect();
-
-    // let scopes = create_scopes(&zipped, 0, &scc_s, false);
-
-    let metrics = identify_scopes(&zipped, &scc_s);
-
-    let mut block_ranges = &metrics.blocks[..];
-    let mut loop_ranges = &metrics.loops[..];
-
-    let loop_out = loop_ranges.get(0) == Some(&(0..labeled.len()));
-
-    let scopes = create_scopes(&mut block_ranges, &mut loop_ranges, &labeled, 0..labeled.len(), loop_out);
-
     labeled
 
 }
@@ -403,7 +391,7 @@ fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usi
     }
 }
 
-fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_ranges: &'a mut &'b [Range<usize>], nodes: &[LabeledNode], range: Range<usize>, loop_out: bool) -> Block {
+fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_ranges: &'a mut &'b [Range<usize>], nodes: &[(&ComponentNode, &LabeledNode)], range: Range<usize>, loop_out: bool) -> Block {
     let mut out_nodes = vec![];
     let mut out_blocks = vec![];
 
@@ -421,17 +409,7 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
 
         for scrape_idx in idx..scrape_end {
             let node = &nodes[scrape_idx];
-            match node {
-                LabeledNode::CondensibleNonControlFlow { .. } => {
-                    out_nodes.push(node.clone());
-                }
-                _ => {
-                    if out_nodes.len() > 0 {
-                        out_blocks.push(Block::Nodes(mem::replace(&mut out_nodes, vec![])));
-                    }
-                    out_nodes.push(node.clone());
-                }
-            }
+            out_nodes.push((node.0.clone(), node.1.clone()));
         }
 
         if out_nodes.len() > 0 {
@@ -522,8 +500,8 @@ pub enum LabeledNode {
 }
 
 #[derive(Debug)]
-enum Block {
+pub enum Block {
     Loop(Vec<Block>),
     Normal(Vec<Block>),
-    Nodes(Vec<LabeledNode>)
+    Nodes(Vec<(ComponentNode, LabeledNode)>)
 }

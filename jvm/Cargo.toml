@@ -5,6 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+#[lib]
+#name = "jvm"
+#path = "src/lib.rs"
+#
+#[[bin]]
+#name = "jvm_main"
+#path = "src/main.rs"
+
 [dependencies]
 byteorder = "1.4.3"
 jvm_types = { path = "../jvm_types" }
@@ -14,3 +22,8 @@ discrim = "0.1.1"
 bitflags = "2.3.2"
 parking_lot = "0.12.1"
 cranelift-jit = "0.97.1"
+cranelift = "0.97.1"
+cranelift-module = "0.97.1"
+cranelift-native = "0.97.1"
+wasm-encoder = "0.29.0"
+wasmprinter = "0.2.59"
