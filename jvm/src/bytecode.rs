@@ -26,7 +26,7 @@ pub enum Bytecode {
     Athrow,                              //0xbf
     Baload,                              //0x33
     Bastore,                             //0x54
-    Bipush(u8),                          //0x10
+    Bipush(i8),                          //0x10
     Caload,                              //0x34
     Castore,                             //0x55
     Checkcast(u16),                      //0xc0
@@ -197,7 +197,7 @@ impl Bytecode {
             0xbf => Self::Athrow,
             0x33 => Self::Baload,
             0x54 => Self::Bastore,
-            0x10 => Self::Bipush(reader.read_u8()?),
+            0x10 => Self::Bipush(reader.read_i8()?),
             0x34 => Self::Caload,
             0x55 => Self::Castore,
             0xc0 => Self::Checkcast(reader.read_u16::<BigEndian>()?),

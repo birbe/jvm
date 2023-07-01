@@ -71,6 +71,16 @@ impl Class {
     }
 }
 
+pub enum DescriptorType {
+    Void,
+
+}
+
+pub struct MethodDescriptor {
+    pub args: Vec<DescriptorType>,
+    pub return_type: DescriptorType
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Method {
     pub access_flags: AccessFlags,

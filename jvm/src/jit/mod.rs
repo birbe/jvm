@@ -398,7 +398,7 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
     let mut idx = range.start;
 
     loop {
-        if idx == range.end { break; }
+        if idx >= range.end { break; }
 
         let scrape_end = match (block_ranges.get(0), loop_ranges.get(0)) {
             (None, None) => range.end,
@@ -416,49 +416,56 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
             out_blocks.push(Block::Nodes(mem::replace(&mut out_nodes, vec![])));
         }
 
-        match (block_ranges.get(0).clone(), loop_ranges.get(0).clone()) {
+        match (
+            block_ranges.iter().find(|block_range| range.contains(&block_range.start) && block_range.end <= range.end).cloned(),
+            loop_ranges.iter().find(|block_range| range.contains(&block_range.start) && block_range.end <= range.end).cloned()
+        ) {
             (None, None) => {
                 break;
             },
             (Some(next_block_range_), None) => {
-                *block_ranges = &block_ranges[1..];
-                let filtered_block_ranges: Vec<_> = block_ranges.iter().filter(|r| next_block_range_.contains(&r.start) && next_block_range_.contains(&r.end)).cloned().collect();
-                let filtered_loop_ranges: Vec<_> = loop_ranges.iter().filter(|r| next_block_range_.contains(&r.start) && next_block_range_.contains(&r.end)).cloned().collect();
-                let mut filtered_block_range_slice = &filtered_block_ranges[..];
-                let mut filtered_loop_ranges_slice = &filtered_loop_ranges[..];
+                assert!(next_block_range_.start >= idx, "{}\n{:#?}", idx, block_ranges);
 
-                out_blocks.push(create_scopes(&mut filtered_block_range_slice, &mut filtered_loop_ranges_slice, nodes, next_block_range_.clone(), false));
+                *block_ranges = &block_ranges[1..];
+
+                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_block_range_.clone(), false));
                 idx = next_block_range_.end;
             },
             (None, Some(next_loop_range_)) => {
-                *loop_ranges = &loop_ranges[1..];
-                let filtered_block_ranges: Vec<_> = block_ranges.iter().filter(|r| next_loop_range_.contains(&r.start) && next_loop_range_.contains(&r.end)).cloned().collect();
-                let filtered_loop_ranges: Vec<_> = loop_ranges.iter().filter(|r| next_loop_range_.contains(&r.start) && next_loop_range_.contains(&r.end)).cloned().collect();
-                let mut filtered_block_range_slice = &filtered_block_ranges[..];
-                let mut filtered_loop_ranges_slice = &filtered_loop_ranges[..];
+                assert!(next_loop_range_.start >= idx);
 
-                out_blocks.push(create_scopes(&mut filtered_block_range_slice, &mut filtered_loop_ranges_slice, nodes, next_loop_range_.clone(), true));
+                *loop_ranges = &loop_ranges[1..];
+
+                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_loop_range_.clone(), true));
                 idx = next_loop_range_.end;
             },
             (Some(next_block_range_), Some(next_loop_range_)) => if next_block_range_.start < next_loop_range_.start {
+                assert!(next_block_range_.start >= idx);
+
                 *block_ranges = &block_ranges[1..];
 
-                let filtered_block_ranges: Vec<_> = block_ranges.iter().filter(|r| next_block_range_.contains(&r.start) && next_block_range_.contains(&r.end)).cloned().collect();
-                let filtered_loop_ranges: Vec<_> = loop_ranges.iter().filter(|r| next_block_range_.contains(&r.start) && next_block_range_.contains(&r.end)).cloned().collect();
-                let mut filtered_block_range_slice = &filtered_block_ranges[..];
-                let mut filtered_loop_ranges_slice = &filtered_loop_ranges[..];
-
-                out_blocks.push(create_scopes(&mut filtered_block_range_slice, &mut filtered_loop_ranges_slice, nodes, next_block_range_.clone(), false));
+                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_block_range_.clone(), false));
                 idx = next_block_range_.end;
+            } else if next_block_range_.start == next_loop_range_.start {
+                if next_loop_range_.end > next_block_range_.end {
+                    assert!(next_block_range_.start >= idx);
+
+                    *loop_ranges = &loop_ranges[1..];
+
+                    out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_loop_range_.clone(), true));
+                    idx = next_loop_range_.end;
+                } else {
+                    *block_ranges = &block_ranges[1..];
+
+                    out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_block_range_.clone(), false));
+                    idx = next_block_range_.end;
+                }
             } else {
+                assert!(next_block_range_.start >= idx);
+
                 *loop_ranges = &loop_ranges[1..];
 
-                let filtered_block_ranges: Vec<_> = block_ranges.iter().filter(|r| next_loop_range_.contains(&r.start) && next_loop_range_.contains(&r.end)).cloned().collect();
-                let filtered_loop_ranges: Vec<_> = loop_ranges.iter().filter(|r| next_loop_range_.contains(&r.start) && next_loop_range_.contains(&r.end)).cloned().collect();
-                let mut filtered_block_range_slice = &filtered_block_ranges[..];
-                let mut filtered_loop_ranges_slice = &filtered_loop_ranges[..];
-
-                out_blocks.push(create_scopes(&mut filtered_block_range_slice, &mut filtered_loop_ranges_slice, nodes, next_loop_range_.clone(), true));
+                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_loop_range_.clone(), true));
                 idx = next_loop_range_.end;
             }
         };
