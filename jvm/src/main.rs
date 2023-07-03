@@ -1,51 +1,14 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use wasm_encoder::{CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module, TypeSection, ValType};
 use wasmtime::{Engine, Instance, Store};
 use jvm::classfile::ClassFile;
 use jvm::classfile::resolved::Class;
-use jvm::jit::wasm::new_method;
+use jvm::jit::wasm::{compile_class, compile_method};
+use jvm::{ClassProvider, JVM};
 use jvm_types::JParse;
 
 extern crate jvm;
-
-fn parse_classfile() -> Vec<u8> {
-    let file = include_bytes!("../test_classes/Main.class");
-
-    let class_file = ClassFile::from_bytes(Cursor::new(file)).unwrap();
-
-    let class = Class::init(&class_file).unwrap();
-
-    let mut module = Module::new();
-    let mut type_section = TypeSection::new();
-    let mut function_section = FunctionSection::new();
-    let mut code_section = CodeSection::new();
-
-    let type_index = type_section.len();
-    type_section.function([], [ValType::I32]);
-
-    let func_index = code_section.len();
-
-    new_method(&class.methods[1], &mut module, &mut function_section, &mut code_section, &mut type_section);
-
-    let mut export_section = ExportSection::new();
-
-    export_section.export("java", ExportKind::Func, func_index);
-
-    module.section(&type_section);
-    module.section(&function_section);
-    module.section(&export_section);
-    module.section(&code_section);
-
-    let bytes = module.finish();
-
-    let wat = wasmprinter::print_bytes(&bytes).unwrap();
-
-    println!("{}", wat);
-
-    wasmparser::validate(&bytes).unwrap();
-
-    return bytes;
-}
 
 fn run(wasm: &[u8]) {
     let engine = Engine::default();
@@ -54,12 +17,41 @@ fn run(wasm: &[u8]) {
     let instance = Instance::new(&mut store, &module,&[]).unwrap();
 
     let java_func = instance.get_func(&mut store, "java").unwrap();
-    let func_ref = java_func.typed::<(), i32>(&store).unwrap();
-    let result = func_ref.call(&mut store, ()).unwrap();
+    let func_ref = java_func.typed::<i32, i32>(&store).unwrap();
+    let result = func_ref.call(&mut store, 10).unwrap();
     println!("{}", result);
 }
 
+struct MockClassProvider {
+    pub files: HashMap<String, Vec<u8>>
+}
+
+impl ClassProvider for MockClassProvider {
+
+    fn get_class(&self, classpath: &str) -> Option<Vec<u8>> {
+        self.files.get(classpath).cloned()
+    }
+
+}
+
 fn main() {
-    let wasm = parse_classfile();
-    run(&wasm);
+    let mut files = HashMap::new();
+
+    files.insert("java/lang/Object".to_string(), Vec::from(&include_bytes!("../test_classes/java/lang/Object.class")[..]));
+    files.insert("java/lang/String".to_string(), Vec::from(&include_bytes!("../test_classes/java/lang/Object.class")[..]));
+    files.insert("Main".to_string(), Vec::from(&include_bytes!("../test_classes/Main.class")[..]));
+
+
+    let mock = MockClassProvider {
+        files
+    };
+
+    let jvm = JVM::new(Box::new(mock));
+
+    let class = jvm.load_class("Main").unwrap();
+
+    let module = compile_class(&class);
+
+    let wat = wasmprinter::print_bytes(&module.finish()).unwrap();
+    println!("{}", wat);
 }

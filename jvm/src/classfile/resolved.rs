@@ -14,6 +14,7 @@ use jvm_types::JParse;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
+use crate::JVM;
 
 bitflags! {
 
@@ -44,7 +45,7 @@ bitflags! {
 pub struct Class {
     pub constant_pool: ConstantPool,
     pub this_class: Arc<String>,
-    pub super_class: Arc<String>,
+    pub super_class: Option<Arc<Class>>,
     pub access_flags: AccessFlags,
     // pub interfaces: Vec<Interface>,
     // pub fields: Vec<Field>,
@@ -53,13 +54,19 @@ pub struct Class {
 }
 
 impl Class {
-    pub fn init(classfile: &ClassFile) -> Option<Self> {
+    pub fn init(classfile: &ClassFile, jvm: &JVM) -> Option<Self> {
         let constant_pool =
             ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
 
+        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
+
         Some(Self {
-            this_class: resolve_string(&classfile.constant_pool, classfile.this_class)?,
-            super_class: resolve_string(&classfile.constant_pool, classfile.super_class)?,
+            super_class: if &*this_class != "java/lang/Object" {
+                Some(jvm.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class)?).unwrap())
+            } else {
+                None
+            },
+            this_class,
             access_flags: AccessFlags::from_bits(classfile.access_flags)?,
             methods: classfile
                 .methods
@@ -71,21 +78,106 @@ impl Class {
     }
 }
 
-pub enum DescriptorType {
-    Void,
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub enum FieldType {
+    Array {
+        type_: Box<FieldType>,
+        dimensions: usize
+    },
+    Byte,
+    Char,
+    Double,
+    Float,
+    Int,
+    Long,
+    Short,
+    Boolean,
+    Class(String)
+}
+
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub enum ReturnType {
+    FieldType(FieldType),
+    Void
+}
+
+impl FieldType {
+
+    pub fn from_str(slice: &str) -> (Self, usize) {
+        println!("{}", slice);
+
+        (match &slice[0..1] {
+            "B" => FieldType::Byte,
+            "C" => FieldType::Char,
+            "D" => FieldType::Double,
+            "F" => FieldType::Float,
+            "I" => FieldType::Int,
+            "J" => FieldType::Long,
+            "S" => FieldType::Short,
+            "Z" => FieldType::Boolean,
+            "[" => {
+                let dimensions = slice.rfind("[").unwrap() + 1;
+                let inner = FieldType::from_str(&slice[dimensions..]);
+
+                return (FieldType::Array {
+                    type_: Box::new(inner.0),
+                    dimensions,
+                }, inner.1 + dimensions)
+            }
+            "L" => {
+                let end = slice.find(";").unwrap();
+                return (FieldType::Class(String::from(&slice[1..end])), end);
+            },
+            _ => panic!("Malformed method descriptor")
+        }, 1)
+    }
 
 }
 
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct MethodDescriptor {
-    pub args: Vec<DescriptorType>,
-    pub return_type: DescriptorType
+    pub args: Vec<FieldType>,
+    pub return_type: ReturnType
+}
+
+impl TryFrom<&str> for MethodDescriptor {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let parameters_end = value.find(")").ok_or(())?;
+        let parameters_str = &value[1..parameters_end];
+
+        let mut idx = 0;
+
+        let mut args = vec![];
+
+        loop {
+            if idx >= value.len() { break; }
+
+            let (field_type, length) = FieldType::from_str(&value[idx..]);
+            args.push(field_type);
+            idx += length;
+        }
+
+        idx += 1;
+
+        let return_type = match &value[idx..idx+1] {
+            "V" => ReturnType::Void,
+            _ => ReturnType::FieldType(FieldType::from_str(&value[idx..]).0),
+        };
+
+        Ok(Self {
+            args,
+            return_type,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Method {
     pub access_flags: AccessFlags,
     pub name: Arc<String>,
-    pub descriptor: Arc<String>,
+    pub descriptor: MethodDescriptor,
     pub attributes: HashMap<String, Attribute>,
 }
 
@@ -102,11 +194,10 @@ impl Method {
                 .get(&method_info.name_index)?
                 .as_string()?
                 .clone(),
-            descriptor: constant_pool
+            descriptor: (&**constant_pool
                 .constants
                 .get(&method_info.descriptor_index)?
-                .as_string()?
-                .clone(),
+                .as_string()?)[..].try_into().ok()?,
             attributes: method_info
                 .attributes
                 .iter()
@@ -254,7 +345,7 @@ pub mod attribute {
     }
 }
 
-fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<Arc<String>> {
+pub fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<Arc<String>> {
     let constant = constant_info_pool.constants.get(&index)?;
 
     match constant {

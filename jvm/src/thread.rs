@@ -1,4 +1,4 @@
-use crate::JVMInternal;
+use crate::JVM;
 
 use std::ffi::{CString};
 use std::mem::MaybeUninit;
@@ -55,7 +55,7 @@ impl Thread {
         args_ptr: *const i32,
         frames_length: u64,
         frames_ptr: *mut Frame,
-        _jvm: *mut JVMInternal,
+        _jvm: *mut JVM,
     ) -> i64 {
         let args = std::slice::from_raw_parts(args_ptr, args_length as usize);
         let frames = std::slice::from_raw_parts_mut(

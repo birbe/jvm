@@ -39,3 +39,14 @@ pub struct MethodHandleStore<'jvm> {
     pub methods: Mutex<HashMap<Frame<'jvm>, MethodHandle<'jvm>>>,
     pub cstring_store: HashSet<Pin<CString>>,
 }
+
+impl<'jvm> MethodHandleStore<'jvm> {
+    
+    pub fn new() -> Self {
+        Self {
+            methods: Mutex::new(Default::default()),
+            cstring_store: Default::default(),
+        }
+    }
+    
+}
