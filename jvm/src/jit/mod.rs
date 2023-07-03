@@ -212,18 +212,11 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
 
     edges.sort();
 
+    let mut labels = vec![];
+
     let mut labeled: Vec<LabeledNode> = nodes.iter().map(|node| {
 
         let node_scc = &scc_s[&node.scc];
-
-        if node_scc.len() > 1 && node_scc[0] == node.idx && irreducible.contains_key(&node.scc) { //This node belongs to a loop and it's the first node in said loop and is irreducible
-            
-            return LabeledNode::LoopController {
-                node: node.clone(),
-                targets: vec![], //this is figured out in another pass
-            };
-            
-        }
 
         for &edge in node.edges.iter() {
             let target = &nodes[edge];
@@ -237,6 +230,8 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
 
                 //Jumping to an instruction which is not a loop header but is in a loop
                 return if target_scc.len() > 1 && target_scc[0] != target.idx {
+                    labels.push((target.scc, edge, target_scc[0]));
+
                     LabeledNode::LabeledControlFlow {
                         node: node.clone(),
                         label: target.scc,
@@ -258,6 +253,9 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
                 return if edge < node.idx { //This jumps backwards within its own scc
 
                     //Jumps somewhere that isn't the beginning of the loop
+
+                    labels.push((target.scc, edge, target_scc[0]));
+
                     if target.idx != target_scc[0] {
                         LabeledNode::LabeledControlFlow {
                             node: node.clone(),
@@ -292,6 +290,24 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
 
     }).collect();
 
+    for (scc, target, header) in labels {
+        let swap = match labeled.get_mut(header).unwrap() {
+            LabeledNode::LoopController { node, targets } => {
+                targets.push(target);
+                continue;
+            }
+            LabeledNode::LoopContinue { node, .. }
+            | LabeledNode::LabeledControlFlow { node, .. }
+            | LabeledNode::BlockJump { node, .. }
+            | LabeledNode::CondensibleNonControlFlow { node, .. }
+            | LabeledNode::NonCondensibleNonControlFlow { node, .. } => {
+                LabeledNode::LoopController { node: node.clone(), targets: vec![target] }
+            }
+        };
+
+        *labeled.get_mut(header).unwrap() = swap;
+    }
+
     labeled
 
 }
@@ -300,6 +316,25 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
 struct ScopeMetrics {
     loops: Vec<Range<usize>>,
     blocks: Vec<Range<usize>>
+}
+
+fn recurse_get_earliest_index(block: usize, blocks: &[Range<usize>]) -> usize {
+    let range = &blocks[block];
+
+    let mut lonely_ends: Vec<(usize, &Range<usize>)> = blocks.iter().enumerate().filter(|(idx, other_range)| {
+        if other_range.end <= range.end && other_range.end >= range.start && !range.contains(&other_range.start) {
+            true
+        } else {
+            false
+        }
+    }).collect();
+
+    lonely_ends.sort_by_key(|(_, r)| r.start);
+
+    match lonely_ends.get(0) {
+        None => range.start,
+        Some((idx, _)) => recurse_get_earliest_index(*idx, blocks)
+    }
 }
 
 fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usize, Vec<usize>>) -> ScopeMetrics {
@@ -340,44 +375,13 @@ fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usi
 
     blocks.dedup();
 
-    let mut blocks_out = blocks.clone();
+    for idx in 0..blocks.len() {
+        let earliest = recurse_get_earliest_index(idx, &blocks);
 
-    for (component_node, labeled_node) in nodes {
-        let (start, end) = &match labeled_node {
-            LabeledNode::LabeledControlFlow { label, target, .. } => {
-                if target < label {
-                    (scc_s[label][0], *target)
-                } else {
-                    (component_node.idx, *target)
-                }
-            }
-            LabeledNode::BlockJump { target, .. } => (component_node.idx, *target),
-            _ => continue
-        };
-
-        let mut adjust = Vec::new();
-
-        for (block_index, range) in blocks.iter().enumerate() {
-            if range.contains(start) && !range.contains(end) {
-
-            } else if !range.contains(start) && range.contains(end) {
-                let mut containing_start: Vec<_> = blocks.iter().chain(&loops).chain([range]).filter(|range| range.contains(start)).collect();
-                containing_start.sort_by_key(|r| r.start);
-
-                let lowest_containg_start = containing_start[0].clone().start;
-
-                let mut containing_end: Vec<_> = blocks.iter().enumerate().filter(|(idx, range)| range.contains(end)).collect();
-
-                adjust.extend(containing_end.iter().map(|(index, _)| (*index, lowest_containg_start)));
-            }
-        }
-
-        for (to_adjust, start) in adjust.iter() {
-            blocks_out[*to_adjust].start = *start;
-        }
+        blocks[idx].start = earliest;
     }
 
-    blocks_out.sort_by(|a, b| {
+    blocks.sort_by(|a, b| {
         if a.start == b.start {
             a.end.cmp(&b.end).reverse()
         } else {
@@ -387,7 +391,7 @@ fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usi
 
     ScopeMetrics {
         loops,
-        blocks: blocks_out,
+        blocks,
     }
 }
 
@@ -443,7 +447,7 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
                 break;
             },
             (Some(next_block_range_), None) => {
-                assert!(next_block_range_.start >= idx, "{}\n{:#?}", idx, block_ranges);
+                assert!(next_block_range_.start >= idx, "{}\n{:#?}\n{:?}", idx, block_ranges, next_block_range_);
 
                 *block_ranges = &block_ranges[1..];
 

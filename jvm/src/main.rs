@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Instant;
 use parking_lot::RwLock;
 use wasm_encoder::{CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module, TypeSection, ValType};
 use wasmtime::{Engine, Instance, Store};
@@ -19,19 +20,21 @@ fn run(wasm: &[u8]) {
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module,&[]).unwrap();
 
-    let approximate_sqrt = instance.get_func(&mut store, "approximate_sqrt").unwrap();
-    let approximate_sqrt = approximate_sqrt.typed::<i32, i32>(&store).unwrap();
-
-    let lcm = instance.get_func(&mut store, "lcm").unwrap();
-    let lcm = lcm.typed::<(i32, i32), i32>(&store).unwrap();
-
-    let input = 10;
-    let result = approximate_sqrt.call(&mut store, input).unwrap();
-    println!("approximate_sqrt({}) = {}", input, result);
-
-    let input = (4892, 50000);
-    let result = lcm.call(&mut store, input).unwrap();
-    println!("lcm({}, {}) = {}", input.0, input.1, result);
+    // let approximate_sqrt = instance.get_func(&mut store, "approximate_sqrt").unwrap();
+    // let approximate_sqrt = approximate_sqrt.typed::<i32, i32>(&store).unwrap();
+    //
+    // let lcm = instance.get_func(&mut store, "lcm").unwrap();
+    // let lcm = lcm.typed::<(i32, i32), i32>(&store).unwrap();
+    //
+    // let input = 1_300_000_000;
+    // let now = Instant::now();
+    // let result = approximate_sqrt.call(&mut store, input).unwrap();
+    // println!("time to execute: {}microseconds approximate_sqrt({}) = {}", Instant::now().duration_since(now).as_micros(), input, result);
+    //
+    // let input = (4892, 50000);
+    // let now = Instant::now();
+    // let result = lcm.call(&mut store, input).unwrap();
+    // println!("time to execute: {}microseconds lcm({}, {}) = {}", Instant::now().duration_since(now).as_micros(), input.0, input.1, result);
 }
 
 #[derive(Debug)]
@@ -70,7 +73,6 @@ fn main() {
     files.insert("java/lang/String".to_string(), Vec::from(&include_bytes!("../test_classes/java/lang/Object.class")[..]));
     files.insert("Main".to_string(), Vec::from(&include_bytes!("../test_classes/Main.class")[..]));
 
-
     let mock = NativeClassLoader {
         files,
         classes: Default::default(),
@@ -84,11 +86,15 @@ fn main() {
 
     let class = mock.find_class("Main", &jvm).unwrap();
 
+    let now = Instant::now();
     let compiled = compile_class(&class, &jvm);
+    println!("{} microseconds to compile class", Instant::now().duration_since(now).as_micros());
+
     let wasm = compiled.module.finish();
 
     let wat = wasmprinter::print_bytes(&wasm).unwrap();
-    println!("{}", wat);
+
+    println!("{wat}");
 
     wasmparser::validate(&wasm).unwrap();
 
