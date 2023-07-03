@@ -1,29 +1,32 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use wasm_encoder::{BlockType, CodeSection, Function, FunctionSection, Instruction, MemArg, Module, RefType, TableSection, TableType, TypeSection, ValType};
+use bitflags::Flags;
+use wasm_encoder::{BlockType, CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, MemArg, Module, RefType, TableSection, TableType, TypeSection, ValType};
 use wasm_encoder::Instruction::Br;
 use wasmparser::StorageType::Val;
 use crate::bytecode::Bytecode;
-use crate::classfile::resolved::{Attribute, attribute, Class, Constant, Method, Ref, resolve_string, ReturnType};
+use crate::classfile::resolved::{AccessFlags, Attribute, attribute, Class, Constant, Method, Ref, resolve_string, ReturnType};
 use crate::classfile::resolved::attribute::Code;
 use crate::jit::{Block, ComponentNode, create_scopes, find_loops, identify_scopes, label_nodes, LabeledNode, ScopeMetrics};
+use crate::JVM;
 
 pub const POINTER_SIZE: i32 = 4;
 pub const POINTER_TYPE: ValType = ValType::I32;
 
-pub fn compile_class(class: &Class) -> Module {
-    let mut module = Module::new();
+pub struct CompiledClass {
+    pub module: Module,
+    pub link: HashMap<Arc<Ref>, u32>
+}
 
-    let method_func_map = class.methods.iter().enumerate().map(|(index, method)| {
-        ((*method.name).clone(), index)
-    }).collect::<HashMap<_, _>>();
+pub fn compile_class(class: &Class, jvm: &JVM) -> CompiledClass {
+    let mut module = Module::new();
 
     let mut function_section = FunctionSection::new();
     let mut type_section = TypeSection::new();
     let mut code_section = CodeSection::new();
     let mut table = TableSection::new();
 
-    let external_references: HashMap<Arc<Ref>, usize> = class.constant_pool.constants.iter().filter_map(|(idx, constant)| {
+    let external_references: HashMap<Arc<Ref>, u32> = class.constant_pool.constants.iter().filter_map(|(idx, constant)| {
         match constant {
             Constant::MethodRef(ref_)
             | Constant::InterfaceMethodRef(ref_) => {
@@ -35,7 +38,7 @@ pub fn compile_class(class: &Class) -> Module {
             }
             _ => None
         }
-    }).enumerate().map(|(a, b)| (b, a)).collect();
+    }).enumerate().map(|(a, b)| (b, a as u32)).collect();
     
     let mut table_type = TableType {
         element_type: RefType::FUNCREF,
@@ -44,20 +47,49 @@ pub fn compile_class(class: &Class) -> Module {
     };
     
     table.table(table_type);
-    module.section(&table);
 
     let method_func_idx_map: HashMap<&str, usize> = class.methods.iter().enumerate().map(|(index, method)| (&method.name[..], index)).collect();
 
+    let mut export_section = ExportSection::new();
+
     for method in &class.methods {
-        compile_method(method, class, &mut function_section, &mut code_section, &mut type_section, &method_func_idx_map);
+        export_section.export(&method.name, ExportKind::Func, function_section.len());
+        compile_method(method, class, &mut function_section, &mut code_section, &mut type_section, &method_func_idx_map, jvm, &external_references);
     }
-    
-    module
+
+    module.section(&type_section);
+    module.section(&function_section);
+    module.section(&table);
+    module.section(&export_section);
+    module.section(&code_section);
+
+    CompiledClass {
+        module,
+        link: external_references
+    }
 }
 
-pub fn compile_method(method: &Method, class: &Class, function_section: &mut FunctionSection, code_section: &mut CodeSection, type_section: &mut TypeSection, method_func_idx_map: &HashMap<&str, usize>) {
+fn get_method_params(method: &Method) -> (Vec<ValType>, Vec<ValType>) {
+    let mut params: Vec<ValType> = (0..method.descriptor.args.len()).map(|_| ValType::I32).collect();
+
+    if !method.access_flags.contains(AccessFlags::STATIC) {
+        params.push(ValType::I32);
+    }
+
+    let result = if matches!(method.descriptor.return_type, ReturnType::Void) {
+        vec![]
+    } else {
+        vec![ValType::I32]
+    };
+
+    (params, result)
+}
+
+pub fn compile_method(method: &Method, class: &Class, function_section: &mut FunctionSection, code_section: &mut CodeSection, type_section: &mut TypeSection, method_func_idx_map: &HashMap<&str, usize>, jvm: &JVM, external_references: &HashMap<Arc<Ref>, u32>) {
+    let (params, results) = get_method_params(method);
+
     let (code, mut locals): (&Code, Vec<_>) = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
-        (code, (0..code.max_locals).map(|i| (i as u32, ValType::I32)).collect::<Vec<_>>())
+        (code, (0..code.max_locals-(params.len() as u16)).map(|i| (i as u32, ValType::I32)).collect::<Vec<_>>())
     } else {
         unreachable!()
     };
@@ -87,19 +119,13 @@ pub fn compile_method(method: &Method, class: &Class, function_section: &mut Fun
 
     let mut function = Function::new(locals);
 
-    translate_block(&block, &mut function, &code.instructions, helper_start, &metrics, &byte_index_to_instruction_index, &scc_s, type_section, true, method_func_idx_map, class);
+    translate_block(&block, &mut function, &code.instructions, helper_start, &metrics, &byte_index_to_instruction_index, &scc_s, type_section, true, method_func_idx_map, class, jvm, external_references);
 
     function.instruction(&Instruction::End);
 
     function_section.function(type_section.len());
 
-    let params = (0..method.descriptor.args.len()).map(|_| ValType::I32);
-
-    type_section.function(params, if matches!(method.descriptor.return_type, ReturnType::Void) {
-        vec![]
-    } else {
-        vec![ValType::I32]
-    });
+    type_section.function(params, results);
 
     code_section.function(&function);
 }
@@ -109,10 +135,12 @@ fn get_jump_offset(scope_metrics: &ScopeMetrics, start: usize, target: usize) ->
     let end = start.max(target);
 
     if start < target {
-        let starts: u32 = scope_metrics.blocks.iter().filter(|range| range.start > begin && range.start <= end).map(|_| 1).sum();
-        let ends: u32 = scope_metrics.blocks.iter().filter(|range| range.end >= begin && range.end <= end).map(|_| 1).sum();
+        let starts: i32 = scope_metrics.blocks.iter().filter(|range| range.start > begin && range.start < end).map(|_| 1).sum();
+        let ends: i32 = scope_metrics.blocks.iter().filter(|range| range.end > begin && range.end <= end).map(|_| 1).sum();
 
-        ends - starts
+        let scope = ends - starts - 1;
+        assert!(scope >= 0);
+        scope as u32
     } else {
         let starts: u32 = scope_metrics.blocks.iter().filter(|range| range.start >= begin && range.start <= end).map(|_| 1).sum();
         let ends: u32 = scope_metrics.blocks.iter().filter(|range| range.end >= begin && range.end <= end).map(|_| 1).sum();
@@ -144,13 +172,13 @@ fn get_block_type_signature(block: &Block, instructions: &[attribute::Instructio
                 | Bytecode::If_icmplt(_)
                 | Bytecode::If_icmpge(_)
                 | Bytecode::If_icmpgt(_)
-                | Bytecode::If_icmple(_)
+                | Bytecode::If_icmple(_) => vec![ValType::I32, ValType::I32],
                 | Bytecode::Ifeq(_)
                 | Bytecode::Ifne(_)
                 | Bytecode::Iflt(_)
                 | Bytecode::Ifge(_)
                 | Bytecode::Ifgt(_)
-                | Bytecode::Ifle(_) => vec![ValType::I32, ValType::I32],
+                | Bytecode::Ifle(_) => vec![ValType::I32],
                 Bytecode::Ifnonnull(_)
                 | Bytecode::Ifnull(_) => vec![POINTER_TYPE],
                 _ => vec![]
@@ -160,14 +188,14 @@ fn get_block_type_signature(block: &Block, instructions: &[attribute::Instructio
 
 }
 
-fn translate_block(block: &Block, function: &mut Function, instructions: &[attribute::Instruction], helper_start: u32, scope_metrics: &ScopeMetrics, byte_to_idx_map: &HashMap<u32, u32>, scc_s: &HashMap<usize, Vec<usize>>, type_section: &mut TypeSection, skip: bool, method_func_idx_map: &HashMap<&str, usize>, class: &Class) {
+fn translate_block(block: &Block, function: &mut Function, instructions: &[attribute::Instruction], helper_start: u32, scope_metrics: &ScopeMetrics, byte_to_idx_map: &HashMap<u32, u32>, scc_s: &HashMap<usize, Vec<usize>>, type_section: &mut TypeSection, skip: bool, method_func_idx_map: &HashMap<&str, usize>, class: &Class, jvm: &JVM, external_references: &HashMap<Arc<Ref>, u32>) {
 
     match block {
         Block::Loop(blocks) => {
             function.instruction(&Instruction::Loop(BlockType::Empty));
 
             for block in blocks {
-                translate_block(block, function, instructions, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class);
+                translate_block(block, function, instructions, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references);
             }
 
             function.instruction(&Instruction::End);
@@ -188,7 +216,7 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
             type_section.function(types, []);
 
             for block in blocks {
-                translate_block(block, function, instructions, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class);
+                translate_block(block, function, instructions, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references);
             }
 
             if !skip {
@@ -295,6 +323,32 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                         function.instruction(&Instruction::I32Ne);
                         function.instruction(&Instruction::BrIf(jump));
                     },
+                    Bytecode::If_icmple(offset) => {
+                        let target = (byte_index as isize + *offset as isize) as usize;
+                        let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+
+                        if target_idx as usize == idx + 1 {
+                            continue;
+                        }
+
+                        let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+
+                        function.instruction(&Instruction::I32LeS);
+                        function.instruction(&Instruction::BrIf(jump));
+                    },
+                    Bytecode::If_icmpgt(offset) => {
+                        let target = (byte_index as isize + *offset as isize) as usize;
+                        let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+
+                        if target_idx as usize == idx + 1 {
+                            continue;
+                        }
+
+                        let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+
+                        function.instruction(&Instruction::I32GtS);
+                        function.instruction(&Instruction::BrIf(jump));
+                    },
                     Bytecode::If_icmpge(offset) => {
                         let target = (byte_index as isize + *offset as isize) as usize;
                         let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
@@ -318,9 +372,46 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
 
                         let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
 
-                        function.instruction(&Instruction::I32Eq);
+                        function.instruction(&Instruction::I32Eqz);
                         function.instruction(&Instruction::BrIf(jump));
                     },
+                    Bytecode::Ifne(offset) => {
+                        let target = (byte_index as isize + *offset as isize) as usize;
+                        let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+
+                        if target_idx as usize == idx + 1 {
+                            continue;
+                        }
+
+                        let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+
+                        function.instruction(&Instruction::I32Const(0));
+                        function.instruction(&Instruction::I32Ne);
+                        function.instruction(&Instruction::BrIf(jump));
+                    },
+                    Bytecode::Irem => {
+                        function.instruction(&Instruction::I32RemS);
+                    }
+                    Bytecode::Ifge(offset) => {
+                        let target = (byte_index as isize + *offset as isize) as usize;
+                        let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+
+                        if target_idx as usize == idx + 1 {
+                            continue;
+                        }
+
+                        let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+
+                        function.instruction(&Instruction::I32Const(0));
+                        function.instruction(&Instruction::I32GeS);
+                        function.instruction(&Instruction::BrIf(jump));
+                    },
+                    Bytecode::Ineg => {
+                        function.instruction(&Instruction::I32Const(i32::MAX));
+                        function.instruction(&Instruction::I32Xor);
+                        function.instruction(&Instruction::I32Const(1));
+                        function.instruction(&Instruction::I32Add);
+                    }
                     Bytecode::Iadd => {
                         function.instruction(&Instruction::I32Add);
                     },
@@ -351,7 +442,18 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                         match constant {
                             Constant::MethodRef(method) => {
                                 if method.class != class.this_class {
-                                    todo!()
+                                    let idx = external_references[method];
+                                    function.instruction(&Instruction::I32Const(idx as i32));
+                                    function.instruction(&Instruction::CallIndirect {
+                                        ty: type_section.len(),
+                                        table: 0,
+                                    });
+
+                                    let other_class = class.class_loader.find_class(&method.class, jvm).unwrap();
+                                    let other_method = other_class.get_method(&method.name_and_type).unwrap();
+
+                                    let types = get_method_params(other_method);
+                                    type_section.function(types.0, types.1);
                                 } else {
                                     let idx = *method_func_idx_map.get(&method.name_and_type.name[..]).unwrap() as u32;
 
@@ -363,6 +465,35 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                         }
                     },
                     Bytecode::Invokespecial(constant_pool) => {
+                        let constant = class.constant_pool.constants.get(constant_pool).unwrap();
+                        let method_ref = match constant {
+                            Constant::MethodRef(method)
+                            | Constant::InterfaceMethodRef(method) => method,
+                            _ => unreachable!()
+                        };
+
+                        let idx = external_references[method_ref];
+                        function.instruction(&Instruction::I32Const(idx as i32));
+                        function.instruction(&Instruction::CallIndirect {
+                            ty: type_section.len(),
+                            table: 0,
+                        });
+
+                        let other_class = class.class_loader.find_class(&method_ref.class, jvm).unwrap();
+                        let other_method = other_class.get_method(&method_ref.name_and_type).unwrap();
+
+                        let types = get_method_params(other_method);
+                        type_section.function(types.0, types.1);
+
+                        // let named_class = class.class_loader.find_class(&*method_ref.class, jvm).unwrap();
+                        // let method = class.get_method(&method_ref.name_and_type).unwrap();
+                        //
+                        // let c = if !method.is_instance_initialization(&*class.this_class, &*class.class_loader, &jvm) && !named_class.access_flags.contains(AccessFlags::INTERFACE) && JVM::is_subclass(class, &named_class) && named_class.access_flags.contains(AccessFlags::SUPER) {
+                        //     class.super_class.as_ref().unwrap()
+                        // } else {
+                        //     &named_class
+                        // };
+
 
                     }
                     Bytecode::Return

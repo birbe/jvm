@@ -14,7 +14,8 @@ use jvm_types::JParse;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
-use crate::JVM;
+use indexmap::IndexMap;
+use crate::{ClassLoader, JVM};
 
 bitflags! {
 
@@ -50,11 +51,12 @@ pub struct Class {
     // pub interfaces: Vec<Interface>,
     // pub fields: Vec<Field>,
     pub methods: Vec<Method>,
+    pub class_loader: Arc<dyn ClassLoader>
     // pub attributes: Vec<Attribute>
 }
 
 impl Class {
-    pub fn init(classfile: &ClassFile, jvm: &JVM) -> Option<Self> {
+    pub fn init(classfile: &ClassFile, jvm: &JVM, class_loader: Arc<dyn ClassLoader>) -> Option<Self> {
         let constant_pool =
             ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
 
@@ -62,7 +64,7 @@ impl Class {
 
         Some(Self {
             super_class: if &*this_class != "java/lang/Object" {
-                Some(jvm.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class)?).unwrap())
+                Some(class_loader.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class)?, jvm).unwrap())
             } else {
                 None
             },
@@ -71,11 +73,19 @@ impl Class {
             methods: classfile
                 .methods
                 .iter()
-                .map(|method_info| Method::new(method_info, &constant_pool, classfile))
+                .map(|method_info| {
+                    Method::new(method_info, &constant_pool, classfile)
+                })
                 .collect::<Option<Vec<Method>>>()?,
             constant_pool,
+            class_loader
         })
     }
+
+    pub fn get_method(&self, name_and_type: &NameAndType) -> Option<&Method> {
+        self.methods.iter().find(|method| method.name == name_and_type.name && method.descriptor.string == *name_and_type.descriptor)
+    }
+
 }
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
@@ -104,8 +114,6 @@ pub enum ReturnType {
 impl FieldType {
 
     pub fn from_str(slice: &str) -> (Self, usize) {
-        println!("{}", slice);
-
         (match &slice[0..1] {
             "B" => FieldType::Byte,
             "C" => FieldType::Char,
@@ -126,7 +134,7 @@ impl FieldType {
             }
             "L" => {
                 let end = slice.find(";").unwrap();
-                return (FieldType::Class(String::from(&slice[1..end])), end);
+                return (FieldType::Class(String::from(&slice[1..end])), end+1);
             },
             _ => panic!("Malformed method descriptor")
         }, 1)
@@ -134,10 +142,11 @@ impl FieldType {
 
 }
 
-#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct MethodDescriptor {
     pub args: Vec<FieldType>,
-    pub return_type: ReturnType
+    pub return_type: ReturnType,
+    pub string: String
 }
 
 impl TryFrom<&str> for MethodDescriptor {
@@ -147,12 +156,12 @@ impl TryFrom<&str> for MethodDescriptor {
         let parameters_end = value.find(")").ok_or(())?;
         let parameters_str = &value[1..parameters_end];
 
-        let mut idx = 0;
+        let mut idx = 1;
 
         let mut args = vec![];
 
         loop {
-            if idx >= value.len() { break; }
+            if idx == parameters_end { break; }
 
             let (field_type, length) = FieldType::from_str(&value[idx..]);
             args.push(field_type);
@@ -169,6 +178,7 @@ impl TryFrom<&str> for MethodDescriptor {
         Ok(Self {
             args,
             return_type,
+            string: value.to_string(),
         })
     }
 }
@@ -211,6 +221,12 @@ impl Method {
                 })
                 .collect::<Option<HashMap<String, Attribute>>>()?,
         })
+    }
+
+    pub fn is_instance_initialization(&self, classpath: &str, class_loader: &dyn ClassLoader, jvm: &JVM) -> bool {
+        !class_loader.find_class(classpath, jvm).unwrap().access_flags.contains(AccessFlags::INTERFACE)
+            && &*self.name == "<init>"
+            && self.descriptor.return_type == ReturnType::Void
     }
 }
 

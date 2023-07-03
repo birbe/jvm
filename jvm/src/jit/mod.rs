@@ -398,9 +398,28 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
     let mut idx = range.start;
 
     loop {
-        if idx >= range.end { break; }
+        assert!(idx <= range.end);
+        if idx == range.end { break; }
 
-        let scrape_end = match (block_ranges.get(0), loop_ranges.get(0)) {
+        let next_block_range = match block_ranges.get(0) {
+            None => None,
+            Some(other) => if !range.contains(&other.start) || other.end > range.end {
+                None
+            } else {
+                Some(other)
+            }
+        };
+
+        let next_loop_range = match loop_ranges.get(0) {
+            None => None,
+            Some(other) => if !range.contains(&other.start) || other.end > range.end {
+                None
+            } else {
+                Some(other)
+            }
+        };
+
+        let scrape_end = match (next_block_range, next_loop_range) {
             (None, None) => range.end,
             (Some(next_block_range), None) => next_block_range.start,
             (None, Some(next_loop_range)) => next_loop_range.start,
