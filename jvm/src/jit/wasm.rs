@@ -109,8 +109,6 @@ pub fn compile_method(method: &Method, class: &Class, function_section: &mut Fun
 
     let labeled = label_nodes(&loops, &nodes, &scc_s);
 
-    dbg!(&labeled);
-
     let zipped: Vec<_> = nodes.iter().zip(labeled.iter()).collect();
 
     let metrics = identify_scopes(&zipped, &scc_s);
@@ -147,10 +145,7 @@ fn get_jump_offset(scope_metrics: &ScopeMetrics, start: usize, target: usize, bl
         let starts: i32 = scope_metrics.blocks.iter().chain(scope_metrics.loops.iter()).filter(|range| range.start > begin && jump_range.contains(&range.end)).map(|_| 1).sum();
         let ends: i32 = scope_metrics.blocks.iter().chain(scope_metrics.loops.iter()).filter(|range| jump_range.contains(&range.end)).map(|_| 1).sum();
 
-        dbg!(starts, ends, start, target);
-
         let scope = (ends - starts) - 1;
-        // assert!(scope >= 0 && (start == 4 && target == 9), "{:?}", scope_metrics);
         assert!(scope >= 0, "{:?}", scope_metrics);
         scope as u32
     } else {
