@@ -1,6 +1,8 @@
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, format, Formatter};
+use std::fs;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use parking_lot::RwLock;
@@ -9,7 +11,9 @@ use wasmtime::{Engine, Instance, Store};
 use jvm::classfile::ClassFile;
 use jvm::classfile::resolved::Class;
 use jvm::jit::wasm::{compile_class, compile_method};
-use jvm::{ClassLoader, ClassLoadError, JVM};
+use jvm::{ClassLoadError, JVM};
+use jvm::linker::ClassLoader;
+use jvm::thread::{Thread, ThreadHandle};
 use jvm_types::JParse;
 
 extern crate jvm;
@@ -20,45 +24,25 @@ fn run(wasm: &[u8]) {
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module,&[]).unwrap();
 
-    let cfg_stress = instance.get_func(&mut store, "cfg_stress").unwrap();
-    let cfg_stress = cfg_stress.typed::<(), i32>(&store).unwrap();
-
-    let now = Instant::now();
-    let result = cfg_stress.call(&mut store, ()).unwrap();
-    println!("time to execute: {}microseconds cfg_stress() = {}", Instant::now().duration_since(now).as_micros(), result);
-
-    // let approximate_sqrt = instance.get_func(&mut store, "approximate_sqrt").unwrap();
-    // let approximate_sqrt = approximate_sqrt.typed::<i32, i32>(&store).unwrap();
-    //
-    // let lcm = instance.get_func(&mut store, "lcm").unwrap();
-    // let lcm = lcm.typed::<(i32, i32), i32>(&store).unwrap();
-    //
-    // let input = 1_300_000_000;
-    // let now = Instant::now();
-    // let result = approximate_sqrt.call(&mut store, input).unwrap();
-    // println!("time to execute: {}microseconds approximate_sqrt({}) = {}", Instant::now().duration_since(now).as_micros(), input, result);
-    //
-    // let input = (4892, 50000);
-    // let now = Instant::now();
-    // let result = lcm.call(&mut store, input).unwrap();
-    // println!("time to execute: {}microseconds lcm({}, {}) = {}", Instant::now().duration_since(now).as_micros(), input.0, input.1, result);
+    let main_func = instance.get_func(&mut store, "main").unwrap();
+    let main = main_func.typed::<i32, ()>(&store).unwrap();
+    // main.call(&mut store, 0);
 }
 
 #[derive(Debug)]
 struct NativeClassLoader {
-    pub files: HashMap<String, Vec<u8>>,
     pub classes: RwLock<HashMap<String, Arc<Class>>>,
     pub this: RwLock<Option<Arc<NativeClassLoader>>>
 }
 
 impl ClassLoader for NativeClassLoader {
-    fn get_class(&self, classpath: &str, jvm: &JVM) -> Option<Arc<Class>> {
+    fn get_class(&self, classpath: &str) -> Option<Arc<Class>> {
         let classes = self.classes.read();
         classes.get(classpath).cloned()
     }
 
     fn find_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError> {
-        let get = self.get_class(classpath, jvm);
+        let get = self.get_class(classpath);
         match get {
             None => self.generate_class(classpath, jvm),
             Some(get) => Ok(get)
@@ -66,22 +50,24 @@ impl ClassLoader for NativeClassLoader {
     }
 
     fn generate_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError> {
-        let bytes = self.files.get(classpath).unwrap();
+        let mut path = PathBuf::new();
+        path.push("./jvm/test_classes");
+        path.push(format!("{classpath}.class"));
+
+        let bytes = fs::read(path).map_err(|_| ClassLoadError::ClassDefNotFound(classpath.into()))?;
+
         let this = self.this.read();
         let this = (*this).as_ref().unwrap().clone();
         jvm.generate_class(&bytes, this)
     }
+
+    fn id(&self) -> usize {
+        0
+    }
 }
 
 fn main() {
-    let mut files = HashMap::new();
-
-    files.insert("java/lang/Object".to_string(), Vec::from(&include_bytes!("../test_classes/java/lang/Object.class")[..]));
-    files.insert("java/lang/String".to_string(), Vec::from(&include_bytes!("../test_classes/java/lang/Object.class")[..]));
-    files.insert("Main".to_string(), Vec::from(&include_bytes!("../test_classes/Main.class")[..]));
-
     let mock = NativeClassLoader {
-        files,
         classes: Default::default(),
         this: RwLock::new(None),
     };
@@ -90,7 +76,7 @@ fn main() {
     *mock.this.write() = Some(mock.clone());
 
     let jvm = JVM::new(mock.clone() as Arc<dyn ClassLoader>);
-
+    
     let class = mock.find_class("Main", &jvm).unwrap();
 
     let now = Instant::now();

@@ -1,10 +1,12 @@
+#![feature(slice_ptr_get)]
+#![feature(slice_ptr_len)]
 extern crate core;
 
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::classfile::resolved::{Attribute, Class, Method, Ref};
-use crate::execution::MethodHandleStore;
-use crate::thread::{MethodIdentifier, Thread};
+use crate::execution::{MethodHandle};
+use crate::thread::{Thread, ThreadHandle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -14,6 +16,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use jvm_types::JParse;
+use linker::ClassLoader;
 use crate::classfile::{ClassFile, ConstantInfo};
 
 pub mod classfile;
@@ -23,6 +26,7 @@ pub mod bytecode;
 pub mod execution;
 pub mod jit;
 pub mod thread;
+pub mod linker;
 
 pub struct Heap {
     pub data: Pin<Box<[u8]>>,
@@ -38,16 +42,6 @@ impl Heap {
     
 }
 
-pub trait ClassLoader: Send + Sync + Debug {
-
-    fn get_class(&self, classpath: &str, jvm: &JVM) -> Option<Arc<Class>>;
-
-    fn find_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError>;
-
-    fn generate_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError>;
-
-}
-
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {
     ClassDefNotFound(String),
@@ -60,28 +54,30 @@ pub enum RuntimeError {
     ClassLoadError(ClassLoadError)
 }
 
-pub struct JVM<'jvm> {
-    pub phantom: PhantomData<&'jvm ()>,
-    pub stdout: Mutex<Box<dyn Write>>,
-    pub threads: RwLock<Vec<Thread>>,
-    pub method_handles: MethodHandleStore<'jvm>,
-    pub classes: RwLock<HashMap<String, Arc<Class>>>,
-    pub heap: Heap,
-    pub main_class_loader: Arc<dyn ClassLoader>
+pub struct ClassLoaderStore {
+    pub loader: Arc<dyn ClassLoader>,
+    pub method_refs: RwLock<HashMap<Ref, MethodHandle>>
 }
 
-impl<'jvm> JVM<'jvm> {
+pub struct JVM {
+    pub stdout: Mutex<Box<dyn Write>>,
+    pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
+    pub heap: Heap,
+    pub class_loaders: RwLock<Vec<ClassLoaderStore>>,
+}
 
-    pub fn new(class_loader: Arc<dyn ClassLoader>) -> Self {
-        Self {
-            phantom: PhantomData::default(),
+impl JVM {
+
+    pub fn new(class_loader: Arc<dyn ClassLoader>) -> Arc<Self> {
+        Arc::new(Self {
             stdout: Mutex::new(Box::new(Cursor::new(vec![]))),
             threads: Default::default(),
-            method_handles: MethodHandleStore::new(),
-            classes: Default::default(),
             heap: Heap::new(),
-            main_class_loader: class_loader,
-        }
+            class_loaders: RwLock::new(vec![ClassLoaderStore {
+                loader: class_loader,
+                method_refs: RwLock::new(HashMap::new()),
+            }]),
+        })
     }
 
     ///This is not an instanceof check. This returns if the provided child class is specifically *below* the parent class in the inheritance graph.
@@ -114,33 +110,36 @@ impl<'jvm> JVM<'jvm> {
         Ok(class)
     }
 
-}
+    pub fn create_thread(self: &Arc<JVM>, class_loader: Arc<dyn ClassLoader>) -> ThreadHandle {
+        let thread = Arc::new(Mutex::new(Thread {
+            jvm: self.clone(),
+            class_loader,
+            killed: false,
+        }));
 
-pub fn get_method_bytecode(jvm: &JVM, identifier: &MethodIdentifier) -> Vec<Instruction> {
-    let classes = jvm.classes.read();
-    let class = classes.get(identifier.class.to_str().unwrap()).unwrap();
+        let mut threads = self.threads.write();
+        threads.push(thread.clone());
 
-    let method = class
-        .methods
-        .iter()
-        .find(|method| *method.name == identifier.method.to_str().unwrap())
-        .unwrap();
+        std::mem::forget(thread.lock());
 
-    let code = method.attributes.get("Code").unwrap();
-
-    if let Attribute::Code(code) = code {
-        code.instructions.clone()
-    } else {
-        unreachable!()
+        ThreadHandle {
+            thread: thread.data_ptr(),
+            guard: thread
+        }
     }
+
 }
 
-#[repr(C)]
-//Some of these functions are only designated for usage in Rust. If this is the case, they're marked as such
-pub struct JVMPtrs<'jvm> {
-    pub jvm: *mut JVM<'jvm>,
-    //Rust only
-    pub get_method_bytecode: fn(*mut JVM, MethodIdentifier) -> (Vec<Bytecode>, Vec<u8>),
+pub struct JVMWrapper {
+
+}
+
+impl Drop for JVM {
+
+    fn drop(&mut self) {
+
+    }
+
 }
 
 pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Arc<Ref>) {

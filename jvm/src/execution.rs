@@ -1,52 +1,43 @@
-use crate::thread::{Frame, FrameStore};
+use crate::thread::{RawFrame, FrameStore, Thread};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use crate::classfile::resolved::Ref;
 
-pub type ABIHandlePtr = dyn Fn(u64, *const i32, *mut Frame) -> i64;
+pub type ABIHandlePtr = unsafe extern "C" fn(*mut FrameStore, thread: *mut Thread) -> i64;
 
-pub enum ExecutionContext<'jvm> {
+pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
-    Interpret(Frame<'jvm>),
+    Interpret(RawFrame),
     JIT,
 }
 
-pub struct MethodHandle<'jvm> {
-    pub ptr: unsafe fn(u64, *const i32, *mut Frame) -> i64,
-    pub context: ExecutionContext<'jvm>,
+pub struct MethodHandle {
+    pub ptr: ABIHandlePtr,
+    pub context: ExecutionContext,
+    pub method_ref: Arc<Ref>,
+    pub stack_size: usize
 }
 
-impl<'jvm> MethodHandle<'jvm> {
-    pub unsafe fn execute(&self, args: &[i32], frame_store: &mut FrameStore<'jvm>) -> i64 {
-        match self.context {
-            ExecutionContext::Interpret(frame) => frame_store.push(Frame {
-                method_identifier: frame.method_identifier,
-                program_counter: 0,
-            }),
+impl MethodHandle {
+    pub fn invoke(&self, args: &[i32], frame_store: &mut FrameStore, thread: &mut Thread) -> i64 {
+        match &self.context {
+            ExecutionContext::Interpret(frame) => frame_store.push(
+                RawFrame::new(
+                    &self.method_ref,
+                    Vec::from(args).into_boxed_slice(),
+                    vec![0; self.stack_size].into_boxed_slice()
+                )
+            ),
             ExecutionContext::JIT => {}
         }
 
-        (self.ptr)(
-            args.len() as u64,
-            args.as_ptr(),
-            frame_store.frames.as_mut_ptr() as *mut Frame,
-        )
-    }
-}
-
-pub struct MethodHandleStore<'jvm> {
-    pub methods: Mutex<HashMap<Frame<'jvm>, MethodHandle<'jvm>>>,
-    pub cstring_store: HashSet<Pin<CString>>,
-}
-
-impl<'jvm> MethodHandleStore<'jvm> {
-    
-    pub fn new() -> Self {
-        Self {
-            methods: Mutex::new(Default::default()),
-            cstring_store: Default::default(),
+        unsafe {
+            (self.ptr)(
+                frame_store as *mut FrameStore,
+                thread as *mut Thread
+            )
         }
     }
-    
 }

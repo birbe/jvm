@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 use indexmap::IndexMap;
-use crate::{ClassLoader, JVM};
+use crate::JVM;
+use crate::linker::ClassLoader;
 
 bitflags! {
 
@@ -51,6 +52,7 @@ pub struct Class {
     // pub interfaces: Vec<Interface>,
     // pub fields: Vec<Field>,
     pub methods: Vec<Method>,
+
     pub class_loader: Arc<dyn ClassLoader>
     // pub attributes: Vec<Attribute>
 }
@@ -274,7 +276,7 @@ pub mod attribute {
     use crate::bytecode::Bytecode;
     use crate::classfile::attribute_info::{CodeAttributeInfo, ExceptionTableInfo};
     use crate::classfile::resolved::{Attribute, ConstantPool};
-    use std::io::{Cursor};
+    use std::io::Cursor;
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct Instruction {
