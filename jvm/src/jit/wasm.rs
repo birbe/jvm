@@ -109,6 +109,8 @@ pub fn compile_method(method: &Method, class: &Class, function_section: &mut Fun
 
     let labeled = label_nodes(&loops, &nodes, &scc_s);
 
+    dbg!(&labeled);
+
     let zipped: Vec<_> = nodes.iter().zip(labeled.iter()).collect();
 
     let metrics = identify_scopes(&zipped, &scc_s);
@@ -122,7 +124,9 @@ pub fn compile_method(method: &Method, class: &Class, function_section: &mut Fun
 
     let mut function = Function::new(locals);
 
-    translate_block(&block, &mut function, &code.instructions, &labeled, helper_start, &metrics, &byte_index_to_instruction_index, &scc_s, type_section, true, method_func_idx_map, class, jvm, external_references);
+    let mut block_index = 0;
+
+    translate_block(&block, &mut function, &code.instructions, &labeled, helper_start, &metrics, &byte_index_to_instruction_index, &scc_s, type_section, true, method_func_idx_map, class, jvm, external_references, &mut block_index);
 
     function.instruction(&Instruction::End);
 
@@ -133,27 +137,33 @@ pub fn compile_method(method: &Method, class: &Class, function_section: &mut Fun
     code_section.function(&function);
 }
 
-fn get_jump_offset(scope_metrics: &ScopeMetrics, start: usize, target: usize) -> u32 {
+fn get_jump_offset(scope_metrics: &ScopeMetrics, start: usize, target: usize, block_index: u32) -> u32 {
     let begin = start.min(target);
     let end = start.max(target);
 
-    if start < target {
-        let starts: i32 = scope_metrics.blocks.iter().filter(|range| range.start > begin && range.start < end).map(|_| 1).sum();
-        let ends: i32 = scope_metrics.blocks.iter().filter(|range| range.end > begin && range.end <= end).map(|_| 1).sum();
+    let jump_range = begin..=end;
 
-        dbg!(starts, ends);
-        let scope = ends - starts;
-        assert!(scope >= 0);
+    if start < target {
+        let starts: i32 = scope_metrics.blocks.iter().chain(scope_metrics.loops.iter()).filter(|range| range.start > begin && jump_range.contains(&range.end)).map(|_| 1).sum();
+        let ends: i32 = scope_metrics.blocks.iter().chain(scope_metrics.loops.iter()).filter(|range| jump_range.contains(&range.end)).map(|_| 1).sum();
+
+        dbg!(starts, ends, start, target);
+
+        let scope = (ends - starts) - 1;
+        // assert!(scope >= 0 && (start == 4 && target == 9), "{:?}", scope_metrics);
+        assert!(scope >= 0, "{:?}", scope_metrics);
         scope as u32
     } else {
-        let starts: u32 = scope_metrics.blocks.iter().filter(|range| range.start >= begin && range.start <= end).map(|_| 1).sum();
+        let the_loop = scope_metrics.loops.iter().find(|range| range.contains(&begin) && range.end > end).unwrap();
+
+        let starts: u32 = scope_metrics.blocks.iter().filter(|range| range.start >= begin && range.start <= end && !(range.start == the_loop.start && range.end == the_loop.end)).map(|_| 1).sum();
         let ends: u32 = scope_metrics.blocks.iter().filter(|range| range.end >= begin && range.end <= end).map(|_| 1).sum();
 
         starts - ends
     }
 }
 
-fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function: &mut Function, instructions: &[attribute::Instruction], labeled: &[LabeledNode], helper_start: u32, scope_metrics: &ScopeMetrics, byte_to_idx_map: &HashMap<u32, u32>, scc_s: &HashMap<usize, Vec<usize>>, type_section: &mut TypeSection, skip: bool, method_func_idx_map: &HashMap<&str, usize>, class: &Class, jvm: &JVM, external_references: &HashMap<Arc<Ref>, u32>, scope_offset: u32) {
+fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function: &mut Function, instructions: &[attribute::Instruction], labeled: &[LabeledNode], helper_start: u32, scope_metrics: &ScopeMetrics, byte_to_idx_map: &HashMap<u32, u32>, scc_s: &HashMap<usize, Vec<usize>>, type_section: &mut TypeSection, skip: bool, method_func_idx_map: &HashMap<&str, usize>, class: &Class, jvm: &JVM, external_references: &HashMap<Arc<Ref>, u32>, scope_offset: u32, block_idx: u32) {
     match bytecode {
         Bytecode::Aaload => {
             function.instruction(&Instruction::Block(BlockType::Empty))
@@ -172,6 +182,9 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                     memory_index: 0,
                 }));
         }
+        Bytecode::Pop => {
+            function.instruction(&Instruction::Drop);
+        }
         Bytecode::Iload(index)
         | Bytecode::Iload_n(index)
         | Bytecode::Aload(index)
@@ -185,7 +198,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::BrOnNull(jump + scope_offset));
         },
@@ -197,7 +210,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::Br(jump + scope_offset));
         }
@@ -209,7 +222,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32Ne);
             function.instruction(&Instruction::BrIf(jump + scope_offset));
@@ -222,7 +235,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32LeS);
             function.instruction(&Instruction::BrIf(jump + scope_offset));
@@ -235,7 +248,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32GtS);
             function.instruction(&Instruction::BrIf(jump + scope_offset));
@@ -248,7 +261,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32GeS);
             function.instruction(&Instruction::BrIf(jump + scope_offset));
@@ -261,7 +274,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32Eqz);
             function.instruction(&Instruction::BrIf(jump + scope_offset));
@@ -274,7 +287,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::I32Ne);
@@ -291,7 +304,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize);
+            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
 
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::I32GeS);
@@ -432,17 +445,19 @@ fn get_block_type_signature(block: &Block, instructions: &[attribute::Instructio
 
 }
 
-fn translate_block(block: &Block, function: &mut Function, instructions: &[attribute::Instruction], labeled: &[LabeledNode], helper_start: u32, scope_metrics: &ScopeMetrics, byte_to_idx_map: &HashMap<u32, u32>, scc_s: &HashMap<usize, Vec<usize>>, type_section: &mut TypeSection, skip: bool, method_func_idx_map: &HashMap<&str, usize>, class: &Class, jvm: &JVM, external_references: &HashMap<Arc<Ref>, u32>) {
+fn translate_block(block: &Block, function: &mut Function, instructions: &[attribute::Instruction], labeled: &[LabeledNode], helper_start: u32, scope_metrics: &ScopeMetrics, byte_to_idx_map: &HashMap<u32, u32>, scc_s: &HashMap<usize, Vec<usize>>, type_section: &mut TypeSection, skip: bool, method_func_idx_map: &HashMap<&str, usize>, class: &Class, jvm: &JVM, external_references: &HashMap<Arc<Ref>, u32>, mut block_index: &mut u32) {
 
     match block {
         Block::Loop(blocks) => {
             function.instruction(&Instruction::Loop(BlockType::Empty));
 
             for block in blocks {
-                translate_block(block, function, instructions, labeled, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references);
+                translate_block(block, function, instructions, labeled, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references, block_index);
             }
 
             function.instruction(&Instruction::End);
+
+            *block_index += 1;
         }
         Block::Normal(blocks) => {
             let types = get_block_type_signature(block, instructions);
@@ -455,12 +470,14 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                 } else {
                     function.instruction(&Instruction::Block(BlockType::Empty));
                 }
+
+                *block_index += 1;
             }
 
             type_section.function(types, []);
 
             for block in blocks {
-                translate_block(block, function, instructions, labeled, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references);
+                translate_block(block, function, instructions, labeled, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references, block_index);
             }
 
             if !skip {
@@ -479,7 +496,7 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
 
                         let header_idx = scc_s[&component.scc][0];
 
-                        let branch_scope = get_jump_offset(scope_metrics, component.idx, header_idx);
+                        let branch_scope = get_jump_offset(scope_metrics, component.idx, header_idx, *block_index);
 
                         match bytecode {
                             Bytecode::Goto(_) => {
@@ -511,9 +528,9 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                             _ => unreachable!()
                         };
 
-                        let branch_scope = get_jump_offset(scope_metrics, node.idx, header_idx);
+                        let branch_scope = get_jump_offset(scope_metrics, node.idx, header_idx, *block_index);
 
-                        function.instruction(&Instruction::I32Const(header.iter().position(|i| i == target).unwrap() as i32));
+                        function.instruction(&Instruction::I32Const(header.iter().position(|i| i == target).unwrap() as i32 + 1));
                         function.instruction(&Instruction::LocalSet(helper_start));
                         function.instruction(&Instruction::Br(branch_scope));
 
@@ -527,7 +544,7 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                         function.instruction(&Instruction::LocalSet(helper_start));
 
                         let mut targets: Vec<u32> = targets.iter().map(|target| {
-                            get_jump_offset(scope_metrics, node.idx, *target) + 1 as u32
+                            get_jump_offset(scope_metrics, node.idx, *target, *block_index) + 1 as u32
                         }).collect();
                         targets.insert(0, 0);
 
@@ -538,7 +555,7 @@ fn translate_block(block: &Block, function: &mut Function, instructions: &[attri
                     _ => {}
                 };
 
-                translate_bytecode(bytecode, idx, byte_index, function, instructions, labeled, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references, 0);
+                translate_bytecode(bytecode, idx, byte_index, function, instructions, labeled, helper_start, scope_metrics, byte_to_idx_map, scc_s, type_section, false, method_func_idx_map, class, jvm, external_references, 0, *block_index);
 
             }
         }

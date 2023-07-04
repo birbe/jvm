@@ -20,6 +20,13 @@ fn run(wasm: &[u8]) {
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module,&[]).unwrap();
 
+    let cfg_stress = instance.get_func(&mut store, "cfg_stress").unwrap();
+    let cfg_stress = cfg_stress.typed::<(), i32>(&store).unwrap();
+
+    let now = Instant::now();
+    let result = cfg_stress.call(&mut store, ()).unwrap();
+    println!("time to execute: {}microseconds cfg_stress() = {}", Instant::now().duration_since(now).as_micros(), result);
+
     // let approximate_sqrt = instance.get_func(&mut store, "approximate_sqrt").unwrap();
     // let approximate_sqrt = approximate_sqrt.typed::<i32, i32>(&store).unwrap();
     //
@@ -96,7 +103,7 @@ fn main() {
 
     println!("{wat}");
 
-    wasmparser::validate(&wasm).unwrap();
+    // wasmparser::validate(&wasm).unwrap();
 
     run(&wasm);
 

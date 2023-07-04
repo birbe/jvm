@@ -254,9 +254,9 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
 
                     //Jumps somewhere that isn't the beginning of the loop
 
-                    labels.push((target.scc, edge, target_scc[0]));
-
                     if target.idx != target_scc[0] {
+                        labels.push((target.scc, edge, target_scc[0]));
+
                         LabeledNode::LabeledControlFlow {
                             node: node.clone(),
                             label: target.scc,
