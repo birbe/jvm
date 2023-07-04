@@ -4,17 +4,18 @@ extern crate core;
 
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
-use crate::classfile::resolved::{Attribute, Class, Method, Ref};
-use crate::execution::{MethodHandle};
-use crate::thread::{FrameStore, Thread, ThreadHandle};
+use crate::classfile::resolved::{AccessFlags, Attribute, Class, Method, NameAndType, Ref};
+use crate::execution::{ExecutionContext, MethodHandle};
+use crate::thread::{FrameStore, RawFrame, Thread, ThreadHandle};
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::DirEntry;
 use std::io::{Cursor, Stdout, stdout, Write};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use bitflags::Flags;
 use jvm_types::JParse;
 use linker::ClassLoader;
 use crate::classfile::{ClassFile, ConstantInfo};
@@ -56,14 +57,15 @@ pub enum RuntimeError {
 
 pub struct ClassLoaderStore {
     pub loader: Arc<dyn ClassLoader>,
-    pub method_refs: RwLock<HashMap<Ref, MethodHandle>>
+    pub refs: RwLock<HashSet<Pin<Arc<Ref>>>>,
+    pub method_refs: RwLock<HashMap<Arc<Ref>, MethodHandle>>
 }
 
 pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
     pub heap: Heap,
-    pub class_loaders: RwLock<Vec<ClassLoaderStore>>,
+    pub class_loaders: RwLock<Vec<Pin<Box<ClassLoaderStore>>>>,
 }
 
 impl JVM {
@@ -73,10 +75,11 @@ impl JVM {
             stdout: Mutex::new(Box::new(Cursor::new(vec![]))),
             threads: Default::default(),
             heap: Heap::new(),
-            class_loaders: RwLock::new(vec![ClassLoaderStore {
+            class_loaders: RwLock::new(vec![Pin::new(Box::new(ClassLoaderStore {
                 loader: class_loader,
+                refs: RwLock::new(HashSet::new()),
                 method_refs: RwLock::new(HashMap::new()),
-            }]),
+            }))]),
         })
     }
 
@@ -126,6 +129,47 @@ impl JVM {
         ThreadHandle {
             thread: thread.data_ptr(),
             guard: thread
+        }
+    }
+
+    pub fn register_refs(&self, loader: &dyn ClassLoader, class: &Class) {
+        let mut stores = self.class_loaders.read();
+
+        let store = &stores[loader.id()];
+        let mut method_refs = store.method_refs.write();
+        let mut refs = store.refs.write();
+
+        for method in &class.methods {
+            let ref_ = Arc::new(Ref {
+                class: class.this_class.clone(),
+                name_and_type: Arc::new(NameAndType { name: method.name.clone(), descriptor: Arc::new(method.descriptor.string.clone()) }),
+            });
+
+            refs.insert(Pin::new(ref_.clone()));
+
+            let (stack_size, max_locals) = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
+                (code.max_stack as usize, code.max_locals as usize)
+            } else {
+                (0, 0)
+            };
+
+            let ref_clone = ref_.clone();
+
+            if !method.access_flags.contains(AccessFlags::NATIVE) {
+                let method_handle = MethodHandle {
+                    ptr: ThreadHandle::interpret_trampoline,
+                    context: ExecutionContext::Interpret(Box::new(move |args| RawFrame::new(
+                        &ref_clone.clone(),
+                        args.iter().copied().chain(std::iter::repeat(0).take(max_locals - args.len())).collect::<Vec<i32>>().into_boxed_slice(),
+                        vec![0; stack_size].into_boxed_slice(),
+                    ))),
+                    method_ref: ref_.clone()
+                };
+
+                method_refs.insert(ref_.clone(), method_handle);
+            } else {
+                eprintln!("Method {:?} was native and was ignored (not yet linked)", ref_);
+            }
         }
     }
 

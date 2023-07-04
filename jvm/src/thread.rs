@@ -16,7 +16,6 @@ pub enum ThreadError {
 }
 
 #[repr(C)]
-#[derive(Clone)]
 pub struct RawFrame {
     pub method_ref: *const Ref,
     pub program_counter: u32,
@@ -152,7 +151,7 @@ impl ThreadHandle {
 
     pub fn call(&mut self, classpath: &str, method_name: &str, method_descriptor: &str, args: &[i32]) -> Result<Option<i64>, JavaBarrierError> {
         let frame_store = unsafe {
-            std::mem::transmute::<_, *mut FrameStore>(&mut self.frame_store)
+            self.frame_store.as_mut().get_mut() as *mut FrameStore
         };
 
         let class = self.class_loader.get_class(classpath).ok_or(JavaBarrierError::ClassNotFound)?;
@@ -173,14 +172,14 @@ impl ThreadHandle {
     }
 
     //Conforms to the ABI
-    pub unsafe fn interpret_trampoline(
+    pub unsafe extern "C" fn interpret_trampoline(
         frame_store: *mut FrameStore,
         thread: *mut Thread
     ) -> i64 {
         Self::interpret(
             //Safety: RawFrame has the same in-memory representation as Frame. As we have a *mut Thread, that implies
             //that the JVM is also still alive due to the Arc<JVM>. This also implies that the *const Ref and thus the &'a Ref is still valid.
-            std::mem::transmute(&mut (*frame_store).frames[(*frame_store).frame_index]),
+            unsafe { (*frame_store).frames[(*frame_store).frame_index].assume_init_mut() }.as_frame(),
             &mut (*frame_store).frames.as_mut()[(*frame_store).frame_index..1024],
             &mut *thread
         )
@@ -188,7 +187,7 @@ impl ThreadHandle {
     }
 
     pub fn interpret(
-        frame: &mut Frame,
+        mut frame: Frame,
         frames: &mut [MaybeUninit<RawFrame>],
         thread: &mut Thread
     ) -> Option<i64> {
@@ -202,7 +201,7 @@ impl ThreadHandle {
         };
 
         let return_value = loop {
-            match Self::step(&class, method, code, frame, frames) {
+            match Self::step(&class, method, code, &mut frame, frames) {
                 ThreadStepResult::Ok => {}
                 ThreadStepResult::Error(_) => panic!(),
                 ThreadStepResult::Result(result) => {
@@ -224,7 +223,7 @@ impl ThreadHandle {
         let pc = *frame.program_counter;
         let mut pc_inc = 0;
 
-
+        todo!("Interpreting is wip");
 
         *frame.program_counter = ((*frame.program_counter as i32) + pc_inc) as u32;
 

@@ -58,7 +58,16 @@ impl ClassLoader for NativeClassLoader {
 
         let this = self.this.read();
         let this = (*this).as_ref().unwrap().clone();
-        jvm.generate_class(&bytes, this)
+        let class = jvm.generate_class(&bytes, this)?;
+
+        {
+            let mut classes = self.classes.write();
+            classes.insert(classpath.into(), class.clone());
+        }
+
+        jvm.register_refs(self, &class);
+
+        Ok(class)
     }
 
     fn id(&self) -> usize {
