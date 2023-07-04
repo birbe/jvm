@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 use parking_lot::{Mutex, MutexGuard};
-use crate::classfile::resolved::{Attribute, Class, Method, Ref};
+use crate::classfile::resolved::{Attribute, Class, Method, NameAndType, Ref};
 use crate::classfile::resolved::attribute::Code;
 use crate::linker::ClassLoader;
 
@@ -111,9 +111,11 @@ pub enum ThreadStepResult {
 pub struct Thread {
     pub jvm: Arc<JVM>,
     pub class_loader: Arc<dyn ClassLoader>,
+    pub frame_store: Pin<Box<FrameStore>>,
     pub killed: bool
 }
 
+#[derive(Debug)]
 pub enum JavaBarrierError {
     ClassNotFound,
     MethodNotFound
@@ -128,7 +130,7 @@ impl Deref for ThreadHandle {
     type Target = Thread;
 
     fn deref(&self) -> &Self::Target {
-        todo!()
+        unsafe { &*self.thread }
     }
 }
 
@@ -148,11 +150,26 @@ impl Drop for ThreadHandle {
 
 impl ThreadHandle {
 
-    pub fn call(&mut self, class: &str, method_name: &str, method_descriptor: &str) -> Result<Option<i64>, JavaBarrierError> {
-        let class = self.class_loader.get_class(class).ok_or(JavaBarrierError::ClassNotFound)?;
+    pub fn call(&mut self, classpath: &str, method_name: &str, method_descriptor: &str, args: &[i32]) -> Result<Option<i64>, JavaBarrierError> {
+        let frame_store = unsafe {
+            std::mem::transmute::<_, *mut FrameStore>(&mut self.frame_store)
+        };
+
+        let class = self.class_loader.get_class(classpath).ok_or(JavaBarrierError::ClassNotFound)?;
         let method = class.methods.iter().find(|method| *method.name == method_name && method_descriptor == method_descriptor).ok_or(JavaBarrierError::MethodNotFound)?;
 
-        Ok(None)
+        let id = self.class_loader.id();
+        let class_loader_stores = self.jvm.class_loaders.read();
+        let store = &class_loader_stores[id];
+        let refs = store.method_refs.read();
+
+        let method_ref = Ref {
+            class: Arc::new(classpath.to_string()),
+            name_and_type: Arc::new(NameAndType { name: Arc::new(method_name.to_string()), descriptor: Arc::new(method_descriptor.to_string()) }),
+        };
+
+        let handle = refs.get(&method_ref).unwrap();
+        Ok(Some(unsafe { handle.invoke(args, frame_store, self.thread) }))
     }
 
     //Conforms to the ABI

@@ -76,8 +76,12 @@ fn main() {
     *mock.this.write() = Some(mock.clone());
 
     let jvm = JVM::new(mock.clone() as Arc<dyn ClassLoader>);
-    
+
     let class = mock.find_class("Main", &jvm).unwrap();
+
+    let mut handle = jvm.create_thread(mock.clone());
+    handle.call("Main", "main", "([Ljava/lang/String;)V", &[0]).unwrap();
+
 
     let now = Instant::now();
     let compiled = compile_class(&class, &jvm);

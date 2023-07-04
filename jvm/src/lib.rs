@@ -6,7 +6,7 @@ use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::classfile::resolved::{Attribute, Class, Method, Ref};
 use crate::execution::{MethodHandle};
-use crate::thread::{Thread, ThreadHandle};
+use crate::thread::{FrameStore, Thread, ThreadHandle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -114,6 +114,7 @@ impl JVM {
         let thread = Arc::new(Mutex::new(Thread {
             jvm: self.clone(),
             class_loader,
+            frame_store: Pin::new(Box::new(FrameStore::new())),
             killed: false,
         }));
 
@@ -126,18 +127,6 @@ impl JVM {
             thread: thread.data_ptr(),
             guard: thread
         }
-    }
-
-}
-
-pub struct JVMWrapper {
-
-}
-
-impl Drop for JVM {
-
-    fn drop(&mut self) {
-
     }
 
 }

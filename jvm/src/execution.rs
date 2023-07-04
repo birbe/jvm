@@ -21,9 +21,9 @@ pub struct MethodHandle {
 }
 
 impl MethodHandle {
-    pub fn invoke(&self, args: &[i32], frame_store: &mut FrameStore, thread: &mut Thread) -> i64 {
+    pub unsafe fn invoke(&self, args: &[i32], frame_store: *mut FrameStore, thread: *mut Thread) -> i64 {
         match &self.context {
-            ExecutionContext::Interpret(frame) => frame_store.push(
+            ExecutionContext::Interpret(frame) => (*frame_store).push(
                 RawFrame::new(
                     &self.method_ref,
                     Vec::from(args).into_boxed_slice(),
@@ -35,8 +35,8 @@ impl MethodHandle {
 
         unsafe {
             (self.ptr)(
-                frame_store as *mut FrameStore,
-                thread as *mut Thread
+                frame_store,
+                thread
             )
         }
     }
