@@ -1,6 +1,5 @@
 #![feature(slice_ptr_get)]
 #![feature(slice_ptr_len)]
-extern crate core;
 
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
@@ -147,7 +146,7 @@ impl JVM {
 
             refs.insert(Pin::new(ref_.clone()));
 
-            let (stack_size, max_locals) = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
+            let (max_stack, max_locals) = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
                 (code.max_stack as usize, code.max_locals as usize)
             } else {
                 (0, 0)
@@ -160,8 +159,8 @@ impl JVM {
                     ptr: ThreadHandle::interpret_trampoline,
                     context: ExecutionContext::Interpret(Box::new(move |args| RawFrame::new(
                         &ref_clone.clone(),
-                        args.iter().copied().chain(std::iter::repeat(0).take(max_locals - args.len())).collect::<Vec<i32>>().into_boxed_slice(),
-                        vec![0; stack_size].into_boxed_slice(),
+                        args.iter().copied().chain(std::iter::repeat(0).take(max_locals - args.len())).collect::<Vec<u64>>().into_boxed_slice(),
+                        vec![0u64; max_stack].into_boxed_slice(),
                     ))),
                     method_ref: ref_.clone()
                 };

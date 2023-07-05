@@ -10,6 +10,31 @@ pub struct LookupEntry {
     offset: i32,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum JValue {
+    Reference(*mut ()),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    Short(i16),
+    Byte(i8)
+}
+
+impl JValue {
+    pub fn as_u64(&self) -> u64 {
+        match self {
+            JValue::Reference(ptr) => *ptr as usize as u64,
+            JValue::Int(int) => *int as u64,
+            JValue::Long(long) => *long as u64,
+            JValue::Float(float) => unsafe { std::mem::transmute::<f32, u32>(*float) as u64 },
+            JValue::Double(double) => unsafe { std::mem::transmute::<f64, u64>(*double) },
+            JValue::Short(short) => *short as u64,
+            JValue::Byte(byte) => *byte as u64
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
 pub enum Bytecode {

@@ -12,6 +12,7 @@ use jvm::classfile::ClassFile;
 use jvm::classfile::resolved::Class;
 use jvm::jit::wasm::{compile_class, compile_method};
 use jvm::{ClassLoadError, JVM};
+use jvm::bytecode::JValue;
 use jvm::linker::ClassLoader;
 use jvm::thread::{Thread, ThreadHandle};
 use jvm_types::JParse;
@@ -25,7 +26,7 @@ fn run(wasm: &[u8]) {
     let instance = Instance::new(&mut store, &module,&[]).unwrap();
 
     let main_func = instance.get_func(&mut store, "main").unwrap();
-    let main = main_func.typed::<i32, ()>(&store).unwrap();
+    let main = main_func.typed::<i32, i32>(&store).unwrap();
     // main.call(&mut store, 0);
 }
 
@@ -89,8 +90,10 @@ fn main() {
     let class = mock.find_class("Main", &jvm).unwrap();
 
     let mut handle = jvm.create_thread(mock.clone());
-    handle.call("Main", "main", "([Ljava/lang/String;)V", &[0]).unwrap();
-
+    let result = handle.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[
+        JValue::Reference(0 as *mut ())
+    ]).unwrap();
+    println!("{:?}", result);
 
     let now = Instant::now();
     let compiled = compile_class(&class, &jvm);
@@ -99,8 +102,6 @@ fn main() {
     let wasm = compiled.module.finish();
 
     let wat = wasmprinter::print_bytes(&wasm).unwrap();
-
-    println!("{wat}");
 
     // wasmparser::validate(&wasm).unwrap();
 

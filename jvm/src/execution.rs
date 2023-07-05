@@ -1,17 +1,28 @@
 use crate::thread::{RawFrame, FrameStore, Thread};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use crate::classfile::resolved::Ref;
 
-pub type ABIHandlePtr = unsafe extern "C" fn(*mut FrameStore, thread: *mut Thread) -> i64;
+pub type ABIHandlePtr = unsafe extern "C" fn(*mut FrameStore, thread: *mut Thread) -> u64;
 
 pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
-    Interpret(Box<dyn Fn(&[i32]) -> RawFrame>),
+    Interpret(Box<dyn Fn(&[u64]) -> RawFrame>),
     JIT,
     Native
+}
+
+impl Debug for ExecutionContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExecutionContext::{}", match self {
+            ExecutionContext::Interpret(_) => "Interpret",
+            ExecutionContext::JIT => "JIT",
+            ExecutionContext::Native => "Native"
+        })
+    }
 }
 
 pub struct MethodHandle {
@@ -21,7 +32,7 @@ pub struct MethodHandle {
 }
 
 impl MethodHandle {
-    pub unsafe fn invoke(&self, args: &[i32], frame_store: *mut FrameStore, thread: *mut Thread) -> i64 {
+    pub unsafe fn invoke(&self, args: &[u64], frame_store: *mut FrameStore, thread: *mut Thread) -> u64 {
         match &self.context {
             ExecutionContext::Interpret(frame) => (*frame_store).push(
                 frame(args)

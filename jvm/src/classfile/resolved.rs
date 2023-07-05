@@ -126,7 +126,7 @@ impl FieldType {
             "S" => FieldType::Short,
             "Z" => FieldType::Boolean,
             "[" => {
-                let dimensions = slice.rfind("[").unwrap() + 1;
+                let dimensions = slice.split("").skip(1).take_while(|char| *char == "[").map(|_| 1).sum();
                 let inner = FieldType::from_str(&slice[dimensions..]);
 
                 return (FieldType::Array {
@@ -518,6 +518,18 @@ impl Constant {
             _ => None,
         }
     }
+
+    pub fn as_ref(&self) -> Option<&Arc<Ref>> {
+        match self {
+            Constant::MethodRef(ref_)
+            | Constant::FieldRef(ref_)
+            | Constant::InterfaceMethodRef(ref_) => {
+                Some(ref_)
+            }
+            _ => None
+        }
+    }
+
 }
 
 #[derive(Clone, Debug, PartialEq)]

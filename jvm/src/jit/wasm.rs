@@ -396,7 +396,11 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
 
         }
         Bytecode::Return
-        | Bytecode::Ireturn => { function.instruction(&Instruction::Return); },
+        | Bytecode::Ireturn
+        | Bytecode::Areturn
+        | Bytecode::Dreturn
+        | Bytecode::Freturn
+        | Bytecode::Lreturn => { function.instruction(&Instruction::Return); },
         bytecode => unimplemented!("Bytecode not implemented {:?} @ {}", bytecode, idx)
     }
 }
