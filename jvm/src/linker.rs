@@ -5,11 +5,11 @@ use crate::{ClassLoadError, JVM};
 
 pub trait ClassLoader: Send + Sync + Debug {
 
+    fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>>;
+
+    fn register_class(&self, classpath: &str, class: Arc<Class>);
+
     fn get_class(&self, classpath: &str) -> Option<Arc<Class>>;
-
-    fn find_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError>;
-
-    fn generate_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError>;
 
     fn id(&self) -> usize;
 

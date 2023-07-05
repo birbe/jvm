@@ -1,12 +1,7 @@
 use crate::classfile::attribute_info::CodeAttributeInfo;
-use crate::classfile::constant::{
-    ClassInfo, DynamicInfo, MethodHandleInfo, MethodTypeInfo, ModuleInfo, NameAndTypeInfo,
-    PackageInfo, RefInfo, StringInfo, Utf8Info,
-};
+use crate::classfile::constant::{ClassInfo, DynamicInfo, MethodHandleInfo, MethodTypeInfo, ModuleInfo, NameAndTypeInfo, PackageInfo, RefInfo, StringInfo, Utf8Info};
 use crate::classfile::resolved::attribute::Code;
-use crate::classfile::{
-    AttributeInfo, ClassFile, ConstantInfo, ConstantInfoPool, MethodInfo,
-};
+use crate::classfile::{AttributeInfo, ClassFile, ConstantInfo, ConstantInfoPool, FieldInfo, MethodInfo};
 use bitflags::{bitflags, Flags};
 
 use discrim::FromDiscriminant;
@@ -50,7 +45,7 @@ pub struct Class {
     pub super_class: Option<Arc<Class>>,
     pub access_flags: AccessFlags,
     // pub interfaces: Vec<Interface>,
-    // pub fields: Vec<Field>,
+    pub fields: Vec<Field>,
     pub methods: Vec<Method>,
 
     pub class_loader: Arc<dyn ClassLoader>
@@ -66,12 +61,15 @@ impl Class {
 
         Some(Self {
             super_class: if &*this_class != "java/lang/Object" {
-                Some(class_loader.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class)?, jvm).unwrap())
+                Some(jvm.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class)?, class_loader.clone()).unwrap())
             } else {
                 None
             },
             this_class,
             access_flags: AccessFlags::from_bits(classfile.access_flags)?,
+            fields: classfile.fields.iter().map(|field_info| {
+                Field::new(field_info, &constant_pool)
+            }).collect::<Option<Vec<Field>>>()?,
             methods: classfile
                 .methods
                 .iter()
@@ -225,8 +223,8 @@ impl Method {
         })
     }
 
-    pub fn is_instance_initialization(&self, classpath: &str, class_loader: &dyn ClassLoader, jvm: &JVM) -> bool {
-        !class_loader.find_class(classpath, jvm).unwrap().access_flags.contains(AccessFlags::INTERFACE)
+    pub fn is_instance_initialization(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>, jvm: &JVM) -> bool {
+        !jvm.find_class(classpath, class_loader).unwrap().access_flags.contains(AccessFlags::INTERFACE)
             && &*self.name == "<init>"
             && self.descriptor.return_type == ReturnType::Void
     }
@@ -629,4 +627,39 @@ impl NameAndType {
             _ => unreachable!(),
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    pub access_flags: AccessFlags,
+    pub name: Arc<String>,
+    pub descriptor: FieldType,
+    pub attributes: HashMap<String, Attribute>,
+}
+
+impl Field {
+
+    fn new(
+        field_info: &FieldInfo,
+        constant_pool: &ConstantPool
+    ) -> Option<Self> {
+        Some(Self {
+            access_flags: AccessFlags::from_bits(field_info.access_flags).unwrap(),
+            name: constant_pool.constants.get(&field_info.name_index)?.as_string()?.clone(),
+            descriptor: FieldType::from_str(constant_pool.constants.get(&field_info.descriptor_index)?.as_string()?).0,
+            attributes: field_info
+                .attributes
+                .iter()
+                .map(|attr| {
+                    let descriptor_kind = (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
+
+                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
+
+                    Some((descriptor_kind, attribute))
+                })
+                .collect::<Option<HashMap<String, Attribute>>>()?
+        })
+    }
+
+
 }

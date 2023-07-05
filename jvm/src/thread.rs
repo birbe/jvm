@@ -50,7 +50,7 @@ impl RawFrame {
             method_ref: &*self.method_ref,
             program_counter: &mut self.program_counter,
             locals: std::slice::from_raw_parts_mut(self.locals, self.locals_length),
-            stack_index: &mut self.stack_index,
+            stack_length: &mut self.stack_index,
             stack: std::slice::from_raw_parts_mut(self.stack, self.stack_length),
         }
     }
@@ -71,7 +71,7 @@ pub struct Frame<'a> {
     pub method_ref: &'a Ref,
     pub program_counter: &'a mut u32,
     pub locals: &'a mut [u64],
-    pub stack_index: &'a mut usize,
+    pub stack_length: &'a mut usize,
     pub stack: &'a mut [u64]
 }
 
@@ -275,7 +275,9 @@ impl ThreadHandle {
         let pc = *frame.program_counter;
         let mut pc_inc = 1;
 
-        let bytecode = &code.instructions[pc as usize].bytecode;
+        let instruction = &code.instructions[pc as usize];
+        let bytes_index = instruction.bytes_index;
+        let bytecode = &instruction.bytecode;
 
         match bytecode {
             Bytecode::Invokestatic(constant_index) => {
@@ -287,21 +289,78 @@ impl ThreadHandle {
                 return ThreadStepResult::Return(None);
             },
             Bytecode::Ireturn => {
-                let int = frame.stack[*frame.stack_index-1] as i32;
+                let int = frame.stack[*frame.stack_length -1] as i32;
                 return ThreadStepResult::Return(Some(JValue::Int(int)));
             }
             Bytecode::Bipush(value) => {
-                frame.stack[*frame.stack_index] = *value as i32 as u64;
-                *frame.stack_index += 1;
+                frame.stack[*frame.stack_length] = *value as i32 as u64;
+                *frame.stack_length += 1;
             }
             Bytecode::Aload_n(index)
             | Bytecode::Aload(index) => {
-                frame.stack[*frame.stack_index] = frame.locals[*index as usize];
-                *frame.stack_index += 1;
+                frame.stack[*frame.stack_length] = frame.locals[*index as usize];
+                *frame.stack_length += 1;
             }
             Bytecode::Areturn => {
-                let ptr = frame.stack[*frame.stack_index-1];
+                let ptr = frame.stack[*frame.stack_length -1];
                 return ThreadStepResult::Return(Some(JValue::Reference(ptr as *mut ())));
+            }
+            Bytecode::Iconst_n_m1(value) => {
+                frame.stack[*frame.stack_length] = *value as i32 as u64;
+                *frame.stack_length += 1;
+            }
+            Bytecode::If_icmpge(offset) => {
+                let a = frame.stack[*frame.stack_length - 2];
+                let b = frame.stack[*frame.stack_length - 1];
+                *frame.stack_length -= 2;
+
+                if a >= b {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code.instructions.iter().find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
+            Bytecode::Istore(index)
+            | Bytecode::Istore_n(index) => {
+                frame.locals[*index as usize] = frame.stack[*frame.stack_length-1];
+                *frame.stack_length -= 1;
+            }
+            Bytecode::Iload(index)
+            | Bytecode::Iload_n(index) => {
+                frame.stack[*frame.stack_length] = frame.locals[*index as usize];
+                *frame.stack_length += 1;
+            }
+            Bytecode::Sipush(short) => {
+                frame.stack[*frame.stack_length] = *short as i32 as u64;
+                *frame.stack_length += 1;
+            }
+            Bytecode::Iinc(index, inc) => {
+                frame.locals[*index as usize] = (frame.locals[*index as usize] as i64 + *inc as i64) as u64;
+            }
+            Bytecode::Goto(offset) => {
+                let target_offset = bytes_index as isize + *offset as isize;
+                let idx = code.instructions.iter().find(|instr| instr.bytes_index == target_offset as u32)
+                    .unwrap();
+                pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+            }
+            Bytecode::Ldc(constant_index) => {
+                let constant = class.constant_pool.constants.get(&(*constant_index as u16)).unwrap();
+
+                match constant {
+                    Constant::Integer(int) => {
+                        frame.stack[*frame.stack_length] = *int as u64;
+                        *frame.stack_length += 1;
+                    }
+                    Constant::Float(float) => {
+                        frame.stack[*frame.stack_length] = unsafe { std::mem::transmute::<f32, u32>(*float) as u64 };
+                        *frame.stack_length += 1;
+                    }
+                    Constant::String(string) => {
+
+                    }
+                    _ => unimplemented!()
+                }
             }
             _ => unimplemented!("Bytecode {:?} unimplemented in interpreter", bytecode)
         }

@@ -348,7 +348,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                             table: 0,
                         });
 
-                        let other_class = class.class_loader.find_class(&method.class, jvm).unwrap();
+                        let other_class = jvm.find_class(&method.class, class.class_loader.clone()).unwrap();
                         let other_method = other_class.get_method(&method.name_and_type).unwrap();
 
                         let types = get_method_params(other_method);
@@ -378,7 +378,7 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
                 table: 0,
             });
 
-            let other_class = class.class_loader.find_class(&method_ref.class, jvm).unwrap();
+            let other_class = jvm.find_class(&method_ref.class, class.class_loader.clone()).unwrap();
             let other_method = other_class.get_method(&method_ref.name_and_type).unwrap();
 
             let types = get_method_params(other_method);
@@ -392,8 +392,6 @@ fn translate_bytecode(bytecode: &Bytecode, idx: usize, byte_index: u32, function
             // } else {
             //     &named_class
             // };
-
-
         }
         Bytecode::Return
         | Bytecode::Ireturn

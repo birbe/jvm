@@ -167,12 +167,6 @@ pub mod constant {
         pub name_index: u16,
     }
 
-    #[derive(JParse, Clone, Debug, PartialEq)]
-    pub struct FieldInfo {
-        pub name_index: u16,
-        pub descriptor_index: u16,
-        pub attributes: Vec<AttributeInfo>,
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

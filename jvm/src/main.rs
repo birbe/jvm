@@ -33,42 +33,25 @@ fn run(wasm: &[u8]) {
 #[derive(Debug)]
 struct NativeClassLoader {
     pub classes: RwLock<HashMap<String, Arc<Class>>>,
-    pub this: RwLock<Option<Arc<NativeClassLoader>>>
 }
 
 impl ClassLoader for NativeClassLoader {
-    fn get_class(&self, classpath: &str) -> Option<Arc<Class>> {
-        let classes = self.classes.read();
-        classes.get(classpath).cloned()
-    }
-
-    fn find_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError> {
-        let get = self.get_class(classpath);
-        match get {
-            None => self.generate_class(classpath, jvm),
-            Some(get) => Ok(get)
-        }
-    }
-
-    fn generate_class(&self, classpath: &str, jvm: &JVM) -> Result<Arc<Class>, ClassLoadError> {
+    fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
         let mut path = PathBuf::new();
         path.push("./jvm/test_classes");
         path.push(format!("{classpath}.class"));
 
-        let bytes = fs::read(path).map_err(|_| ClassLoadError::ClassDefNotFound(classpath.into()))?;
+        fs::read(path).ok()
+    }
 
-        let this = self.this.read();
-        let this = (*this).as_ref().unwrap().clone();
-        let class = jvm.generate_class(&bytes, this)?;
+    fn register_class(&self, classpath: &str, class: Arc<Class>) {
+        let mut classes = self.classes.write();
+        classes.insert(classpath.into(), class);
+    }
 
-        {
-            let mut classes = self.classes.write();
-            classes.insert(classpath.into(), class.clone());
-        }
-
-        jvm.register_refs(self, &class);
-
-        Ok(class)
+    fn get_class(&self, classpath: &str) -> Option<Arc<Class>> {
+        let classes = self.classes.read();
+        classes.get(classpath).cloned()
     }
 
     fn id(&self) -> usize {
@@ -79,32 +62,28 @@ impl ClassLoader for NativeClassLoader {
 fn main() {
     let mock = NativeClassLoader {
         classes: Default::default(),
-        this: RwLock::new(None),
     };
 
-    let mock = Arc::new(mock);
-    *mock.this.write() = Some(mock.clone());
+    let bootstrapper = Arc::new(mock);
 
-    let jvm = JVM::new(mock.clone() as Arc<dyn ClassLoader>);
+    let jvm = JVM::new(bootstrapper.clone() as Arc<dyn ClassLoader>);
 
-    let class = mock.find_class("Main", &jvm).unwrap();
+    let class = jvm.find_class("Main", bootstrapper.clone()).unwrap();
 
-    let mut handle = jvm.create_thread(mock.clone());
+    let mut handle = jvm.create_thread(bootstrapper.clone());
+    let now = Instant::now();
     let result = handle.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[
         JValue::Reference(0 as *mut ())
     ]).unwrap();
-    println!("{:?}", result);
+    println!("main(null) = {:?} in {}ms", result, Instant::now().duration_since(now).as_millis());
 
-    let now = Instant::now();
-    let compiled = compile_class(&class, &jvm);
-    println!("{} microseconds to compile class", Instant::now().duration_since(now).as_micros());
+    // let compiled = compile_class(&class, &jvm);
+    // let wasm = compiled.module.finish();
 
-    let wasm = compiled.module.finish();
-
-    let wat = wasmprinter::print_bytes(&wasm).unwrap();
+    // let wat = wasmprinter::print_bytes(&wasm).unwrap();
 
     // wasmparser::validate(&wasm).unwrap();
 
-    run(&wasm);
+    // run(&wasm);
 
 }

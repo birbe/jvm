@@ -4,7 +4,7 @@
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Method, NameAndType, Ref};
-use crate::execution::{ExecutionContext, MethodHandle};
+use crate::execution::{ABIHandlePtr, ExecutionContext, MethodHandle};
 use crate::thread::{FrameStore, RawFrame, Thread, ThreadHandle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
@@ -27,19 +27,84 @@ pub mod execution;
 pub mod jit;
 pub mod thread;
 pub mod linker;
+pub mod native;
+
+pub trait ObjectInternal {}
+
+#[repr(C, u64)]
+pub enum JArrayTag {
+    Byte,
+    Short,
+    Int,
+    Long,
+    Float,
+    Double,
+    Class(*const Class)
+}
+
+#[repr(C)]
+pub struct JArrayType {
+    pub elements_are_array_reference: bool,
+    pub tag: JArrayTag
+}
+
+#[repr(C)]
+pub struct Object<T: ?Sized + ObjectInternal> {
+    pub class: *const Class,
+    pub body: T
+}
+
+#[repr(C)]
+pub struct Array<T: ObjectInternal> {
+    pub length: i32,
+    pub data_type: JArrayType,
+    pub body: *mut T
+}
+
+impl<T: ObjectInternal> ObjectInternal for Array<T> {}
+
+impl ObjectInternal for f32 {}
+impl ObjectInternal for f64 {}
+impl ObjectInternal for i64 {}
+impl ObjectInternal for u64 {}
+impl ObjectInternal for i32 {}
+impl ObjectInternal for u32 {}
+impl ObjectInternal for i16 {}
+impl ObjectInternal for u16 {}
+impl ObjectInternal for i8 {}
+impl ObjectInternal for u8 {}
 
 pub struct Heap {
-    pub data: Pin<Box<[u8]>>,
+    pub data: *mut [u8],
 }
 
 impl Heap {
     
     pub fn new() -> Self {
+        let mut box_ = Vec::<u8>::with_capacity(1024).into_boxed_slice();
+        let ptr = Box::into_raw(box_);
+
         Self {
-            data: Pin::new(Vec::new().into_boxed_slice()),
+            data: ptr,
         }
     }
+
+    pub fn allocate_object_typed<T: ?Sized + ObjectInternal>(class: &Class) -> *mut Object<T> {
+        todo!()
+    }
+
+    pub fn allocate_class() {
+
+    }
     
+}
+
+impl Drop for Heap {
+    fn drop(&mut self) {
+        unsafe {
+            drop(Box::from_raw(self.data));
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,12 +169,26 @@ impl JVM {
         }
     }
 
-    pub fn generate_class(&self, bytes: &[u8], class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
+    pub fn generate_class(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
+        let bytes = class_loader.get_bytes(classpath).ok_or(ClassLoadError::ClassDefNotFound(classpath.into()))?;
+
         let classfile = ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
 
-        let class = Arc::new(Class::init(&classfile, &self, class_loader).unwrap());
+        let class = Arc::new(Class::init(&classfile, &self, class_loader.clone()).unwrap());
+
+        class_loader.register_class(classpath, class.clone());
+
+        self.register_refs(&*class_loader, &class);
 
         Ok(class)
+    }
+
+    pub fn find_class(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
+        let get = class_loader.get_class(classpath);
+        match get {
+            None => self.generate_class(classpath, class_loader.clone()),
+            Some(get) => Ok(get)
+        }
     }
 
     pub fn create_thread(self: &Arc<JVM>, class_loader: Arc<dyn ClassLoader>) -> ThreadHandle {
@@ -131,7 +210,7 @@ impl JVM {
         }
     }
 
-    pub fn register_refs(&self, loader: &dyn ClassLoader, class: &Class) {
+    fn register_refs(&self, loader: &dyn ClassLoader, class: &Class) {
         let mut stores = self.class_loaders.read();
 
         let store = &stores[loader.id()];
@@ -167,7 +246,16 @@ impl JVM {
 
                 method_refs.insert(ref_.clone(), method_handle);
             } else {
-                eprintln!("Method {:?} was native and was ignored (not yet linked)", ref_);
+                match native::link(&ref_) {
+                    None => eprintln!("{ref_:?} could not be immediately linked and was ignored"),
+                    Some(ptr) => {
+                        method_refs.insert(ref_.clone(), MethodHandle {
+                            ptr,
+                            context: ExecutionContext::Native,
+                            method_ref: ref_.clone(),
+                        });
+                    }
+                }
             }
         }
     }
