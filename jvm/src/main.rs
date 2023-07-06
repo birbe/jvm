@@ -83,14 +83,6 @@ fn main() {
 
     let jvm = JVM::new(bootstrapper.clone() as Arc<dyn ClassLoader<>>);
 
-    let string = jvm.heap.allocate_string("Hello world!", &jvm);
-
-    unsafe {
-        let string_char_object = string.value.cast_class::<RawString>();
-        let char_array = (*string_char_object).body.value.cast_array::<u16>();
-        dbg!((*char_array).body.length);
-    }
-
     let class = jvm.find_class("Main", bootstrapper.clone()).unwrap();
 
     let mut handle = jvm.create_thread(bootstrapper.clone());

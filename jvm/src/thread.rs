@@ -14,8 +14,14 @@ use crate::heap::{Object, RawObject};
 use crate::linker::ClassLoader;
 
 #[derive(Debug)]
+pub enum RuntimeException {
+    NullPointer
+}
+
+#[derive(Debug)]
 pub enum ThreadError {
     UnresolvedClassDefinition,
+    RuntimeException(RuntimeException)
 }
 
 #[repr(C)]
@@ -77,18 +83,19 @@ pub struct Frame<'a> {
 }
 
 ///Stack of frames
-pub struct FrameStore {
+#[derive(Debug)]
+pub struct FrameStack {
     pub frames: Pin<Box<[MaybeUninit<RawFrame>; 1024]>>,
     pub frame_index: isize,
 }
 
-impl<'jvm> FrameStore {
+impl<'jvm> FrameStack {
     pub fn new() -> Self {
         const UNINIT: MaybeUninit<RawFrame> = MaybeUninit::uninit();
 
-        FrameStore {
+        FrameStack {
             frames: Pin::new(Box::new([UNINIT; 1024])),
-            frame_index: 0,
+            frame_index: -1
         }
     }
 
@@ -120,7 +127,7 @@ pub enum ThreadStepResult {
 pub struct Thread {
     pub jvm: Arc<JVM>,
     pub class_loader: Arc<dyn ClassLoader>,
-    pub frame_store: Pin<Box<FrameStore>>,
+    pub frame_store: Pin<Box<FrameStack>>,
     pub killed: bool
 }
 
@@ -162,23 +169,25 @@ impl ThreadHandle {
     #[must_use]
     pub fn call(&mut self, classpath: &str, method_name: &str, method_descriptor: &str, args: &[JValue]) -> Result<Option<JValue>, JavaBarrierError> {
         let frame_store = unsafe {
-            self.frame_store.as_mut().get_mut() as *mut FrameStore
+            self.frame_store.as_mut().get_mut() as *mut FrameStack
         };
 
         let class = self.class_loader.get_class(classpath).ok_or(JavaBarrierError::ClassNotFound)?;
         let method = class.methods.iter().find(|method| *method.name == method_name && method_descriptor == method_descriptor).ok_or(JavaBarrierError::MethodNotFound)?;
 
-        let id = self.class_loader.id();
-        let class_loader_stores = self.jvm.class_loaders.read();
-        let store = &class_loader_stores[id];
-        let refs = store.method_refs.read();
+        let handle = {
+            let id = self.class_loader.id();
+            let class_loader_stores = self.jvm.class_loaders.read();
+            let store = &class_loader_stores[id];
+            let refs = store.method_refs.read();
 
-        let method_ref = Ref {
-            class: Arc::new(classpath.to_string()),
-            name_and_type: Arc::new(NameAndType { name: Arc::new(method_name.to_string()), descriptor: Arc::new(method_descriptor.to_string()) }),
+            let method_ref = Ref {
+                class: Arc::new(classpath.to_string()),
+                name_and_type: Arc::new(NameAndType { name: Arc::new(method_name.to_string()), descriptor: Arc::new(method_descriptor.to_string()) }),
+            };
+
+            refs.get(&method_ref).ok_or(JavaBarrierError::MethodNotFound)?.clone()
         };
-
-        let handle = refs.get(&method_ref).ok_or(JavaBarrierError::MethodNotFound)?;
 
         let u64_args: Vec<u64> = args.iter().map(|arg| arg.as_u64()).collect();
 
@@ -205,7 +214,7 @@ impl ThreadHandle {
 
     //Conforms to the ABI
     pub unsafe extern "C" fn interpret_trampoline(
-        frame_store: *mut FrameStore,
+        frame_store: *mut FrameStack,
         thread: *mut Thread
     ) -> u64 {
         Self::interpret(
@@ -218,7 +227,7 @@ impl ThreadHandle {
     pub fn interpret(
         mut frame: Frame,
         thread: &mut Thread,
-        frame_store: *mut FrameStore
+        frame_store: *mut FrameStack
     ) -> Option<JValue> {
         let return_value = loop {
             match Self::step(
@@ -261,7 +270,7 @@ impl ThreadHandle {
 
     fn step(
         mut frame: Frame,
-        frame_store: *mut FrameStore,
+        frame_store: *mut FrameStack,
         thread: &mut Thread
     ) -> ThreadStepResult {
         //TODO: Super slow to do this at *every* instruction
@@ -283,8 +292,6 @@ impl ThreadHandle {
 
         match bytecode {
             Bytecode::Invokestatic(constant_index) => {
-                let constant = class.constant_pool.constants.get(constant_index).unwrap();
-                let method_ref = constant.as_ref().unwrap();
                 todo!()
             },
             Bytecode::Return => {
@@ -324,7 +331,9 @@ impl ThreadHandle {
                 }
             }
             Bytecode::Istore(index)
-            | Bytecode::Istore_n(index) => {
+            | Bytecode::Istore_n(index)
+            | Bytecode::Astore(index)
+            | Bytecode::Astore_n(index) => {
                 frame.locals[*index as usize] = frame.stack[*frame.stack_length-1];
                 *frame.stack_length -= 1;
             }
@@ -359,10 +368,46 @@ impl ThreadHandle {
                         *frame.stack_length += 1;
                     }
                     Constant::String(string) => {
+                        let string_object = thread.jvm.heap.get_string(&string, &thread.jvm);
 
+                        frame.stack[*frame.stack_length] = string_object.value.get_raw() as usize as u64;
+                        *frame.stack_length += 1;
                     }
                     _ => unimplemented!()
                 }
+            }
+            Bytecode::Aastore => {
+                dbg!(&frame.stack[..*frame.stack_length]);
+
+                let value = unsafe { Object {
+                    ptr: frame.stack[*frame.stack_length-1],
+                } };
+                let index = frame.stack[*frame.stack_length-2];
+                let array_ref = unsafe { Object {
+                    ptr: frame.stack[*frame.stack_length-3],
+                } };
+
+                if array_ref == Object::NULL {
+                    return ThreadStepResult::Error(ThreadError::RuntimeException(RuntimeException::NullPointer));
+                }
+
+                *frame.stack_length -= 3;
+
+                let array = unsafe { array_ref.cast_array::<Object>() };
+                unsafe { (*array).body.body[index as usize] = value; }
+            }
+            Bytecode::Anewarray(constant_index) => {
+                dbg!(&frame.stack[..*frame.stack_length]);
+
+                let count = frame.stack[*frame.stack_length-1] as i32;
+                let constant = class.constant_pool.constants.get(constant_index).unwrap();
+                let classpath = constant.as_string().unwrap();
+
+                let array_class = thread.jvm.find_class(&classpath, thread.class_loader.clone()).unwrap();
+                let object = unsafe { Object::from_raw(thread.jvm.heap.allocate_raw_object_array(&array_class, count)) };
+
+                frame.stack[*frame.stack_length] = object.ptr;
+                *frame.stack_length += 1;
             }
             _ => unimplemented!("Bytecode {:?} unimplemented in interpreter", bytecode)
         }

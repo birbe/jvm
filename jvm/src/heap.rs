@@ -11,11 +11,14 @@ use crate::JVM;
 pub unsafe trait ObjectInternal {}
 pub unsafe trait NonArrayObject {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct Object {
-    ptr: u64
+    pub(crate) ptr: u64
 }
+
+//May seem weird but it's convenient for representing Object[] as *mut RawObject<RawArray<Object>>
+unsafe impl ObjectInternal for Object {}
 
 impl Object {
 
@@ -89,7 +92,7 @@ impl_primitive!(f64, JavaPrimitive::Double, FieldType::Double);
 pub struct Heap {
     //Unused until GC is implemented
     pub data: *mut [u8],
-    pub strings: RwLock<HashMap<String, *const RawObject<StringObject>>>,
+    pub strings: RwLock<HashMap<String, StringObject>>,
     pub types: RwLock<HashSet<Box<FieldType>>>
 }
 
@@ -140,20 +143,19 @@ impl Heap {
         unsafe {
             (*object_ptr).descriptor = field_type;
         }
-        print!("1");
 
         object_ptr
     }
 
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
-    pub fn allocate_raw_object_array(&self, class: &Class, length: i32) -> *mut RawObject<RawArray<u64>> {
-        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<u64>() * length as usize);
+    pub fn allocate_raw_object_array(&self, class: &Class, length: i32) -> *mut RawObject<RawArray<Object>> {
+        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<u64>() * length as usize) + 4;
 
         let mut layout = Layout::from_size_align(size, 8).unwrap();
         let mut alloc = unsafe { alloc(layout) };
 
-        let object_ptr: *mut RawObject<RawArray<u64>> = std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
+        let object_ptr: *mut RawObject<RawArray<Object>> = std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
         
         let mut types = self.types.write();
         let field_type = FieldType::Array {
@@ -168,6 +170,7 @@ impl Heap {
         let field_type = &**types.get(&field_type).unwrap() as *const FieldType;
 
         unsafe {
+            (*object_ptr).body.length = length;
             (*object_ptr).descriptor = field_type;
         }
 
@@ -177,7 +180,7 @@ impl Heap {
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
     pub fn allocate_raw_primitive_array<T: AsJavaPrimitive + Default>(&self, length: i32) -> *mut RawObject<RawArray<T>> {
-        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<T>() * length as usize) + 4;
+        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<T>() * length as usize) + 4 + (align_of::<u64>() - align_of::<T>());
         let mut layout = Layout::from_size_align(size, align_of::<u64>()).unwrap();
         let mut alloc = unsafe { alloc(layout) };
 
@@ -208,12 +211,18 @@ impl Heap {
     pub fn allocate_string(&self, string: &str, jvm: &JVM) -> StringObject {
         let class_loaders = jvm.class_loaders.read();
         let bootstrapper = &class_loaders[0];
-        let string_class = jvm.find_class("java/lang/String", bootstrapper.loader.clone()).unwrap();
+
+        let class_loader = bootstrapper.loader.clone();
+        drop(class_loaders);
+
+        let string_class = jvm.find_class("java/lang/String", class_loader).unwrap();
 
         let cesu = Cesu8String::from(string);
         let chars: Vec<u16> = cesu.into_bytes().iter().map(|b| *b as u16).collect();
 
         let string = self.allocate_class(&string_class);
+
+
         let char_array = self.allocate_raw_primitive_array::<u16>(chars.len() as i32);
         unsafe {
             (*char_array).body.body.copy_from_slice(&chars);
@@ -225,9 +234,19 @@ impl Heap {
         }
     }
 
-    // pub fn get_string(&self, string: &str) -> *mut RawObject<StringObject> {
-    //
-    // }
+    pub fn get_string(&self, string: &str, jvm: &JVM) -> StringObject {
+        let strings = self.strings.read();
+        if strings.contains_key(string) {
+            strings.get(string).unwrap().clone()
+        } else {
+            drop(strings);
+            let string_object = self.allocate_string(string, jvm);
+
+            let mut strings = self.strings.write();
+            strings.insert(string.into(), string_object.clone());
+            string_object
+        }
+    }
 }
 
 impl Drop for Heap {
@@ -256,7 +275,7 @@ pub struct RawString {
 
 unsafe impl NonArrayObject for RawString {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[repr(C)]
 pub struct StringObject {
     pub value: Object

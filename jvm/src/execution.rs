@@ -1,4 +1,4 @@
-use crate::thread::{RawFrame, FrameStore, Thread};
+use crate::thread::{RawFrame, FrameStack, Thread};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt::{Debug, Formatter};
@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use crate::classfile::resolved::Ref;
 
-pub type ABIHandlePtr = unsafe extern "C" fn(*mut FrameStore, thread: *mut Thread) -> u64;
+pub type ABIHandlePtr = unsafe extern "C" fn(*mut FrameStack, thread: *mut Thread) -> u64;
 
 pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
@@ -32,7 +32,7 @@ pub struct MethodHandle {
 }
 
 impl MethodHandle {
-    pub unsafe fn invoke(&self, args: &[u64], frame_store: *mut FrameStore, thread: *mut Thread) -> u64 {
+    pub unsafe fn invoke(&self, args: &[u64], frame_store: *mut FrameStack, thread: *mut Thread) -> u64 {
         match &self.context {
             ExecutionContext::Interpret(frame) => (*frame_store).push(
                 frame(args)

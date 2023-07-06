@@ -6,7 +6,7 @@ use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Method, NameAndType, Ref};
 use crate::execution::{ABIHandlePtr, ExecutionContext, MethodHandle};
-use crate::thread::{FrameStore, RawFrame, Thread, ThreadHandle};
+use crate::thread::{FrameStack, RawFrame, Thread, ThreadHandle};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
@@ -51,7 +51,7 @@ pub enum RuntimeError {
 pub struct ClassLoaderStore {
     pub loader: Arc<dyn ClassLoader>,
     pub refs: RwLock<HashSet<Pin<Arc<Ref>>>>,
-    pub method_refs: RwLock<HashMap<Arc<Ref>, MethodHandle>>
+    pub method_refs: RwLock<HashMap<Arc<Ref>, Arc<MethodHandle>>>
 }
 
 pub struct JVM {
@@ -99,6 +99,7 @@ impl JVM {
     }
 
     pub fn generate_class(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
+
         let bytes = class_loader.get_bytes(classpath).ok_or(ClassLoadError::ClassDefNotFound(classpath.into()))?;
 
         let classfile = ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
@@ -115,7 +116,9 @@ impl JVM {
     pub fn find_class(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
         let get = class_loader.get_class(classpath);
         match get {
-            None => self.generate_class(classpath, class_loader.clone()),
+            None => {
+                self.generate_class(classpath, class_loader.clone())
+            },
             Some(get) => Ok(get)
         }
     }
@@ -124,7 +127,7 @@ impl JVM {
         let thread = Arc::new(Mutex::new(Thread {
             jvm: self.clone(),
             class_loader,
-            frame_store: Pin::new(Box::new(FrameStore::new())),
+            frame_store: Pin::new(Box::new(FrameStack::new())),
             killed: false,
         }));
 
@@ -155,7 +158,7 @@ impl JVM {
             refs.insert(Pin::new(ref_.clone()));
 
             let (max_stack, max_locals) = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
-                (code.max_stack as usize, code.max_locals as usize)
+                (code.max_stack as usize + 1, code.max_locals as usize)
             } else {
                 (0, 0)
             };
@@ -173,16 +176,16 @@ impl JVM {
                     method_ref: ref_.clone()
                 };
 
-                method_refs.insert(ref_.clone(), method_handle);
+                method_refs.insert(ref_.clone(), Arc::new(method_handle));
             } else {
                 match native::link(&ref_) {
                     None => eprintln!("{ref_:?} could not be immediately linked and was ignored"),
                     Some(ptr) => {
-                        method_refs.insert(ref_.clone(), MethodHandle {
+                        method_refs.insert(ref_.clone(), Arc::new(MethodHandle {
                             ptr,
                             context: ExecutionContext::Native,
                             method_ref: ref_.clone(),
-                        });
+                        }));
                     }
                 }
             }
