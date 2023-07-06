@@ -13,7 +13,7 @@ use jvm::classfile::resolved::Class;
 use jvm::jit::wasm::{compile_class, compile_method};
 use jvm::{ClassLoadError, JVM};
 use jvm::bytecode::JValue;
-use jvm::heap::Object;
+use jvm::heap::{Object, RawArray, RawString};
 use jvm::linker::ClassLoader;
 use jvm::thread::{Thread, ThreadHandle};
 use jvm_types::JParse;
@@ -86,7 +86,9 @@ fn main() {
     let string = jvm.heap.allocate_string("Hello world!", &jvm);
 
     unsafe {
-        dbg!(&(*(*string.value).body.value).body.body[..]);
+        let string_char_object = string.value.cast_class::<RawString>();
+        let char_array = (*string_char_object).body.value.cast_array::<u16>();
+        dbg!((*char_array).body.length);
     }
 
     let class = jvm.find_class("Main", bootstrapper.clone()).unwrap();

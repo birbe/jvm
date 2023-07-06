@@ -55,28 +55,28 @@ pub struct Class {
 impl Class {
     pub fn init(classfile: &ClassFile, jvm: &JVM, class_loader: Arc<dyn ClassLoader>) -> Option<Self> {
         let constant_pool =
-            ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
+            ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool).unwrap();
 
-        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
+        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class).unwrap();
 
         Some(Self {
             super_class: if &*this_class != "java/lang/Object" {
-                Some(jvm.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class)?, class_loader.clone()).unwrap())
+                Some(jvm.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class).unwrap(), class_loader.clone()).unwrap())
             } else {
                 None
             },
             this_class,
-            access_flags: AccessFlags::from_bits(classfile.access_flags)?,
+            access_flags: AccessFlags::from_bits(classfile.access_flags).unwrap(),
             fields: classfile.fields.iter().map(|field_info| {
                 Field::new(field_info, &constant_pool)
-            }).collect::<Option<Vec<Field>>>()?,
+            }).collect::<Option<Vec<Field>>>().unwrap(),
             methods: classfile
                 .methods
                 .iter()
                 .map(|method_info| {
                     Method::new(method_info, &constant_pool, classfile)
                 })
-                .collect::<Option<Vec<Method>>>()?,
+                .collect::<Option<Vec<Method>>>().unwrap(),
             constant_pool,
             class_loader
         })
@@ -153,7 +153,7 @@ impl TryFrom<&str> for MethodDescriptor {
     type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let parameters_end = value.find(")").ok_or(())?;
+        let parameters_end = value.find(")").ok_or(()).unwrap();
         let parameters_str = &value[1..parameters_end];
 
         let mut idx = 1;
@@ -198,28 +198,28 @@ impl Method {
         _classfile: &ClassFile,
     ) -> Option<Self> {
         Some(Self {
-            access_flags: AccessFlags::from_bits(method_info.access_flags)?,
+            access_flags: AccessFlags::from_bits(method_info.access_flags).unwrap(),
             name: constant_pool
                 .constants
-                .get(&method_info.name_index)?
-                .as_string()?
+                .get(&method_info.name_index).unwrap()
+                .as_string().unwrap()
                 .clone(),
             descriptor: (&**constant_pool
                 .constants
-                .get(&method_info.descriptor_index)?
-                .as_string()?)[..].try_into().ok()?,
+                .get(&method_info.descriptor_index).unwrap()
+                .as_string().unwrap())[..].try_into().ok().unwrap(),
             attributes: method_info
                 .attributes
                 .iter()
                 .map(|attr| {
                     let descriptor_kind =
-                        (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
+                        (**(constant_pool.constants.get(&attr.name_index).unwrap().as_string().unwrap())).clone();
 
-                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
+                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool).unwrap();
 
                     Some((descriptor_kind, attribute))
                 })
-                .collect::<Option<HashMap<String, Attribute>>>()?,
+                .collect::<Option<HashMap<String, Attribute>>>().unwrap(),
         })
     }
 
@@ -262,9 +262,9 @@ impl Attribute {
 
         Some(match kind {
             "Code" => Self::Code(Code::new(
-                &CodeAttributeInfo::from_bytes(&mut cursor).ok()?,
+                &CodeAttributeInfo::from_bytes(&mut cursor).ok().unwrap(),
                 constant_pool,
-            )?),
+            ).unwrap()),
             _ => Self::Other(kind.to_string(), attribute_info.info.clone()),
         })
     }
@@ -324,19 +324,19 @@ pub mod attribute {
                     .map(|exception_table_info| {
                         ExceptionTable::new(exception_table_info, constant_pool)
                     })
-                    .collect::<Option<Vec<ExceptionTable>>>()?,
+                    .collect::<Option<Vec<ExceptionTable>>>().unwrap(),
                 attributes: code_info
                     .attributes
                     .iter()
                     .map(|attribute_info| {
                         let attribute_kind = constant_pool
                             .constants
-                            .get(&attribute_info.name_index)?
-                            .as_string()?;
+                            .get(&attribute_info.name_index).unwrap()
+                            .as_string().unwrap();
 
                         Attribute::new(attribute_kind, attribute_info, constant_pool)
                     })
-                    .collect::<Option<Vec<Attribute>>>()?,
+                    .collect::<Option<Vec<Attribute>>>().unwrap(),
             })
         }
     }
@@ -355,14 +355,15 @@ pub mod attribute {
                 start_pc: info.start_pc,
                 end_pc: info.end_pc,
                 handler_pc: info.handler_pc,
-                catch_type: (**constant_pool.constants.get(&info.catch_type)?.as_string()?).clone(),
+                // catch_type: (**constant_pool.constants.get(&info.catch_type).unwrap().as_string().unwrap()).clone(),
+                catch_type: String::new()
             })
         }
     }
 }
 
 pub fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<Arc<String>> {
-    let constant = constant_info_pool.constants.get(&index)?;
+    let constant = constant_info_pool.constants.get(&index).unwrap();
 
     match constant {
         ConstantInfo::Class(ClassInfo { name_index }) => {
@@ -412,7 +413,7 @@ fn resolve_constant(
     new_constants: &mut HashMap<u16, Constant>,
     slot: u16,
 ) -> Option<Constant> {
-    let constant = cip.constants.get(&slot)?;
+    let constant = cip.constants.get(&slot).unwrap();
 
     if let Some(constant) = new_constants.get(&slot) {
         return Some(constant.clone());
@@ -420,40 +421,40 @@ fn resolve_constant(
 
     let insert = match constant {
         ConstantInfo::Class(ClassInfo { name_index }) => {
-            Constant::Class(resolve_string(cip, *name_index)?)
+            Constant::Class(resolve_string(cip, *name_index).unwrap())
         }
-        ConstantInfo::FieldRef(_) => Constant::FieldRef(Ref::resolve(cip, new_constants, slot)?),
-        ConstantInfo::MethodRef(_) => Constant::MethodRef(Ref::resolve(cip, new_constants, slot)?),
+        ConstantInfo::FieldRef(_) => Constant::FieldRef(Ref::resolve(cip, new_constants, slot).unwrap()),
+        ConstantInfo::MethodRef(_) => Constant::MethodRef(Ref::resolve(cip, new_constants, slot).unwrap()),
         ConstantInfo::InterfaceMethodRef(_) => {
-            Constant::MethodRef(Ref::resolve(cip, new_constants, slot)?)
+            Constant::MethodRef(Ref::resolve(cip, new_constants, slot).unwrap())
         }
         ConstantInfo::String(StringInfo { string_index }) => {
-            Constant::String(resolve_string(cip, *string_index)?)
+            Constant::String(resolve_string(cip, *string_index).unwrap())
         }
         ConstantInfo::Integer(int) => Constant::Integer(*int),
         ConstantInfo::Float(float) => Constant::Float(*float),
         ConstantInfo::Long(long) => Constant::Long(*long),
         ConstantInfo::Double(double) => Constant::Double(*double),
         ConstantInfo::NameAndType(_) => {
-            Constant::NameAndType(NameAndType::resolve(cip, new_constants, slot)?)
+            Constant::NameAndType(NameAndType::resolve(cip, new_constants, slot).unwrap())
         }
         ConstantInfo::Utf8(Utf8Info { string }) => Constant::Utf8(string.clone()),
         ConstantInfo::MethodHandle(MethodHandleInfo {
             reference_kind,
             reference_index,
         }) => Constant::MethodHandle(MethodHandle {
-            reference_kind: ReferenceKind::from_discriminant(*reference_kind).ok()?,
+            reference_kind: ReferenceKind::from_discriminant(*reference_kind).ok().unwrap(),
             reference: Ref::resolve(cip, new_constants, *reference_index).unwrap(),
         }),
         ConstantInfo::MethodType(MethodTypeInfo { descriptor_index: _ }) => {
-            Constant::MethodType(resolve_string(cip, slot)?)
+            Constant::MethodType(resolve_string(cip, slot).unwrap())
         }
         ConstantInfo::Dynamic(DynamicInfo {
             bootstrap_method_attr_index: _,
             name_and_type_index,
         }) => Constant::Dynamic(Dynamic {
             bootstrap_method_attr: (),
-            name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index)?,
+            name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index).unwrap(),
         }),
         ConstantInfo::InvokeDynamic(_) => todo!(),
         ConstantInfo::Module(_) => todo!(),
@@ -475,7 +476,7 @@ impl ConstantPool {
         let mut new_constants = HashMap::new();
 
         for (index, _constant_info) in &cip.constants {
-            let constant = resolve_constant(classfile, cip, &mut new_constants, *index)?;
+            let constant = resolve_constant(classfile, cip, &mut new_constants, *index).unwrap();
             new_constants.insert(*index, constant);
         }
 
@@ -575,7 +576,7 @@ impl Ref {
             return Some(ref_.clone());
         }
 
-        let constant = cip.constants.get(&slot)?;
+        let constant = cip.constants.get(&slot).unwrap();
 
         Some(match constant {
             ConstantInfo::InterfaceMethodRef(RefInfo {
@@ -590,8 +591,8 @@ impl Ref {
                 class_index,
                 name_and_type_index,
             }) => Arc::new(Ref {
-                class: resolve_string(cip, *class_index)?,
-                name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index)?,
+                class: resolve_string(cip, *class_index).unwrap(),
+                name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index).unwrap(),
             }),
             _ => unreachable!(),
         })
@@ -614,15 +615,15 @@ impl NameAndType {
             return Some(arc.clone());
         }
 
-        let constant = cip.constants.get(&slot)?;
+        let constant = cip.constants.get(&slot).unwrap();
 
         Some(match constant {
             ConstantInfo::NameAndType(NameAndTypeInfo {
                 name_index,
                 descriptor_index,
             }) => Arc::new(NameAndType {
-                name: resolve_string(cip, *name_index)?,
-                descriptor: resolve_string(cip, *descriptor_index)?,
+                name: resolve_string(cip, *name_index).unwrap(),
+                descriptor: resolve_string(cip, *descriptor_index).unwrap(),
             }),
             _ => unreachable!(),
         })
@@ -645,19 +646,19 @@ impl Field {
     ) -> Option<Self> {
         Some(Self {
             access_flags: AccessFlags::from_bits(field_info.access_flags).unwrap(),
-            name: constant_pool.constants.get(&field_info.name_index)?.as_string()?.clone(),
-            descriptor: FieldType::from_str(constant_pool.constants.get(&field_info.descriptor_index)?.as_string()?).0,
+            name: constant_pool.constants.get(&field_info.name_index).unwrap().as_string().unwrap().clone(),
+            descriptor: FieldType::from_str(constant_pool.constants.get(&field_info.descriptor_index).unwrap().as_string().unwrap()).0,
             attributes: field_info
                 .attributes
                 .iter()
                 .map(|attr| {
-                    let descriptor_kind = (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
+                    let descriptor_kind = (**(constant_pool.constants.get(&attr.name_index).unwrap().as_string().unwrap())).clone();
 
-                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
+                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool).unwrap();
 
                     Some((descriptor_kind, attribute))
                 })
-                .collect::<Option<HashMap<String, Attribute>>>()?
+                .collect::<Option<HashMap<String, Attribute>>>().unwrap()
         })
     }
 

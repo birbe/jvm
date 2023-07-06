@@ -10,7 +10,7 @@ use parking_lot::{Mutex, MutexGuard};
 use crate::bytecode::{Bytecode, JValue};
 use crate::classfile::resolved::{Attribute, Class, Constant, FieldType, Method, NameAndType, Ref, ReturnType};
 use crate::classfile::resolved::attribute::Code;
-use crate::heap::Object;
+use crate::heap::{Object, RawObject};
 use crate::linker::ClassLoader;
 
 #[derive(Debug)]
@@ -186,7 +186,7 @@ impl ThreadHandle {
 
         let jvalue = match &method.descriptor.return_type {
             ReturnType::FieldType(field_type) => Some(match field_type {
-                FieldType::Array { .. } => JValue::Reference(unsafe { Object::from_raw(return_value as *mut ()) }),
+                FieldType::Array { .. } => JValue::Reference(unsafe { Object::from_raw(return_value as usize as *mut RawObject<()>) }),
                 FieldType::Byte => JValue::Byte(return_value as i8),
                 FieldType::Char => todo!(),
                 FieldType::Double => JValue::Double(unsafe { std::mem::transmute::<_, f64>(return_value) }),
@@ -195,7 +195,7 @@ impl ThreadHandle {
                 FieldType::Long => JValue::Long(return_value as i64),
                 FieldType::Short => JValue::Short(return_value as i16),
                 FieldType::Boolean => JValue::Int(return_value as i32),
-                FieldType::Class(_) => JValue::Reference(unsafe { Object::from_raw(return_value as *mut ()) })
+                FieldType::Class(_) => JValue::Reference(unsafe { Object::from_raw(return_value as usize as *mut RawObject<()>) })
             }),
             ReturnType::Void => None
         };
@@ -305,7 +305,7 @@ impl ThreadHandle {
             }
             Bytecode::Areturn => {
                 let ptr = frame.stack[*frame.stack_length -1];
-                return ThreadStepResult::Return(Some(JValue::Reference(unsafe { Object::from_raw(ptr as usize as *mut ()) })));
+                return ThreadStepResult::Return(Some(JValue::Reference(unsafe { Object::from_raw(ptr as *mut RawObject<()>) })));
             }
             Bytecode::Iconst_n_m1(value) => {
                 frame.stack[*frame.stack_length] = *value as i32 as u64;
