@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
+use std::ptr;
 use std::sync::{Arc, Mutex};
 use crate::classfile::resolved::Ref;
 
@@ -33,19 +34,41 @@ pub struct MethodHandle {
 
 impl MethodHandle {
     pub unsafe fn invoke(&self, args: &[u64], frame_store: *mut FrameStack, thread: *mut Thread) -> u64 {
+        let mut locals = Vec::from(args);
+
         match &self.context {
             ExecutionContext::Interpret(frame) => (*frame_store).push(
                 frame(args)
             ),
             ExecutionContext::JIT => {}
-            ExecutionContext::Native => {}
+            ExecutionContext::Native => {
+                (*frame_store).push(RawFrame {
+                    method_ref: ptr::null(),
+                    program_counter: 0,
+                    locals_length: args.len(),
+                    locals: locals.as_mut_ptr(),
+                    stack_index: 0,
+                    stack_length: 0,
+                    stack: ptr::null_mut(),
+                })
+            }
         }
 
-        unsafe {
+        let out = unsafe {
             (self.ptr)(
                 frame_store,
                 thread
             )
+        };
+
+        match &self.context {
+            ExecutionContext::Interpret(_) => {}
+            ExecutionContext::JIT => {}
+            ExecutionContext::Native => {
+                unsafe { (*frame_store).pop() }
+            }
         }
+
+        out
     }
 }

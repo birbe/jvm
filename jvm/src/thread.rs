@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 use parking_lot::{Mutex, MutexGuard};
 use crate::bytecode::{Bytecode, JValue};
-use crate::classfile::resolved::{Attribute, Class, Constant, FieldType, Method, NameAndType, Ref, ReturnType};
+use crate::classfile::resolved::{Attribute, Class, Constant, FieldType, Method, MethodDescriptor, NameAndType, Ref, ReturnType};
 use crate::classfile::resolved::attribute::Code;
 use crate::heap::{Object, RawObject};
 use crate::linker::ClassLoader;
@@ -220,6 +220,7 @@ impl ThreadHandle {
         Self::interpret(
             (*(*frame_store).get_first()).as_frame(),
             &mut *thread,
+            thread,
             frame_store
         ).unwrap_or(JValue::Long(0)).as_u64()
     }
@@ -227,6 +228,7 @@ impl ThreadHandle {
     pub fn interpret(
         mut frame: Frame,
         thread: &mut Thread,
+        thread_raw: *mut Thread,
         frame_store: *mut FrameStack
     ) -> Option<JValue> {
         let return_value = loop {
@@ -235,7 +237,8 @@ impl ThreadHandle {
                 //that the JVM is also still alive due to the Arc<JVM>. This also implies that the *const Ref and thus the &'a Ref is still valid.
                 frame,
                 frame_store,
-                thread
+                thread,
+                thread_raw
             ) {
                 ThreadStepResult::Ok(frame_out) => {
                     frame = unsafe { (*frame_out).as_frame() };
@@ -271,7 +274,8 @@ impl ThreadHandle {
     fn step(
         mut frame: Frame,
         frame_store: *mut FrameStack,
-        thread: &mut Thread
+        thread: &mut Thread,
+        thread_raw: *mut Thread
     ) -> ThreadStepResult {
         //TODO: Super slow to do this at *every* instruction
         let mut class = thread.class_loader.get_class(&frame.method_ref.class).unwrap();
@@ -292,7 +296,23 @@ impl ThreadHandle {
 
         match bytecode {
             Bytecode::Invokestatic(constant_index) => {
-                todo!()
+                if let Some(Constant::MethodRef(ref_)) = class.constant_pool.constants.get(constant_index) {
+                    let method_handle = {
+                        let loaders = thread.jvm.class_loaders.read();
+                        let loader_store = &loaders[thread.class_loader.id()];
+                        let refs = loader_store.method_refs.read();
+
+                        refs.get(ref_).unwrap().clone()
+                    };
+
+                    let method_descriptor = MethodDescriptor::try_from(&**ref_.name_and_type.descriptor).unwrap();
+
+                    let args = &frame.stack[*frame.stack_length-method_descriptor.args.len()..];
+
+                    unsafe { method_handle.invoke(args, frame_store, thread_raw); };
+
+                    *frame.stack_length -= method_descriptor.args.len();
+                }
             },
             Bytecode::Return => {
                 return ThreadStepResult::Return(None);
@@ -377,8 +397,6 @@ impl ThreadHandle {
                 }
             }
             Bytecode::Aastore => {
-                dbg!(&frame.stack[..*frame.stack_length]);
-
                 let value = unsafe { Object {
                     ptr: frame.stack[*frame.stack_length-1],
                 } };
@@ -397,8 +415,6 @@ impl ThreadHandle {
                 unsafe { (*array).body.body[index as usize] = value; }
             }
             Bytecode::Anewarray(constant_index) => {
-                dbg!(&frame.stack[..*frame.stack_length]);
-
                 let count = frame.stack[*frame.stack_length-1] as i32;
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
                 let classpath = constant.as_string().unwrap();

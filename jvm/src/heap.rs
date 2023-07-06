@@ -281,6 +281,16 @@ pub struct StringObject {
     pub value: Object
 }
 
+impl StringObject {
+
+    pub fn get_string(&self) -> String {
+        let raw_string = self.value.cast_class::<RawString>();
+        let array = unsafe { &(*(*raw_string).body.value.cast_array::<u16>()).body.body };
+        Cesu8String::try_from_bytes(array.iter().map(|c| *c as u8).collect()).unwrap().to_string()
+    }
+
+}
+
 unsafe impl ObjectInternal for RawString {}
 
 pub enum JavaPrimitive {

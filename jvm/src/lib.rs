@@ -179,7 +179,7 @@ impl JVM {
                 method_refs.insert(ref_.clone(), Arc::new(method_handle));
             } else {
                 match native::link(&ref_) {
-                    None => eprintln!("{ref_:?} could not be immediately linked and was ignored"),
+                    None => {},
                     Some(ptr) => {
                         method_refs.insert(ref_.clone(), Arc::new(MethodHandle {
                             ptr,
