@@ -1,5 +1,6 @@
 #![feature(slice_ptr_get)]
 #![feature(slice_ptr_len)]
+#![feature(ptr_metadata)]
 
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
@@ -10,14 +11,19 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs::DirEntry;
+use std::mem::size_of;
 use std::io::{Cursor, Stdout, stdout, Write};
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use bitflags::Flags;
+use heap::{Heap, ObjectInternal};
 use jvm_types::JParse;
 use linker::ClassLoader;
 use crate::classfile::{ClassFile, ConstantInfo};
+use heap::StringObject;
 
 pub mod classfile;
 mod tests;
@@ -28,84 +34,7 @@ pub mod jit;
 pub mod thread;
 pub mod linker;
 pub mod native;
-
-pub trait ObjectInternal {}
-
-#[repr(C, u64)]
-pub enum JArrayTag {
-    Byte,
-    Short,
-    Int,
-    Long,
-    Float,
-    Double,
-    Class(*const Class)
-}
-
-#[repr(C)]
-pub struct JArrayType {
-    pub elements_are_array_reference: bool,
-    pub tag: JArrayTag
-}
-
-#[repr(C)]
-pub struct Object<T: ?Sized + ObjectInternal> {
-    pub class: *const Class,
-    pub body: T
-}
-
-#[repr(C)]
-pub struct Array<T: ObjectInternal> {
-    pub length: i32,
-    pub data_type: JArrayType,
-    pub body: *mut T
-}
-
-impl<T: ObjectInternal> ObjectInternal for Array<T> {}
-
-impl ObjectInternal for f32 {}
-impl ObjectInternal for f64 {}
-impl ObjectInternal for i64 {}
-impl ObjectInternal for u64 {}
-impl ObjectInternal for i32 {}
-impl ObjectInternal for u32 {}
-impl ObjectInternal for i16 {}
-impl ObjectInternal for u16 {}
-impl ObjectInternal for i8 {}
-impl ObjectInternal for u8 {}
-
-pub struct Heap {
-    pub data: *mut [u8],
-}
-
-impl Heap {
-    
-    pub fn new() -> Self {
-        let mut box_ = Vec::<u8>::with_capacity(1024).into_boxed_slice();
-        let ptr = Box::into_raw(box_);
-
-        Self {
-            data: ptr,
-        }
-    }
-
-    pub fn allocate_object_typed<T: ?Sized + ObjectInternal>(class: &Class) -> *mut Object<T> {
-        todo!()
-    }
-
-    pub fn allocate_class() {
-
-    }
-    
-}
-
-impl Drop for Heap {
-    fn drop(&mut self) {
-        unsafe {
-            drop(Box::from_raw(self.data));
-        }
-    }
-}
+pub mod heap;
 
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {

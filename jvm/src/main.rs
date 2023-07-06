@@ -13,6 +13,7 @@ use jvm::classfile::resolved::Class;
 use jvm::jit::wasm::{compile_class, compile_method};
 use jvm::{ClassLoadError, JVM};
 use jvm::bytecode::JValue;
+use jvm::heap::Object;
 use jvm::linker::ClassLoader;
 use jvm::thread::{Thread, ThreadHandle};
 use jvm_types::JParse;
@@ -30,12 +31,26 @@ fn run(wasm: &[u8]) {
     // main.call(&mut store, 0);
 }
 
-#[derive(Debug)]
 struct NativeClassLoader {
     pub classes: RwLock<HashMap<String, Arc<Class>>>,
 }
 
+impl Debug for NativeClassLoader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NativeClassLoader")
+    }
+}
+
+impl NativeClassLoader {
+
+    unsafe fn dropper(ptr: *const ()) {
+        Arc::from_raw(ptr as *const NativeClassLoader);
+    }
+
+}
+
 impl ClassLoader for NativeClassLoader {
+
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
         let mut path = PathBuf::new();
         path.push("./jvm/test_classes");
@@ -66,15 +81,23 @@ fn main() {
 
     let bootstrapper = Arc::new(mock);
 
-    let jvm = JVM::new(bootstrapper.clone() as Arc<dyn ClassLoader>);
+    let jvm = JVM::new(bootstrapper.clone() as Arc<dyn ClassLoader<>>);
+
+    let string = jvm.heap.allocate_string("Hello world!", &jvm);
+
+    unsafe {
+        dbg!(&(*(*string.value).body.value).body.body[..]);
+    }
 
     let class = jvm.find_class("Main", bootstrapper.clone()).unwrap();
 
     let mut handle = jvm.create_thread(bootstrapper.clone());
     let now = Instant::now();
+
     let result = handle.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[
-        JValue::Reference(0 as *mut ())
+        JValue::Reference(Object::NULL)
     ]).unwrap();
+
     println!("main(null) = {:?} in {}ms", result, Instant::now().duration_since(now).as_millis());
 
     // let compiled = compile_class(&class, &jvm);

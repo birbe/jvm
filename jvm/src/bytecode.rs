@@ -3,6 +3,7 @@ use jvm_types::JParse;
 use parse_macro::JParse;
 use std::io::{Read, Seek};
 use std::ops::Deref;
+use crate::heap::Object;
 
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
 pub struct LookupEntry {
@@ -10,9 +11,9 @@ pub struct LookupEntry {
     offset: i32,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
 pub enum JValue {
-    Reference(*mut ()),
+    Reference(Object),
     Int(i32),
     Long(i64),
     Float(f32),
@@ -24,7 +25,7 @@ pub enum JValue {
 impl JValue {
     pub fn as_u64(&self) -> u64 {
         match self {
-            JValue::Reference(ptr) => *ptr as usize as u64,
+            JValue::Reference(ptr) => ptr.get_raw() as usize as u64,
             JValue::Int(int) => *int as u64,
             JValue::Long(long) => *long as u64,
             JValue::Float(float) => unsafe { std::mem::transmute::<f32, u32>(*float) as u64 },
