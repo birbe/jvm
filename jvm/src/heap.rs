@@ -3,8 +3,9 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::mem::{align_of, size_of};
 use std::ptr::Pointee;
+use bitflags::Flags;
 use cesu8str::Cesu8String;
-use crate::classfile::resolved::{Class, FieldType};
+use crate::classfile::resolved::{AccessFlags, Class, FieldType};
 use crate::JVM;
 
 pub unsafe trait ObjectInternal {}
@@ -64,7 +65,7 @@ macro_rules! impl_primitive {
                 $b
             }
 
-            fn as_field_type(&self) -> FieldType {
+            fn field_type() -> FieldType {
                 $c
             }
         }
@@ -106,7 +107,7 @@ impl Heap {
     }
 
     fn recurse_get_heap_size(class: &Class) -> usize {
-        let mut size = class.fields.len() * size_of::<u64>();
+        let mut size = class.fields.iter().map(|field| (!field.access_flags.contains(AccessFlags::STATIC)) as usize).sum::<usize>() * size_of::<u64>();
         match &class.super_class {
             None => {}
             Some(superclass) => size += Self::recurse_get_heap_size(superclass)
@@ -176,16 +177,14 @@ impl Heap {
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
     pub fn allocate_raw_primitive_array<T: AsJavaPrimitive + Default>(&self, length: i32) -> *mut RawObject<RawArray<T>> {
-        let dummy = T::default();
-
-        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<T>() * length as usize);
+        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<T>() * length as usize) + 4;
         let mut layout = Layout::from_size_align(size, align_of::<u64>()).unwrap();
         let mut alloc = unsafe { alloc(layout) };
 
         let object_ptr: *mut RawObject<RawArray<T>> = std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
 
         let mut types = self.types.write();
-        let field_type = dummy.as_field_type();
+        let field_type = T::field_type();
 
         if !types.contains(&field_type) {
             types.insert(Box::new(field_type.clone()));
@@ -246,6 +245,7 @@ impl Drop for Heap {
 #[repr(C)]
 pub struct RawArray<T: ObjectInternal> {
     pub length: i32,
+    padding: [u64; 0],
     pub body: [T]
 }
 
@@ -278,6 +278,6 @@ pub trait AsJavaPrimitive: Default + ObjectInternal {
 
     fn get(&self) -> JavaPrimitive;
 
-    fn as_field_type(&self) -> FieldType;
+    fn field_type() -> FieldType where Self: Sized;
 
 }
