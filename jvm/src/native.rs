@@ -6,7 +6,7 @@ use crate::thread::{FrameStack, Thread};
 use std::io::Write;
 
 
-unsafe extern "C" fn println(frame_stack: *mut FrameStack, thread: *mut Thread) -> u64 {
+extern "C" fn println(frame_stack: &mut FrameStack, thread: &mut Thread) -> u64 {
     let frame_stack = unsafe { &mut *frame_stack };
     let frame = unsafe { (*frame_stack.get_first()).as_frame() };
 
@@ -34,15 +34,15 @@ unsafe extern "C" fn println(frame_stack: *mut FrameStack, thread: *mut Thread) 
 }
 
 #[allow(non_snake_case)]
-unsafe extern "C" fn java_lang_System_registerNatives(
-    _frame_stack: *mut FrameStack,
-    _thread: *mut Thread,
+extern "C" fn java_lang_System_registerNatives(
+    _frame_stack: &mut FrameStack,
+    _thread: &mut Thread,
 ) -> u64 {
     0
 }
 
 #[allow(non_snake_case)]
-unsafe extern "C" fn java_lang_Object_registerNatives(
+extern "C" fn java_lang_Object_registerNatives(
     _frame_stack: *mut FrameStack,
     _thread: *mut Thread,
 ) -> u64 {

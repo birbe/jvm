@@ -5,7 +5,7 @@ use crate::{JVM, routine_resolve_field};
 use crate::bytecode::{Bytecode, JValue};
 
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Constant, Field, FieldType, Method, MethodDescriptor, NameAndType, Ref, ReferenceKind, ReturnType};
-use crate::heap::{Object, RawObject};
+use crate::heap::{Int, Object, RawObject};
 use crate::linker::ClassLoader;
 use bitflags::Flags;
 use colored::Colorize;
@@ -17,6 +17,7 @@ use std::pin::Pin;
 
 use std::sync::atomic::{Ordering};
 use std::sync::Arc;
+use arrayvec::ArrayVec;
 
 #[derive(Debug)]
 pub enum RuntimeException {
@@ -31,13 +32,13 @@ pub enum ThreadError {
 
 #[repr(C)]
 pub struct RawFrame {
-    pub method_ref: *const Ref,
-    pub program_counter: u32,
-    pub locals_length: usize,
-    pub locals: *mut u64,
-    pub stack_index: usize,
-    pub stack_length: usize,
-    pub stack: *mut u64,
+    pub(crate) method_ref: *const Ref,
+    pub(crate) program_counter: u32,
+    pub(crate) locals_length: usize,
+    pub(crate) locals: *mut u64,
+    pub(crate) stack_index: usize,
+    pub(crate) stack_length: usize,
+    pub(crate) stack: *mut u64,
 }
 
 impl RawFrame {
@@ -56,13 +57,15 @@ impl RawFrame {
         }
     }
 
-    pub unsafe fn as_frame(&mut self) -> Frame {
-        Frame {
-            method_ref: &*self.method_ref,
-            program_counter: &mut self.program_counter,
-            locals: std::slice::from_raw_parts_mut(self.locals, self.locals_length),
-            stack_length: &mut self.stack_index,
-            stack: std::slice::from_raw_parts_mut(self.stack, self.stack_length),
+    pub fn as_frame(&mut self) -> Frame {
+        unsafe {
+            Frame {
+                method_ref: &*self.method_ref,
+                program_counter: &mut self.program_counter,
+                locals: std::slice::from_raw_parts_mut(self.locals, self.locals_length),
+                stack_length: &mut self.stack_index,
+                stack: std::slice::from_raw_parts_mut(self.stack, self.stack_length),
+            }
         }
     }
 }
@@ -92,11 +95,32 @@ pub struct Frame<'a> {
     pub stack: &'a mut [u64],
 }
 
+impl<'a> Frame<'a> {
+
+    pub fn pop<const N: usize>(&mut self) -> [u64; N] {
+        assert!(*self.stack_length >= N);
+
+        *self.stack_length -= N;
+        (&self.stack[*self.stack_length-N..*self.stack_length]).try_into().unwrap()
+    }
+
+    pub fn push<const N: usize>(&mut self, operands: [u64; N]) {
+        let len = *self.stack_length;
+        (&mut self.stack[len..len+N]).copy_from_slice(&operands);
+        *self.stack_length += N;
+    }
+
+}
+
 ///Stack of frames
 #[derive(Debug)]
 pub struct FrameStack {
     pub frames: Pin<Box<[MaybeUninit<RawFrame>; 1024]>>,
     pub frame_index: isize,
+}
+
+pub struct FrameStackView<'a> {
+    pub frames: &'a mut [RawFrame]
 }
 
 impl<'jvm> FrameStack {
@@ -114,10 +138,12 @@ impl<'jvm> FrameStack {
         self.frames[self.frame_index as usize] = MaybeUninit::new(frame);
     }
 
-    pub fn pop(&mut self) {
+    pub fn pop(&mut self) -> RawFrame {
         assert!(self.frame_index > -1);
-        self.frames[self.frame_index as usize] = MaybeUninit::uninit();
+        let frame = std::mem::replace(&mut self.frames[self.frame_index as usize], MaybeUninit::uninit());
         self.frame_index -= 1;
+
+        unsafe { frame.assume_init() }
     }
 
     pub fn get_first(&mut self) -> *mut RawFrame {
@@ -127,7 +153,7 @@ impl<'jvm> FrameStack {
 }
 
 pub enum ThreadStepResult {
-    Ok(*mut RawFrame),
+    Ok(RawFrame),
     Error(ThreadError),
     Return(Option<JValue>),
 }
@@ -182,8 +208,6 @@ impl ThreadHandle {
         method_descriptor: &str,
         args: &[JValue],
     ) -> Result<Option<JValue>, JavaBarrierError> {
-        let frame_store = unsafe { self.frame_store.as_mut().get_mut() as *mut FrameStack };
-
         let class = self
             .class_loader
             .get_class(classpath)
@@ -215,7 +239,8 @@ impl ThreadHandle {
 
         let u64_args: Vec<u64> = args.iter().map(|arg| arg.as_u64()).collect();
 
-        let return_value = unsafe { handle.invoke(&u64_args, frame_store, self.thread) };
+        let thread_ptr = self.thread;
+        let return_value = handle.invoke(&u64_args, &mut self.frame_store, unsafe { &mut *thread_ptr });
 
         let jvalue = match &method.descriptor.return_type {
             ReturnType::FieldType(field_type) => Some(match field_type {
@@ -244,55 +269,28 @@ impl ThreadHandle {
         Ok(jvalue)
     }
 
-    //Conforms to the ABI
-    pub unsafe extern "C" fn interpret_trampoline(
-        frame_store: *mut FrameStack,
-        thread: *mut Thread,
-    ) -> u64 {
-        Self::interpret(
-            (*(*frame_store).get_first()).as_frame(),
-            &mut *thread,
-            thread,
-            frame_store,
-        )
-        .unwrap_or(JValue::Long(0))
-        .as_u64()
-    }
-
-    pub fn interpret(
-        mut frame: Frame,
+    pub extern "C" fn interpret(
+        frame_stack: &mut FrameStack,
         thread: &mut Thread,
-        thread_raw: *mut Thread,
-        frame_stack: *mut FrameStack,
-    ) -> Option<JValue> {
-        let return_value = loop {
-            match Self::step(
-                //Safety: RawFrame has the same in-memory representation as Frame. As we have a *mut Thread, that implies
-                //that the JVM is also still alive due to the Arc<JVM>. This also implies that the *const Ref and thus the &'a Ref is still valid.
-                frame,
-                frame_stack,
-                thread,
-                thread_raw,
-            ) {
-                ThreadStepResult::Ok(frame_out) => {
-                    frame = unsafe { (*frame_out).as_frame() };
-                }
+    ) -> u64 {
+
+        let mut raw_frame = frame_stack.pop();
+
+        loop {
+            match Self::step(raw_frame, frame_stack, thread) {
+                ThreadStepResult::Ok(frame) => raw_frame = frame,
                 ThreadStepResult::Error(error) => panic!("{:?}", error),
-                ThreadStepResult::Return(result) => unsafe {
-                    (*frame_stack).pop();
-
-                    break result;
-                },
+                ThreadStepResult::Return(value) => {
+                    return value.unwrap_or(JValue::Long(0)).as_u64()
+                }
             }
-        };
-
-        return_value
+        }
     }
 
-    fn init_static(class: &Class, frame_store: *mut FrameStack, thread: &mut Thread) {
+    fn init_static(class: &Class, frame_stack: &mut FrameStack, thread: &mut Thread) {
         match &class.super_class {
             None => {}
-            Some(superclass) => Self::init_static(superclass, frame_store, thread),
+            Some(superclass) => Self::init_static(superclass, frame_stack, thread),
         }
 
         if !class.methods.iter().any(|field| *field.name == "<clinit>") {
@@ -331,7 +329,7 @@ impl ThreadHandle {
                 };
 
                 unsafe {
-                    method_handle.invoke(&[], frame_store, thread as *mut Thread);
+                    method_handle.invoke(&[], frame_stack, thread);
                 };
 
                 class.static_init_state.store(2, Ordering::Release);
@@ -342,11 +340,12 @@ impl ThreadHandle {
     }
 
     fn step(
-        frame: Frame,
-        frame_stack: *mut FrameStack,
-        thread: &mut Thread,
-        thread_raw: *mut Thread,
+        mut raw_frame: RawFrame,
+        frame_stack: &mut FrameStack,
+        thread: &mut Thread
     ) -> ThreadStepResult {
+        let mut frame = raw_frame.as_frame();
+
         //TODO: Super slow to do this at *every* instruction
         let class = thread
             .class_loader
@@ -398,7 +397,7 @@ impl ThreadHandle {
 
                 let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..];
 
-                let result = unsafe { method_handle.invoke(args, frame_stack, thread_raw) };
+                let result = unsafe { method_handle.invoke(args, frame_stack, thread) };
 
                 *frame.stack_length -= method_descriptor.args.len();
 
@@ -452,6 +451,7 @@ impl ThreadHandle {
                     MethodDescriptor::try_from(&**method_ref.name_and_type.descriptor).unwrap();
 
                 let args = &frame.stack[*frame.stack_length - method_descriptor.args.len() - 1..];
+                *frame.stack_length -= method_descriptor.args.len() + 1;
 
                 if method_descriptor.return_type != ReturnType::Void {
                     panic!()
@@ -465,9 +465,7 @@ impl ThreadHandle {
                     refs.get(method_ref).unwrap().clone()
                 };
 
-                unsafe { method_handle.invoke(args, frame_stack, thread_raw) };
-
-                *frame.stack_length -= method_descriptor.args.len() + 1;
+                unsafe { method_handle.invoke(args, frame_stack, thread) };
             }
             Bytecode::Invokevirtual(constant_index) => {
                 let method_ref = class
@@ -522,7 +520,7 @@ impl ThreadHandle {
                     let args =
                         &frame.stack[*frame.stack_length - method_descriptor.args.len() - 1..];
 
-                    unsafe { method_handle.invoke(args, frame_stack, thread_raw) };
+                    method_handle.invoke(args, frame_stack, thread);
 
                     *frame.stack_length -= method_descriptor.args.len() + 1;
                 } else {
@@ -577,19 +575,19 @@ impl ThreadHandle {
                 return ThreadStepResult::Return(None);
             }
             Bytecode::Ireturn => {
-                let int = frame.stack[*frame.stack_length - 1] as i32;
-                return ThreadStepResult::Return(Some(JValue::Int(int)));
+                let [int] = frame.pop();
+
+                return ThreadStepResult::Return(Some(JValue::Int(int as Int)));
             }
             Bytecode::Bipush(value) => {
-                frame.stack[*frame.stack_length] = *value as i32 as u64;
-                *frame.stack_length += 1;
-            }
+                frame.push([*value as i32 as u64])
+            },
             Bytecode::Aload_n(index) | Bytecode::Aload(index) => {
-                frame.stack[*frame.stack_length] = frame.locals[*index as usize];
-                *frame.stack_length += 1;
+                frame.push([frame.locals[*index as usize]]);
             }
             Bytecode::Areturn => {
-                let ptr = frame.stack[*frame.stack_length - 1];
+                let [ptr] = frame.pop();
+
                 return ThreadStepResult::Return(Some(JValue::Reference(unsafe {
                     Object::from_raw(ptr as *mut RawObject<()>)
                 })));
@@ -611,12 +609,9 @@ impl ThreadHandle {
                     Self::init_static(&field_class, frame_stack, thread);
                 }
 
-                let value = frame.stack[*frame.stack_length - 1];
-                let ptr = frame.stack[*frame.stack_length - 2];
+                let [ptr, value] = frame.pop();
 
                 let object = unsafe { Object::from_raw(ptr as *mut RawObject<()>) };
-
-                *frame.stack_length -= 2;
 
                 unsafe { thread.jvm.heap.set_class_field(&object, field, value as i64); }
             }
@@ -884,6 +879,6 @@ impl ThreadHandle {
 
         drop(frame);
 
-        ThreadStepResult::Ok(unsafe { (*frame_stack).get_first() })
+        ThreadStepResult::Ok(raw_frame)
     }
 }

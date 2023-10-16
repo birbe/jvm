@@ -7,7 +7,7 @@ use std::fmt::{Debug, Formatter};
 use std::ptr;
 use std::sync::{Arc};
 
-pub type ABIHandlePtr = unsafe extern "C" fn(*mut FrameStack, thread: *mut Thread) -> u64;
+pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> u64;
 
 pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
@@ -37,11 +37,11 @@ pub struct MethodHandle {
 }
 
 impl MethodHandle {
-    pub unsafe fn invoke(
+    pub fn invoke(
         &self,
         args: &[u64],
-        frame_store: *mut FrameStack,
-        thread: *mut Thread,
+        frame_store: &mut FrameStack,
+        thread: &mut Thread,
     ) -> u64 {
         let mut locals = Vec::from(args);
 
@@ -64,7 +64,7 @@ impl MethodHandle {
         match &self.context {
             ExecutionContext::Interpret(_) => {}
             ExecutionContext::JIT => {}
-            ExecutionContext::Native => unsafe { (*frame_store).pop() },
+            ExecutionContext::Native => { frame_store.pop(); },
         }
 
         out

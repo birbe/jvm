@@ -182,7 +182,7 @@ impl JVM {
             if !method.access_flags.contains(AccessFlags::NATIVE) {
                 #[cfg(not(target_arch = "wasm32"))]
                 let method_handle = MethodHandle {
-                    ptr: ThreadHandle::interpret_trampoline,
+                    ptr: ThreadHandle::interpret,
                     context: ExecutionContext::Interpret(Box::new(move |args| {
                         RawFrame::new(
                             &ref_clone.clone(),
