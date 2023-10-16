@@ -1,20 +1,20 @@
+
+
+
+
+
 use cranelift::prelude::*;
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Module};
-use crate::bytecode::Bytecode;
-use crate::classfile::resolved::{Attribute, Method};
-use crate::classfile::resolved::attribute::Instruction;
-use crate::jit;
-use crate::jit::{create_scopes, find_loops, identify_scopes, label_nodes, LabeledNode};
+use cranelift_jit::{JITModule};
+
 
 pub enum CompileError {
-    NoCode
+    NoCode,
 }
 
 struct JITContext {
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
-    module: JITModule
+    module: JITModule,
 }
 
 // impl JITContext {

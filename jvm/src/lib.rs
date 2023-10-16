@@ -2,56 +2,56 @@
 #![feature(slice_ptr_len)]
 #![feature(ptr_metadata)]
 
-use crate::bytecode::Bytecode;
-use crate::classfile::resolved::attribute::Instruction;
-use crate::classfile::resolved::{AccessFlags, Attribute, Class, Method, NameAndType, Ref};
-use crate::execution::{ABIHandlePtr, ExecutionContext, MethodHandle};
+
+
+use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, NameAndType, Ref};
+use crate::classfile::{ClassFile};
+use crate::execution::{ExecutionContext, MethodHandle};
 use crate::thread::{FrameStack, RawFrame, Thread, ThreadHandle};
+use bitflags::Flags;
+
+use heap::{Heap};
+use jvm_types::JParse;
+use linker::ClassLoader;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::fs::DirEntry;
-use std::mem::size_of;
-use std::io::{Cursor, Stdout, stdout, Write};
-use std::marker::PhantomData;
-use std::ops::Deref;
+
+use std::io::{Cursor, Write};
+
+
+
 use std::pin::Pin;
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use bitflags::Flags;
-use heap::{Heap, ObjectInternal};
-use jvm_types::JParse;
-use linker::ClassLoader;
-use crate::classfile::{ClassFile, ConstantInfo};
-use heap::StringObject;
 
 pub mod classfile;
 mod tests;
 
 pub mod bytecode;
 pub mod execution;
+pub mod heap;
 pub mod jit;
-pub mod thread;
 pub mod linker;
 pub mod native;
-pub mod heap;
+pub mod thread;
 
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {
     ClassDefNotFound(String),
     MalformedClassDef,
-    ParserError
+    ParserError,
 }
 
 pub enum RuntimeError {
     ClassNotLoaded,
-    ClassLoadError(ClassLoadError)
+    ClassLoadError(ClassLoadError),
 }
 
 pub struct ClassLoaderStore {
     pub loader: Arc<dyn ClassLoader>,
     pub refs: RwLock<HashSet<Pin<Arc<Ref>>>>,
-    pub method_refs: RwLock<HashMap<Arc<Ref>, Arc<MethodHandle>>>
+    pub method_refs: RwLock<HashMap<Arc<Ref>, Arc<MethodHandle>>>,
 }
 
 pub struct JVM {
@@ -62,10 +62,9 @@ pub struct JVM {
 }
 
 impl JVM {
-
-    pub fn new(class_loader: Arc<dyn ClassLoader>) -> Arc<Self> {
+    pub fn new(class_loader: Arc<dyn ClassLoader>, stdout: Mutex<Box<dyn Write>>) -> Arc<Self> {
         Arc::new(Self {
-            stdout: Mutex::new(Box::new(Cursor::new(vec![]))),
+            stdout,
             threads: Default::default(),
             heap: Heap::new(),
             class_loaders: RwLock::new(vec![Pin::new(Box::new(ClassLoaderStore {
@@ -76,7 +75,7 @@ impl JVM {
         })
     }
 
-    ///This is not an instanceof check. This returns if the provided child class is specifically *below* the parent class in the inheritance graph.
+    ///This is not an instanceof check. This returns if the provided child class is specifically *below* the parent class in the inheritance tree.
     pub fn is_subclass(child: &Class, parent: &Class) -> bool {
         if &*child.this_class == "java/lang/Object" {
             return false;
@@ -88,23 +87,32 @@ impl JVM {
 
         let super_class = match &child.super_class {
             None => "",
-            Some(super_class) => &super_class.this_class
+            Some(super_class) => &super_class.this_class,
         };
 
         if &*parent.this_class == super_class {
-            return true
+            return true;
         } else {
             Self::is_subclass(&child.super_class.as_ref().unwrap(), parent)
         }
     }
 
-    pub fn generate_class(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
+    pub fn generate_class(
+        &self,
+        classpath: &str,
+        class_loader: Arc<dyn ClassLoader>,
+    ) -> Result<Arc<Class>, ClassLoadError> {
+        let bytes = class_loader
+            .get_bytes(classpath)
+            .ok_or(ClassLoadError::ClassDefNotFound(classpath.into()))?;
 
-        let bytes = class_loader.get_bytes(classpath).ok_or(ClassLoadError::ClassDefNotFound(classpath.into()))?;
+        let classfile =
+            ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
 
-        let classfile = ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
-
-        let class = Arc::new(Class::init(&classfile, &self, class_loader.clone()).unwrap());
+        let class = Arc::new(
+            Class::init(&classfile, &self, class_loader.clone())
+                .ok_or(ClassLoadError::MalformedClassDef)?,
+        );
 
         class_loader.register_class(classpath, class.clone());
 
@@ -113,13 +121,15 @@ impl JVM {
         Ok(class)
     }
 
-    pub fn find_class(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>) -> Result<Arc<Class>, ClassLoadError> {
+    pub fn find_class(
+        &self,
+        classpath: &str,
+        class_loader: Arc<dyn ClassLoader>,
+    ) -> Result<Arc<Class>, ClassLoadError> {
         let get = class_loader.get_class(classpath);
         match get {
-            None => {
-                self.generate_class(classpath, class_loader.clone())
-            },
-            Some(get) => Ok(get)
+            None => self.generate_class(classpath, class_loader.clone()),
+            Some(get) => Ok(get),
         }
     }
 
@@ -138,12 +148,12 @@ impl JVM {
 
         ThreadHandle {
             thread: thread.data_ptr(),
-            guard: thread
+            guard: thread,
         }
     }
 
     fn register_refs(&self, loader: &dyn ClassLoader, class: &Class) {
-        let mut stores = self.class_loaders.read();
+        let stores = self.class_loaders.read();
 
         let store = &stores[loader.id()];
         let mut method_refs = store.method_refs.write();
@@ -152,53 +162,86 @@ impl JVM {
         for method in &class.methods {
             let ref_ = Arc::new(Ref {
                 class: class.this_class.clone(),
-                name_and_type: Arc::new(NameAndType { name: method.name.clone(), descriptor: Arc::new(method.descriptor.string.clone()) }),
+                name_and_type: Arc::new(NameAndType {
+                    name: method.name.clone(),
+                    descriptor: Arc::new(method.descriptor.string.clone()),
+                }),
             });
 
             refs.insert(Pin::new(ref_.clone()));
 
-            let (max_stack, max_locals) = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
-                (code.max_stack as usize + 1, code.max_locals as usize)
-            } else {
-                (0, 0)
-            };
+            let (max_stack, max_locals) =
+                if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
+                    (code.max_stack as usize + 1, code.max_locals as usize)
+                } else {
+                    (0, 0)
+                };
 
             let ref_clone = ref_.clone();
 
             if !method.access_flags.contains(AccessFlags::NATIVE) {
+                #[cfg(not(target_arch = "wasm32"))]
                 let method_handle = MethodHandle {
                     ptr: ThreadHandle::interpret_trampoline,
-                    context: ExecutionContext::Interpret(Box::new(move |args| RawFrame::new(
-                        &ref_clone.clone(),
-                        args.iter().copied().chain(std::iter::repeat(0).take(max_locals - args.len())).collect::<Vec<u64>>().into_boxed_slice(),
-                        vec![0u64; max_stack].into_boxed_slice(),
-                    ))),
-                    method_ref: ref_.clone()
+                    context: ExecutionContext::Interpret(Box::new(move |args| {
+                        RawFrame::new(
+                            &ref_clone.clone(),
+                            args.iter()
+                                .copied()
+                                .chain(std::iter::repeat(0).take(max_locals))
+                                .collect::<Vec<u64>>()
+                                .into_boxed_slice(),
+                            vec![0u64; max_stack].into_boxed_slice(),
+                        )
+                    })),
+                    method_ref: ref_.clone(),
                 };
+
+                #[cfg(target_arch = "wasm32")]
+                let method_handle = panic!("Linking on wasm32 has not yet been implemented");
 
                 method_refs.insert(ref_.clone(), Arc::new(method_handle));
             } else {
                 match native::link(&ref_) {
-                    None => {},
+                    None => {}
                     Some(ptr) => {
-                        method_refs.insert(ref_.clone(), Arc::new(MethodHandle {
-                            ptr,
-                            context: ExecutionContext::Native,
-                            method_ref: ref_.clone(),
-                        }));
+                        method_refs.insert(
+                            ref_.clone(),
+                            Arc::new(MethodHandle {
+                                ptr,
+                                context: ExecutionContext::Native,
+                                method_ref: ref_.clone(),
+                            }),
+                        );
                     }
                 }
             }
         }
     }
-
 }
 
 pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Arc<Ref>) {
     match class.get_method(&method_ref.name_and_type) {
         None => {}
-        Some(other_method) => {
+        Some(_other_method) => {}
+    }
+}
 
+pub fn routine_resolve_field<'a>(name_and_type: &'a NameAndType, class: &'a Class) -> Option<(&'a Field, &'a Class)> {
+    match class.get_field(name_and_type) {
+        None => {
+            //TODO: superinterfaces?
+
+            if let Some(superclass) = &class.super_class {
+                let super_resolve = routine_resolve_field(name_and_type, superclass);
+
+                if let Some(resolved) = super_resolve {
+                    return Some(resolved);
+                }
+            }
+
+            None
         }
+        Some(field) => Some((field, class)),
     }
 }

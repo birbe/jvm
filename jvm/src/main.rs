@@ -1,22 +1,22 @@
+use jvm::bytecode::JValue;
+use jvm::classfile::resolved::Class;
+
+use jvm::heap::{Object};
+
+use jvm::linker::ClassLoader;
+
+use jvm::{JVM};
+
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::fmt::{Debug, format, Formatter};
+use std::fmt::{Debug, Formatter};
 use std::fs;
-use std::io::Cursor;
+use std::io::{stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use parking_lot::RwLock;
-use wasm_encoder::{CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module, TypeSection, ValType};
+
 use wasmtime::{Engine, Instance, Store};
-use jvm::classfile::ClassFile;
-use jvm::classfile::resolved::Class;
-use jvm::jit::wasm::{compile_class, compile_method};
-use jvm::{ClassLoadError, JVM};
-use jvm::bytecode::JValue;
-use jvm::heap::{Object, RawArray, RawString};
-use jvm::linker::ClassLoader;
-use jvm::thread::{Thread, ThreadHandle};
-use jvm_types::JParse;
 
 extern crate jvm;
 
@@ -24,10 +24,10 @@ fn run(wasm: &[u8]) {
     let engine = Engine::default();
     let module = wasmtime::Module::from_binary(&engine, wasm).unwrap();
     let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module,&[]).unwrap();
+    let instance = Instance::new(&mut store, &module, &[]).unwrap();
 
     let main_func = instance.get_func(&mut store, "main").unwrap();
-    let main = main_func.typed::<i32, i32>(&store).unwrap();
+    let _main = main_func.typed::<i32, i32>(&store).unwrap();
     // main.call(&mut store, 0);
 }
 
@@ -42,15 +42,12 @@ impl Debug for NativeClassLoader {
 }
 
 impl NativeClassLoader {
-
     unsafe fn dropper(ptr: *const ()) {
         Arc::from_raw(ptr as *const NativeClassLoader);
     }
-
 }
 
 impl ClassLoader for NativeClassLoader {
-
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
         let mut path = PathBuf::new();
         path.push("./jvm/test_classes");
@@ -80,27 +77,49 @@ fn main() {
     };
 
     let bootstrapper = Arc::new(mock);
-
-    let jvm = JVM::new(bootstrapper.clone() as Arc<dyn ClassLoader<>>);
-
-    let class = jvm.find_class("Main", bootstrapper.clone()).unwrap();
+    let jvm = JVM::new(
+        bootstrapper.clone() as Arc<dyn ClassLoader>,
+        Mutex::new(Box::new(stdout())),
+    );
+    let _class = jvm
+        .find_class("Main", bootstrapper.clone())
+        // .find_class("net/minecraft/bundler/Main", bootstrapper.clone())
+        .unwrap();
 
     let mut handle = jvm.create_thread(bootstrapper.clone());
     let now = Instant::now();
 
-    let result = handle.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[
-        JValue::Reference(Object::NULL)
-    ]).unwrap();
+    let string = jvm.heap.allocate_string("OwO", &jvm);
 
-    println!("main(null) = {:?} in {}ms", result, Instant::now().duration_since(now).as_millis());
+    let string_array = jvm.heap.allocate_raw_object_array(&string.class, 1);
+
+    unsafe { (&mut *string_array).body.body[0] = string.value };
+
+    let array_object = unsafe { Object::from_raw(string_array) };
+
+    println!("{}", array_object.get_raw() as usize);
+
+    let result = handle
+        .call(
+            "Main",
+            "main",
+            "([Ljava/lang/String;)[Ljava/lang/String;",
+            &[JValue::Reference(array_object)],
+        )
+        .unwrap();
+
+    println!(
+        "main(null) = {:?} in {}ms",
+        result,
+        Instant::now().duration_since(now).as_millis()
+    );
 
     // let compiled = compile_class(&class, &jvm);
     // let wasm = compiled.module.finish();
-
+    //
     // let wat = wasmprinter::print_bytes(&wasm).unwrap();
-
+    //
     // wasmparser::validate(&wasm).unwrap();
-
+    //
     // run(&wasm);
-
 }

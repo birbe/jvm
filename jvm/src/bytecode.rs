@@ -1,9 +1,10 @@
+use crate::heap::Object;
 use byteorder::{BigEndian, ReadBytesExt};
 use jvm_types::JParse;
 use parse_macro::JParse;
-use std::io::{Read, Seek};
+use std::fmt::{Display, Formatter};
+use std::io::{Error, Read, Seek};
 use std::ops::Deref;
-use crate::heap::Object;
 
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
 pub struct LookupEntry {
@@ -19,7 +20,7 @@ pub enum JValue {
     Float(f32),
     Double(f64),
     Short(i16),
-    Byte(i8)
+    Byte(i8),
 }
 
 impl JValue {
@@ -28,11 +29,23 @@ impl JValue {
             JValue::Reference(ptr) => ptr.get_raw() as usize as u64,
             JValue::Int(int) => *int as u64,
             JValue::Long(long) => *long as u64,
-            JValue::Float(float) => unsafe { std::mem::transmute::<f32, u32>(*float) as u64 },
-            JValue::Double(double) => unsafe { std::mem::transmute::<f64, u64>(*double) },
+            JValue::Float(float) => u32::from_ne_bytes(float.to_ne_bytes()) as u64,
+            JValue::Double(double) => u64::from_ne_bytes(double.to_ne_bytes()),
             JValue::Short(short) => *short as u64,
-            JValue::Byte(byte) => *byte as u64
+            JValue::Byte(byte) => *byte as u64,
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum BytecodeParseError {
+    InvalidOpcode,
+    IOError(std::io::Error),
+}
+
+impl From<std::io::Error> for BytecodeParseError {
+    fn from(value: Error) -> Self {
+        Self::IOError(value)
     }
 }
 
@@ -203,10 +216,16 @@ pub enum Bytecode {
     Wide(Vec<u8>),           //0xc4
 }
 
+impl Display for Bytecode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 impl Bytecode {
     pub fn from_bytes<G: Clone + Read, R: Read + Seek + Deref<Target = G>>(
         mut reader: R,
-    ) -> Result<Self, std::io::Error> {
+    ) -> Result<Self, BytecodeParseError> {
         let opcode = reader.read_u8()?;
 
         let bytecode = match opcode {
@@ -308,7 +327,11 @@ impl Bytecode {
             0x68 => Self::Imul,
             0x74 => Self::Ineg,
             0xc1 => Self::Instanceof(reader.read_u16::<BigEndian>()?),
-            0xba => Self::Invokedynamic(reader.read_u16::<BigEndian>()?),
+            0xba => {
+                let out = Self::Invokedynamic(reader.read_u16::<BigEndian>()?);
+                reader.read_u16::<BigEndian>()?;
+                out
+            }
             0xb9 => Self::Invokeinterface(reader.read_u16::<BigEndian>()?, reader.read_u8()?),
             0xb7 => Self::Invokespecial(reader.read_u16::<BigEndian>()?),
             0xb8 => Self::Invokestatic(reader.read_u16::<BigEndian>()?),
@@ -378,7 +401,7 @@ impl Bytecode {
             0x5f => Self::Swap,
             0xaa => Self::Tableswitch,
             0xcf => Self::Wide(Vec::new()),
-            _ => unimplemented!("Invalid opcode"),
+            _ => return Err(BytecodeParseError::InvalidOpcode),
         };
 
         Ok(bytecode)

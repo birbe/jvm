@@ -47,7 +47,9 @@ impl JParse for ConstantInfoPool {
         loop {
             let constant = ConstantInfo::from_bytes(&mut r)?;
 
-            let inc = if matches!(constant, ConstantInfo::Long(_)) || matches!(constant, ConstantInfo::Double(_)) {
+            let inc = if matches!(constant, ConstantInfo::Long(_))
+                || matches!(constant, ConstantInfo::Double(_))
+            {
                 2
             } else {
                 1
@@ -56,7 +58,9 @@ impl JParse for ConstantInfoPool {
             constants.insert(slot + 1, constant);
             slot += inc;
 
-            if max_index == slot { break };
+            if max_index == slot {
+                break;
+            };
         }
 
         Ok(Self { constants })
@@ -76,7 +80,7 @@ impl JParse for ConstantInfoPool {
 }
 
 pub mod constant {
-    use crate::classfile::AttributeInfo;
+    
     use cesu8str::Cesu8String;
     use jvm_types::JParse;
     use parse_macro::JParse;
@@ -166,7 +170,6 @@ pub mod constant {
     pub struct PackageInfo {
         pub name_index: u16,
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -250,6 +253,17 @@ pub mod attribute_info {
         pub code: Vec<u8>,
         pub exception_table: Vec<ExceptionTableInfo>,
         pub attributes: Vec<AttributeInfo>,
+    }
+
+    #[derive(JParse, Clone, Debug, PartialEq)]
+    pub struct BootstrapMethodsInfo {
+        pub bootstrap_method_ref: u16,
+        pub bootstrap_arguments: Vec<u16>,
+    }
+
+    #[derive(JParse, Clone, Debug, PartialEq)]
+    pub struct BootstrapMethodsAttributeInfo {
+        pub bootstrap_methods: Vec<BootstrapMethodsInfo>,
     }
 
     #[derive(JParse, Clone, Debug, PartialEq)]

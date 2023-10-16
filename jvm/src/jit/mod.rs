@@ -2,14 +2,13 @@ use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::jit::scc::{enumerate_graph, StronglyConnectedComponents};
 
-use std::collections::{HashMap};
-use std::io::Read;
+use std::collections::HashMap;
+
 use std::mem;
 use std::ops::Range;
 
-
-mod scc;
 pub mod compile;
+mod scc;
 pub mod wasm;
 
 pub type Index = usize;
@@ -95,10 +94,16 @@ pub struct Loop {
     pub scc: usize,
     pub nodes: Vec<ComponentNode>,
     pub headers: Vec<ComponentNode>,
-    pub invokers: Vec<ComponentNode>
+    pub invokers: Vec<ComponentNode>,
 }
 
-pub fn find_loops(instructions: &[Instruction]) -> (HashMap<usize, Loop>, Vec<ComponentNode>, HashMap<usize, Vec<usize>>) {
+pub fn find_loops(
+    instructions: &[Instruction],
+) -> (
+    HashMap<usize, Loop>,
+    Vec<ComponentNode>,
+    HashMap<usize, Vec<usize>>,
+) {
     let byte_index_to_instruction_index: HashMap<u32, u32> = instructions
         .iter()
         .map(|instruction| (instruction.bytes_index, instruction.bytecode_index))
@@ -147,42 +152,58 @@ pub fn find_loops(instructions: &[Instruction]) -> (HashMap<usize, Loop>, Vec<Co
         scc_s.get_mut(&node.scc).unwrap().push(node.idx);
     });
 
-    (scc_s
-        .iter()
-        .filter(|(_scc, nodes)| nodes.len() > 1)
-        .map(|(scc, node_idxs)| {
-            let (loop_headers, invokers): (Vec<ComponentNode> ,Vec<Vec<usize>>) = node_idxs
-                .iter()
-                .filter_map(|idx| {
-                    let node = &nodes[*idx];
+    (
+        scc_s
+            .iter()
+            .filter(|(_scc, nodes)| nodes.len() > 1)
+            .map(|(scc, node_idxs)| {
+                let (loop_headers, invokers): (Vec<ComponentNode>, Vec<Vec<usize>>) = node_idxs
+                    .iter()
+                    .filter_map(|idx| {
+                        let node = &nodes[*idx];
 
-                    let predecessors: Vec<usize> = node.predecessors.iter().filter(|&pre| {
-                        let predecessor = &nodes[*pre];
-                        node.scc != predecessor.scc
-                    }).copied().collect();
+                        let predecessors: Vec<usize> = node
+                            .predecessors
+                            .iter()
+                            .filter(|&pre| {
+                                let predecessor = &nodes[*pre];
+                                node.scc != predecessor.scc
+                            })
+                            .copied()
+                            .collect();
 
-                    if predecessors.len() > 0 {
-                        Some((node.clone(), predecessors))
-                    } else {
-                        None
-                    }
-                })
-                .unzip();
+                        if predecessors.len() > 0 {
+                            Some((node.clone(), predecessors))
+                        } else {
+                            None
+                        }
+                    })
+                    .unzip();
 
-            let mut invokers: Vec<usize> = invokers.into_iter().flatten().collect();
-            invokers.dedup();
+                let mut invokers: Vec<usize> = invokers.into_iter().flatten().collect();
+                invokers.dedup();
 
-            (*scc, Loop {
-                scc: *scc,
-                nodes: scc_s[scc].iter().map(|idx| nodes[*idx].clone()).collect(),
-                headers: loop_headers,
-                invokers: invokers.into_iter().map(|idx| nodes[idx].clone()).collect(),
+                (
+                    *scc,
+                    Loop {
+                        scc: *scc,
+                        nodes: scc_s[scc].iter().map(|idx| nodes[*idx].clone()).collect(),
+                        headers: loop_headers,
+                        invokers: invokers.into_iter().map(|idx| nodes[idx].clone()).collect(),
+                    },
+                )
             })
-        }).collect(), nodes, scc_s)
+            .collect(),
+        nodes,
+        scc_s,
+    )
 }
 
-pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s: &HashMap<usize, Vec<usize>>) -> Vec<LabeledNode> {
-
+pub fn label_nodes(
+    loops: &HashMap<usize, Loop>,
+    nodes: &[ComponentNode],
+    scc_s: &HashMap<usize, Vec<usize>>,
+) -> Vec<LabeledNode> {
     //Loops with multiple entries must be fixed, as well as loops with a single entry but said entry
     // is not the earliest instruction in the loop, e.g.
     // A -> C
@@ -190,71 +211,55 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
     // C -> B
     // C is a loop entry but B is the first instruction in the loop
 
-    let irreducible: HashMap<_, _> = loops.iter().filter(|(scc_idx, loop_)| {
-        if loop_.headers.len() > 1 {
-            return true;
-        }
-
-        let scc = scc_s.get(scc_idx).unwrap();
-
-        for node in loop_.headers.iter() {
-            if node.idx != scc[0] {
+    let _irreducible: HashMap<_, _> = loops
+        .iter()
+        .filter(|(scc_idx, loop_)| {
+            if loop_.headers.len() > 1 {
                 return true;
             }
-        }
 
-        false
-    }).collect();
+            let scc = scc_s.get(scc_idx).unwrap();
 
-    let mut edges: Vec<usize> = nodes.iter().map(|node| {
-        node.edges.iter().filter(|&&edge| edge != node.idx + 1)
-    }).flatten().copied().collect();
+            for node in loop_.headers.iter() {
+                if node.idx != scc[0] {
+                    return true;
+                }
+            }
+
+            false
+        })
+        .collect();
+
+    let mut edges: Vec<usize> = nodes
+        .iter()
+        .map(|node| node.edges.iter().filter(|&&edge| edge != node.idx + 1))
+        .flatten()
+        .copied()
+        .collect();
 
     edges.sort();
 
     let mut labels = vec![];
 
-    let mut labeled: Vec<LabeledNode> = nodes.iter().map(|node| {
+    let mut labeled: Vec<LabeledNode> = nodes
+        .iter()
+        .map(|node| {
+            let _node_scc = &scc_s[&node.scc];
 
-        let node_scc = &scc_s[&node.scc];
+            for &edge in node.edges.iter() {
+                let target = &nodes[edge];
+                let target_scc = &scc_s[&target.scc];
 
-        for &edge in node.edges.iter() {
-            let target = &nodes[edge];
-            let target_scc = &scc_s[&target.scc];
-
-            if node.idx == target.idx - 1 { //not a jump, just a normal progression of instructions
-                continue;
-            }
-
-            if target.scc != node.scc { //This instruction is a jump, and said jump isn't backwards (a loop)
-
-                //Jumping to an instruction which is not a loop header but is in a loop
-                return if target_scc.len() > 1 && target_scc[0] != target.idx {
-                    labels.push((target.scc, edge, target_scc[0]));
-
-                    LabeledNode::LabeledControlFlow {
-                        node: node.clone(),
-                        label: target.scc,
-                        target: edge,
-                    }
-                } else { //Doesn't jump into a loop, or if it does, it only jumps right before the loop header, which is fine. This is a block
-                    //This will never be a backwards jump (a loop) because otherwise they would be in the same group of strongly connected components
-                    //however, it may jump forwards outside of a loop, in which case the loop scope will need to be enclosed in a block scope to allow the jump
-
-                    assert!(node.idx < target.idx);
-
-                    LabeledNode::BlockJump {
-                        node: node.clone(),
-                        target: edge,
-                    }
+                if node.idx == target.idx - 1 {
+                    //not a jump, just a normal progression of instructions
+                    continue;
                 }
 
-            } else if target.scc == node.scc {
-                return if edge < node.idx { //This jumps backwards within its own scc
+                if target.scc != node.scc {
+                    //This instruction is a jump, and said jump isn't backwards (a loop)
 
-                    //Jumps somewhere that isn't the beginning of the loop
-
-                    if target.idx != target_scc[0] {
+                    //Jumping to an instruction which is not a loop header but is in a loop
+                    return if target_scc.len() > 1 && target_scc[0] != target.idx {
                         labels.push((target.scc, edge, target_scc[0]));
 
                         LabeledNode::LabeledControlFlow {
@@ -263,36 +268,56 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
                             target: edge,
                         }
                     } else {
-                        //Jumps cleanly to the beginning of the loop, aka a plain old continue statement
-                        LabeledNode::LoopContinue {
+                        //Doesn't jump into a loop, or if it does, it only jumps right before the loop header, which is fine. This is a block
+                        //This will never be a backwards jump (a loop) because otherwise they would be in the same group of strongly connected components
+                        //however, it may jump forwards outside of a loop, in which case the loop scope will need to be enclosed in a block scope to allow the jump
+
+                        assert!(node.idx < target.idx);
+
+                        LabeledNode::BlockJump {
                             node: node.clone(),
+                            target: edge,
                         }
-                    }
-                } else { //This jumps forwards within it's own scc
-                    LabeledNode::BlockJump {
-                        node: node.clone(),
-                        target: edge,
-                    }
+                    };
+                } else if target.scc == node.scc {
+                    return if edge < node.idx {
+                        //This jumps backwards within its own scc
+
+                        //Jumps somewhere that isn't the beginning of the loop
+
+                        if target.idx != target_scc[0] {
+                            labels.push((target.scc, edge, target_scc[0]));
+
+                            LabeledNode::LabeledControlFlow {
+                                node: node.clone(),
+                                label: target.scc,
+                                target: edge,
+                            }
+                        } else {
+                            //Jumps cleanly to the beginning of the loop, aka a plain old continue statement
+                            LabeledNode::LoopContinue { node: node.clone() }
+                        }
+                    } else {
+                        //This jumps forwards within it's own scc
+                        LabeledNode::BlockJump {
+                            node: node.clone(),
+                            target: edge,
+                        }
+                    };
                 }
-
             }
-        }
 
-        if edges.binary_search(&node.idx).is_ok() {
-            LabeledNode::NonCondensibleNonControlFlow {
-                node: node.clone(),
+            if edges.binary_search(&node.idx).is_ok() {
+                LabeledNode::NonCondensibleNonControlFlow { node: node.clone() }
+            } else {
+                LabeledNode::CondensibleNonControlFlow { node: node.clone() }
             }
-        } else {
-            LabeledNode::CondensibleNonControlFlow {
-                node: node.clone(),
-            }
-        }
+        })
+        .collect();
 
-    }).collect();
-
-    for (scc, target, header) in labels {
+    for (_scc, target, header) in labels {
         let swap = match labeled.get_mut(header).unwrap() {
-            LabeledNode::LoopController { node, targets } => {
+            LabeledNode::LoopController { node: _, targets } => {
                 targets.push(target);
                 continue;
             }
@@ -301,7 +326,10 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
             | LabeledNode::BlockJump { node, .. }
             | LabeledNode::CondensibleNonControlFlow { node, .. }
             | LabeledNode::NonCondensibleNonControlFlow { node, .. } => {
-                LabeledNode::LoopController { node: node.clone(), targets: vec![target] }
+                LabeledNode::LoopController {
+                    node: node.clone(),
+                    targets: vec![target],
+                }
             }
         };
 
@@ -309,42 +337,51 @@ pub fn label_nodes(loops: &HashMap<usize, Loop>, nodes: &[ComponentNode], scc_s:
     }
 
     labeled
-
 }
 
 #[derive(Debug)]
 struct ScopeMetrics {
     loops: Vec<Range<usize>>,
-    blocks: Vec<Range<usize>>
+    blocks: Vec<Range<usize>>,
 }
 
 fn recurse_get_earliest_index(block: usize, blocks: &[Range<usize>]) -> usize {
     let range = &blocks[block];
 
-    let mut lonely_ends: Vec<(usize, &Range<usize>)> = blocks.iter().enumerate().filter(|(idx, other_range)| {
-        if other_range.end <= range.end && other_range.end >= range.start && !range.contains(&other_range.start) {
-            true
-        } else {
-            false
-        }
-    }).collect();
+    let mut lonely_ends: Vec<(usize, &Range<usize>)> = blocks
+        .iter()
+        .enumerate()
+        .filter(|(_idx, other_range)| {
+            if other_range.end <= range.end
+                && other_range.end >= range.start
+                && !range.contains(&other_range.start)
+            {
+                true
+            } else {
+                false
+            }
+        })
+        .collect();
 
     lonely_ends.sort_by_key(|(_, r)| r.start);
 
     match lonely_ends.get(0) {
         None => range.start,
-        Some((idx, _)) => recurse_get_earliest_index(*idx, blocks)
+        Some((idx, _)) => recurse_get_earliest_index(*idx, blocks),
     }
 }
 
-fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usize, Vec<usize>>) -> ScopeMetrics {
+fn identify_scopes(
+    nodes: &[(&ComponentNode, &LabeledNode)],
+    scc_s: &HashMap<usize, Vec<usize>>,
+) -> ScopeMetrics {
     let mut loops = Vec::new();
     let mut blocks = vec![];
 
     //Identify all loops. These never overlap
     for (_, nodes) in scc_s.iter() {
         if nodes.len() > 1 {
-            loops.push(nodes[0]..nodes[nodes.len()-1]+1);
+            loops.push(nodes[0]..nodes[nodes.len() - 1] + 1);
         }
     }
 
@@ -360,7 +397,8 @@ fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usi
                     if *target > scc_header {
                         blocks.push(scc_header..*target);
                     }
-                } else { //Continue statement that wants to branch down after continue
+                } else {
+                    //Continue statement that wants to branch down after continue
                     assert!(scc_header < *target);
                     blocks.push(scc_header..*target);
                 }
@@ -389,13 +427,16 @@ fn identify_scopes(nodes: &[(&ComponentNode, &LabeledNode)], scc_s: &HashMap<usi
         }
     });
 
-    ScopeMetrics {
-        loops,
-        blocks,
-    }
+    ScopeMetrics { loops, blocks }
 }
 
-fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_ranges: &'a mut &'b [Range<usize>], nodes: &[(&ComponentNode, &LabeledNode)], range: Range<usize>, loop_out: bool) -> Block {
+fn create_scopes<'a, 'b: 'a>(
+    block_ranges: &'a mut &'b [Range<usize>],
+    loop_ranges: &'a mut &'b [Range<usize>],
+    nodes: &[(&ComponentNode, &LabeledNode)],
+    range: Range<usize>,
+    loop_out: bool,
+) -> Block {
     let mut out_nodes = vec![];
     let mut out_blocks = vec![];
 
@@ -403,23 +444,29 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
 
     loop {
         assert!(idx <= range.end);
-        if idx == range.end { break; }
+        if idx == range.end {
+            break;
+        }
 
         let next_block_range = match block_ranges.get(0) {
             None => None,
-            Some(other) => if !range.contains(&other.start) || other.end > range.end {
-                None
-            } else {
-                Some(other)
+            Some(other) => {
+                if !range.contains(&other.start) || other.end > range.end {
+                    None
+                } else {
+                    Some(other)
+                }
             }
         };
 
         let next_loop_range = match loop_ranges.get(0) {
             None => None,
-            Some(other) => if !range.contains(&other.start) || other.end > range.end {
-                None
-            } else {
-                Some(other)
+            Some(other) => {
+                if !range.contains(&other.start) || other.end > range.end {
+                    None
+                } else {
+                    Some(other)
+                }
             }
         };
 
@@ -427,7 +474,9 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
             (None, None) => range.end,
             (Some(next_block_range), None) => next_block_range.start,
             (None, Some(next_loop_range)) => next_loop_range.start,
-            (Some(next_block_range), Some(next_loop_range)) => next_block_range.start.min(next_loop_range.start)
+            (Some(next_block_range), Some(next_loop_range)) => {
+                next_block_range.start.min(next_loop_range.start)
+            }
         };
 
         for scrape_idx in idx..scrape_end {
@@ -440,56 +489,110 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
         }
 
         match (
-            block_ranges.iter().find(|block_range| range.contains(&block_range.start) && block_range.end <= range.end).cloned(),
-            loop_ranges.iter().find(|block_range| range.contains(&block_range.start) && block_range.end <= range.end).cloned()
+            block_ranges
+                .iter()
+                .find(|block_range| {
+                    range.contains(&block_range.start) && block_range.end <= range.end
+                })
+                .cloned(),
+            loop_ranges
+                .iter()
+                .find(|block_range| {
+                    range.contains(&block_range.start) && block_range.end <= range.end
+                })
+                .cloned(),
         ) {
             (None, None) => {
                 break;
-            },
+            }
             (Some(next_block_range_), None) => {
-                assert!(next_block_range_.start >= idx, "{}\n{:#?}\n{:?}", idx, block_ranges, next_block_range_);
+                assert!(
+                    next_block_range_.start >= idx,
+                    "{}\n{:#?}\n{:?}",
+                    idx,
+                    block_ranges,
+                    next_block_range_
+                );
 
                 *block_ranges = &block_ranges[1..];
 
-                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_block_range_.clone(), false));
+                out_blocks.push(create_scopes(
+                    block_ranges,
+                    loop_ranges,
+                    nodes,
+                    next_block_range_.clone(),
+                    false,
+                ));
                 idx = next_block_range_.end;
-            },
+            }
             (None, Some(next_loop_range_)) => {
                 assert!(next_loop_range_.start >= idx);
 
                 *loop_ranges = &loop_ranges[1..];
 
-                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_loop_range_.clone(), true));
+                out_blocks.push(create_scopes(
+                    block_ranges,
+                    loop_ranges,
+                    nodes,
+                    next_loop_range_.clone(),
+                    true,
+                ));
                 idx = next_loop_range_.end;
-            },
-            (Some(next_block_range_), Some(next_loop_range_)) => if next_block_range_.start < next_loop_range_.start {
-                assert!(next_block_range_.start >= idx);
+            }
+            (Some(next_block_range_), Some(next_loop_range_)) => {
+                if next_block_range_.start < next_loop_range_.start {
+                    assert!(next_block_range_.start >= idx);
 
-                *block_ranges = &block_ranges[1..];
+                    *block_ranges = &block_ranges[1..];
 
-                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_block_range_.clone(), false));
-                idx = next_block_range_.end;
-            } else if next_block_range_.start == next_loop_range_.start {
-                if next_loop_range_.end > next_block_range_.end {
+                    out_blocks.push(create_scopes(
+                        block_ranges,
+                        loop_ranges,
+                        nodes,
+                        next_block_range_.clone(),
+                        false,
+                    ));
+                    idx = next_block_range_.end;
+                } else if next_block_range_.start == next_loop_range_.start {
+                    if next_loop_range_.end > next_block_range_.end {
+                        assert!(next_block_range_.start >= idx);
+
+                        *loop_ranges = &loop_ranges[1..];
+
+                        out_blocks.push(create_scopes(
+                            block_ranges,
+                            loop_ranges,
+                            nodes,
+                            next_loop_range_.clone(),
+                            true,
+                        ));
+                        idx = next_loop_range_.end;
+                    } else {
+                        *block_ranges = &block_ranges[1..];
+
+                        out_blocks.push(create_scopes(
+                            block_ranges,
+                            loop_ranges,
+                            nodes,
+                            next_block_range_.clone(),
+                            false,
+                        ));
+                        idx = next_block_range_.end;
+                    }
+                } else {
                     assert!(next_block_range_.start >= idx);
 
                     *loop_ranges = &loop_ranges[1..];
 
-                    out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_loop_range_.clone(), true));
+                    out_blocks.push(create_scopes(
+                        block_ranges,
+                        loop_ranges,
+                        nodes,
+                        next_loop_range_.clone(),
+                        true,
+                    ));
                     idx = next_loop_range_.end;
-                } else {
-                    *block_ranges = &block_ranges[1..];
-
-                    out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_block_range_.clone(), false));
-                    idx = next_block_range_.end;
                 }
-            } else {
-                assert!(next_block_range_.start >= idx);
-
-                *loop_ranges = &loop_ranges[1..];
-
-                out_blocks.push(create_scopes(block_ranges, loop_ranges, nodes, next_loop_range_.clone(), true));
-                idx = next_loop_range_.end;
             }
         };
     }
@@ -505,33 +608,33 @@ fn create_scopes<'a, 'b: 'a>(block_ranges: &'a mut &'b [Range<usize>], loop_rang
 pub enum LabeledNode {
     LoopController {
         node: ComponentNode,
-        targets: Vec<usize>
+        targets: Vec<usize>,
     },
     LoopContinue {
         node: ComponentNode,
     },
     LabeledControlFlow {
         node: ComponentNode,
-        label: usize, //index of the scc it wants to jump into
-        target: usize //the node it wants to reach
+        label: usize,  //index of the scc it wants to jump into
+        target: usize, //the node it wants to reach
     },
     BlockJump {
         node: ComponentNode,
-        target: usize
+        target: usize,
     },
     //Nothing jumps to this instruction
     CondensibleNonControlFlow {
-        node: ComponentNode
+        node: ComponentNode,
     },
     //Something jumps to this instruction
     NonCondensibleNonControlFlow {
-        node: ComponentNode
-    }
+        node: ComponentNode,
+    },
 }
 
 #[derive(Debug)]
 pub enum Block {
     Loop(Vec<Block>),
     Normal(Vec<Block>),
-    Nodes(Vec<(ComponentNode, LabeledNode)>)
+    Nodes(Vec<(ComponentNode, LabeledNode)>),
 }

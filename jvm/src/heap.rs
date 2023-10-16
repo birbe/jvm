@@ -1,12 +1,13 @@
-use std::alloc::{alloc, Layout};
-use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
-use std::mem::{align_of, size_of};
-use std::ptr::Pointee;
+use crate::classfile::resolved::{AccessFlags, Class, Field, FieldType};
+use crate::JVM;
 use bitflags::Flags;
 use cesu8str::Cesu8String;
-use crate::classfile::resolved::{AccessFlags, Class, FieldType};
-use crate::JVM;
+use parking_lot::RwLock;
+use std::alloc::{alloc, Layout};
+use std::collections::{HashMap, HashSet};
+use std::mem::{align_of, size_of};
+
+use std::sync::Arc;
 
 pub unsafe trait ObjectInternal {}
 pub unsafe trait NonArrayObject {}
@@ -14,22 +15,23 @@ pub unsafe trait NonArrayObject {}
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct Object {
-    pub(crate) ptr: u64
+    pub(crate) ptr: u64,
 }
 
 //May seem weird but it's convenient for representing Object[] as *mut RawObject<RawArray<Object>>
 unsafe impl ObjectInternal for Object {}
 
 impl Object {
-
-    pub const NULL: Self = Self {
-        ptr: 0
-    };
+    pub const NULL: Self = Self { ptr: 0 };
 
     pub unsafe fn from_raw<T: ?Sized>(ptr: *mut RawObject<T>) -> Self {
         Self {
-            ptr: ptr.to_raw_parts().0 as usize as u64
+            ptr: ptr.to_raw_parts().0 as usize as u64,
         }
+    }
+
+    pub fn get_body(&self) -> *mut () {
+        (self.ptr as usize + size_of::<FieldType>()) as *mut ()
     }
 
     pub fn get_raw(&self) -> *mut () {
@@ -40,27 +42,43 @@ impl Object {
         std::ptr::from_raw_parts_mut(self.ptr as usize as *mut (), ())
     }
 
+    pub fn get_header(&self) -> &ObjectHeader {
+        assert_ne!(self, &Self::NULL);
+
+        let this = self.cast_class::<()>();
+        unsafe { &(*this).header }
+    }
+
     pub unsafe fn cast_array<T: ObjectInternal>(&self) -> *mut RawObject<RawArray<T>> {
         //TODO type checking
 
         unsafe {
             let ptr = self.ptr as usize as *mut ();
-            let length = *ptr.cast_const().cast::<u8>().add(size_of::<*const FieldType>()).cast::<i32>();
+            let length = *ptr
+                .cast_const()
+                .cast::<u8>()
+                .add(size_of::<*const FieldType>())
+                .cast::<i32>();
             std::ptr::from_raw_parts_mut(ptr, length as usize)
         }
     }
+}
 
+#[derive(Debug)]
+#[repr(C)]
+pub enum ObjectHeader {
+    Class(*const Class),
+    Array(*const FieldType)
 }
 
 #[derive(Debug)]
 #[repr(C)]
 pub struct RawObject<T: ?Sized> {
-    pub descriptor: *const FieldType,
-    pub body: T
+    pub header: ObjectHeader,
+    pub body: T,
 }
 
 macro_rules! impl_primitive {
-
     ($a:ty, $b:expr, $c:expr) => {
         unsafe impl ObjectInternal for $a {}
         impl AsJavaPrimitive for $a {
@@ -73,8 +91,7 @@ macro_rules! impl_primitive {
             }
         }
         unsafe impl NonArrayObject for $a {}
-    }
-
+    };
 }
 
 unsafe impl ObjectInternal for () {}
@@ -89,17 +106,24 @@ impl_primitive!(i64, JavaPrimitive::Long, FieldType::Long);
 impl_primitive!(f32, JavaPrimitive::Float, FieldType::Float);
 impl_primitive!(f64, JavaPrimitive::Double, FieldType::Double);
 
+pub type Byte = i8;
+pub type Short = i16;
+pub type Char = u16;
+pub type Int = i32;
+pub type Long = i64;
+pub type Float = f32;
+pub type Double = f64;
+
 pub struct Heap {
     //Unused until GC is implemented
     pub data: *mut [u8],
     pub strings: RwLock<HashMap<String, StringObject>>,
-    pub types: RwLock<HashSet<Box<FieldType>>>
+    pub types: RwLock<HashSet<Box<FieldType>>>,
 }
 
 impl Heap {
-
     pub fn new() -> Self {
-        let mut box_ = Vec::<u8>::with_capacity(1024).into_boxed_slice();
+        let box_ = Vec::<u8>::with_capacity(1024).into_boxed_slice();
         let ptr = Box::into_raw(box_);
 
         Self {
@@ -110,10 +134,15 @@ impl Heap {
     }
 
     fn recurse_get_heap_size(class: &Class) -> usize {
-        let mut size = class.fields.iter().map(|field| (!field.access_flags.contains(AccessFlags::STATIC)) as usize).sum::<usize>() * size_of::<u64>();
+        let mut size = class
+            .fields
+            .iter()
+            .map(|field| (!field.access_flags.contains(AccessFlags::STATIC)) as usize)
+            .sum::<usize>()
+            * size_of::<u64>();
         match &class.super_class {
             None => {}
-            Some(superclass) => size += Self::recurse_get_heap_size(superclass)
+            Some(superclass) => size += Self::recurse_get_heap_size(superclass),
         }
 
         size
@@ -122,26 +151,19 @@ impl Heap {
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
     /// T must be ObjectInternal, which is a type guard to imply that the unsized field T in the DST [RawObject] has a constant length of 1
-    pub fn allocate_raw_object<T: ObjectInternal + NonArrayObject>(&self, class: &Class) -> *mut RawObject<T>
-    {
-        let size = size_of::<RawObject<T>>() + Self::recurse_get_heap_size(class);
+    pub fn allocate_raw_object<T: ObjectInternal + NonArrayObject>(
+        &self,
+        class: &Class,
+    ) -> *mut RawObject<T> {
+        let size = size_of::<RawObject<T>>() + class.heap_size;
 
-        let mut layout = Layout::from_size_align(size, 8).unwrap();
-        let mut alloc = unsafe { alloc(layout) };
-
-        let mut types = self.types.write();
-        let field_type = FieldType::Class(class.this_class.to_string());
-
-        if !types.contains(&field_type) {
-            types.insert(Box::new(field_type.clone()));
-        }
-
-        let field_type = &**types.get(&field_type).unwrap() as *const FieldType;
+        let layout = Layout::from_size_align(size, 8).unwrap();
+        let alloc = unsafe { alloc(layout) };
 
         let object_ptr: *mut RawObject<T> = std::ptr::from_raw_parts_mut(alloc as *mut (), ());
 
         unsafe {
-            (*object_ptr).descriptor = field_type;
+            (*object_ptr).header = ObjectHeader::Class(class as *const Class);
         }
 
         object_ptr
@@ -149,29 +171,34 @@ impl Heap {
 
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
-    pub fn allocate_raw_object_array(&self, class: &Class, length: i32) -> *mut RawObject<RawArray<Object>> {
-        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<u64>() * length as usize) + 4;
+    pub fn allocate_raw_object_array(
+        &self,
+        class: &Class,
+        length: i32,
+    ) -> *mut RawObject<RawArray<Object>> {
+        let size = size_of::<i32>() + size_of::<ObjectHeader>() + (size_of::<Object>() * length as usize);
 
-        let mut layout = Layout::from_size_align(size, 8).unwrap();
-        let mut alloc = unsafe { alloc(layout) };
+        let layout = Layout::from_size_align(size, align_of::<usize>()).unwrap();
+        let alloc = unsafe { alloc(layout) };
 
-        let object_ptr: *mut RawObject<RawArray<Object>> = std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
-        
+        let object_ptr: *mut RawObject<RawArray<Object>> =
+            std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
+
         let mut types = self.types.write();
         let field_type = FieldType::Array {
             type_: Box::new(FieldType::Class(class.this_class.to_string())),
             dimensions: 1,
         };
-        
+
         if !types.contains(&field_type) {
             types.insert(Box::new(field_type.clone()));
         }
-        
+
         let field_type = &**types.get(&field_type).unwrap() as *const FieldType;
 
         unsafe {
             (*object_ptr).body.length = length;
-            (*object_ptr).descriptor = field_type;
+            (*object_ptr).header = ObjectHeader::Array(field_type);
         }
 
         object_ptr
@@ -179,12 +206,20 @@ impl Heap {
 
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
-    pub fn allocate_raw_primitive_array<T: AsJavaPrimitive + Default>(&self, length: i32) -> *mut RawObject<RawArray<T>> {
-        let size = size_of::<u64>() + size_of::<i32>() + (size_of::<T>() * length as usize) + 4 + (align_of::<u64>() - align_of::<T>());
-        let mut layout = Layout::from_size_align(size, align_of::<u64>()).unwrap();
-        let mut alloc = unsafe { alloc(layout) };
+    pub fn allocate_raw_primitive_array<T: AsJavaPrimitive + Default>(
+        &self,
+        length: i32,
+    ) -> *mut RawObject<RawArray<T>> {
+        let size = size_of::<u64>()
+            + size_of::<i32>()
+            + (size_of::<T>() * length as usize)
+            + 4
+            + (align_of::<u64>() - align_of::<T>());
+        let layout = Layout::from_size_align(size, align_of::<u64>()).unwrap();
+        let alloc = unsafe { alloc(layout) };
 
-        let object_ptr: *mut RawObject<RawArray<T>> = std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
+        let object_ptr: *mut RawObject<RawArray<T>> =
+            std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
 
         let mut types = self.types.write();
         let field_type = T::field_type();
@@ -196,7 +231,7 @@ impl Heap {
         let field_type = &**types.get(&field_type).unwrap() as *const FieldType;
 
         unsafe {
-            (*object_ptr).descriptor = field_type;
+            (*object_ptr).header = ObjectHeader::Array(field_type);
             (*object_ptr).body.length = length;
         }
 
@@ -206,6 +241,23 @@ impl Heap {
     pub fn allocate_class(&self, class: &Class) -> Object {
         let ptr = self.allocate_raw_object::<()>(class);
         unsafe { Object::from_raw(ptr) }
+    }
+
+    ///SAFETY: the [Field] type must belong to either the [Class] that represents the [Object], or one of its child classes
+    pub unsafe fn set_class_field<T: AsJavaPrimitive + Copy>(&self, object: &Object, field: &Field, value: T) {
+        let ptr = unsafe { (object.get_body() as *mut u8).offset(field.heap_offset as isize) };
+
+        unsafe {
+            *(ptr as *mut T) = value;
+        }
+    }
+
+    pub unsafe fn get_class_field<T: AsJavaPrimitive + Copy>(&self, object: &Object, field: &Field) -> T {
+        let ptr = unsafe { (object.get_body() as *mut u8).offset(field.heap_offset as isize) };
+
+        unsafe {
+            *(ptr as *mut T)
+        }
     }
 
     pub fn allocate_string(&self, string: &str, jvm: &JVM) -> StringObject {
@@ -222,7 +274,6 @@ impl Heap {
 
         let string = self.allocate_class(&string_class);
 
-
         let char_array = self.allocate_raw_primitive_array::<u16>(chars.len() as i32);
         unsafe {
             (*char_array).body.body.copy_from_slice(&chars);
@@ -231,6 +282,7 @@ impl Heap {
 
         StringObject {
             value: string,
+            class: string_class.clone(),
         }
     }
 
@@ -264,8 +316,7 @@ impl Drop for Heap {
 #[repr(C)]
 pub struct RawArray<T: ObjectInternal> {
     pub length: i32,
-    padding: [u64; 0],
-    pub body: [T]
+    pub body: [T],
 }
 
 #[repr(C, align(8))]
@@ -278,17 +329,18 @@ unsafe impl NonArrayObject for RawString {}
 #[derive(Clone, Debug)]
 #[repr(C)]
 pub struct StringObject {
-    pub value: Object
+    pub value: Object,
+    pub class: Arc<Class>,
 }
 
 impl StringObject {
-
     pub fn get_string(&self) -> String {
         let raw_string = self.value.cast_class::<RawString>();
         let array = unsafe { &(*(*raw_string).body.value.cast_array::<u16>()).body.body };
-        Cesu8String::try_from_bytes(array.iter().map(|c| *c as u8).collect()).unwrap().to_string()
+        Cesu8String::try_from_bytes(array.iter().map(|c| *c as u8).collect())
+            .unwrap()
+            .to_string()
     }
-
 }
 
 unsafe impl ObjectInternal for RawString {}
@@ -300,13 +352,13 @@ pub enum JavaPrimitive {
     Int,
     Long,
     Double,
-    Float
+    Float,
 }
 
 pub trait AsJavaPrimitive: Default + ObjectInternal {
-
     fn get(&self) -> JavaPrimitive;
 
-    fn field_type() -> FieldType where Self: Sized;
-
+    fn field_type() -> FieldType
+    where
+        Self: Sized;
 }

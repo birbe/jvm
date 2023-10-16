@@ -1,17 +1,24 @@
-use crate::classfile::attribute_info::CodeAttributeInfo;
-use crate::classfile::constant::{ClassInfo, DynamicInfo, MethodHandleInfo, MethodTypeInfo, ModuleInfo, NameAndTypeInfo, PackageInfo, RefInfo, StringInfo, Utf8Info};
-use crate::classfile::resolved::attribute::Code;
-use crate::classfile::{AttributeInfo, ClassFile, ConstantInfo, ConstantInfoPool, FieldInfo, MethodInfo};
+use crate::classfile::attribute_info::{BootstrapMethodsAttributeInfo, CodeAttributeInfo};
+use crate::classfile::constant::{
+    ClassInfo, DynamicInfo, MethodHandleInfo, MethodTypeInfo, ModuleInfo, NameAndTypeInfo,
+    PackageInfo, RefInfo, StringInfo, Utf8Info,
+};
+use crate::classfile::resolved::attribute::{BootstrapMethods, Code};
+use crate::classfile::{
+    AttributeInfo, ClassFile, ConstantInfo, ConstantInfoPool, FieldInfo, MethodInfo,
+};
 use bitflags::{bitflags, Flags};
+use std::alloc::{alloc, Layout};
 
+use crate::linker::ClassLoader;
+use crate::JVM;
 use discrim::FromDiscriminant;
 use jvm_types::JParse;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::mem::size_of;
+use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
-use indexmap::IndexMap;
-use crate::JVM;
-use crate::linker::ClassLoader;
 
 bitflags! {
 
@@ -48,51 +55,113 @@ pub struct Class {
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
 
-    pub class_loader: Arc<dyn ClassLoader>
-    // pub attributes: Vec<Attribute>
+    pub class_loader: Arc<dyn ClassLoader>,
+    pub statics: usize,
+    pub static_init_state: AtomicU8,
+    pub attributes: Vec<Attribute>,
+
+    pub heap_size: usize
 }
 
 impl Class {
-    pub fn init(classfile: &ClassFile, jvm: &JVM, class_loader: Arc<dyn ClassLoader>) -> Option<Self> {
+    pub fn init(
+        classfile: &ClassFile,
+        jvm: &JVM,
+        class_loader: Arc<dyn ClassLoader>,
+    ) -> Option<Self> {
         let constant_pool =
-            ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool).unwrap();
+            ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
 
-        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class).unwrap();
+        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
+
+        let super_class = if &*this_class != "java/lang/Object" {
+            Some(
+                jvm.find_class(
+                    &resolve_string(&classfile.constant_pool, classfile.super_class).unwrap(),
+                    class_loader.clone(),
+                )
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+
+        let super_heap_size = match &super_class {
+            None => 0,
+            Some(super_class) => super_class.heap_size,
+        };
+
+        let heap_size = super_heap_size + classfile.fields.len() * size_of::<u64>();
+
+        let fields = classfile
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field_info)| Field::new(field_info, &constant_pool, super_heap_size + index * size_of::<u64>()))
+            .collect::<Option<Vec<Field>>>()?;
+
+        let static_fields: Vec<&Field> = fields
+            .iter()
+            .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
+            .collect();
+
+        let static_alloc = unsafe {
+            let layout =
+                Layout::from_size_align(static_fields.len() * size_of::<u64>(), size_of::<u64>())
+                    .unwrap();
+            alloc(layout) as usize
+        };
 
         Some(Self {
-            super_class: if &*this_class != "java/lang/Object" {
-                Some(jvm.find_class(&resolve_string(&classfile.constant_pool, classfile.super_class).unwrap(), class_loader.clone()).unwrap())
-            } else {
-                None
-            },
+            super_class,
             this_class,
-            access_flags: AccessFlags::from_bits(classfile.access_flags).unwrap(),
-            fields: classfile.fields.iter().map(|field_info| {
-                Field::new(field_info, &constant_pool)
-            }).collect::<Option<Vec<Field>>>().unwrap(),
+            access_flags: AccessFlags::from_bits(classfile.access_flags)?,
+            fields,
             methods: classfile
                 .methods
                 .iter()
-                .map(|method_info| {
-                    Method::new(method_info, &constant_pool, classfile)
+                .map(|method_info| Method::new(method_info, &constant_pool, classfile))
+                .collect::<Option<Vec<Method>>>()?,
+            class_loader,
+            statics: static_alloc,
+            static_init_state: AtomicU8::new(0),
+            attributes: classfile
+                .attributes
+                .iter()
+                .map(|attribute_info| {
+                    let attribute_kind = constant_pool
+                        .constants
+                        .get(&attribute_info.name_index)?
+                        .as_string()?;
+
+                    Some(Attribute::new(attribute_kind, attribute_info, &constant_pool).unwrap())
                 })
-                .collect::<Option<Vec<Method>>>().unwrap(),
+                .collect::<Option<Vec<Attribute>>>()?,
             constant_pool,
-            class_loader
+            heap_size,
         })
     }
 
     pub fn get_method(&self, name_and_type: &NameAndType) -> Option<&Method> {
-        self.methods.iter().find(|method| method.name == name_and_type.name && method.descriptor.string == *name_and_type.descriptor)
+        self.methods.iter().find(|method| {
+            method.name == name_and_type.name
+                && method.descriptor.string == *name_and_type.descriptor
+        })
     }
 
+    pub fn get_field(&self, name_and_type: &NameAndType) -> Option<&Field> {
+        self.fields.iter().find(|field| {
+            field.name == name_and_type.name
+                && field.descriptor_string == *name_and_type.descriptor
+        })
+    }
 }
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub enum FieldType {
     Array {
         type_: Box<FieldType>,
-        dimensions: usize
+        dimensions: usize,
     },
     Byte,
     Char,
@@ -102,66 +171,77 @@ pub enum FieldType {
     Long,
     Short,
     Boolean,
-    Class(String)
+    Class(String),
 }
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub enum ReturnType {
     FieldType(FieldType),
-    Void
+    Void,
 }
 
 impl FieldType {
-
     pub fn from_str(slice: &str) -> (Self, usize) {
-        (match &slice[0..1] {
-            "B" => FieldType::Byte,
-            "C" => FieldType::Char,
-            "D" => FieldType::Double,
-            "F" => FieldType::Float,
-            "I" => FieldType::Int,
-            "J" => FieldType::Long,
-            "S" => FieldType::Short,
-            "Z" => FieldType::Boolean,
-            "[" => {
-                let dimensions = slice.split("").skip(1).take_while(|char| *char == "[").map(|_| 1).sum();
-                let inner = FieldType::from_str(&slice[dimensions..]);
+        (
+            match &slice[0..1] {
+                "B" => FieldType::Byte,
+                "C" => FieldType::Char,
+                "D" => FieldType::Double,
+                "F" => FieldType::Float,
+                "I" => FieldType::Int,
+                "J" => FieldType::Long,
+                "S" => FieldType::Short,
+                "Z" => FieldType::Boolean,
+                "[" => {
+                    let dimensions = slice
+                        .split("")
+                        .skip(1)
+                        .take_while(|char| *char == "[")
+                        .map(|_| 1)
+                        .sum();
+                    let inner = FieldType::from_str(&slice[dimensions..]);
 
-                return (FieldType::Array {
-                    type_: Box::new(inner.0),
-                    dimensions,
-                }, inner.1 + dimensions)
-            }
-            "L" => {
-                let end = slice.find(";").unwrap();
-                return (FieldType::Class(String::from(&slice[1..end])), end+1);
+                    return (
+                        FieldType::Array {
+                            type_: Box::new(inner.0),
+                            dimensions,
+                        },
+                        inner.1 + dimensions,
+                    );
+                }
+                "L" => {
+                    let end = slice.find(";").unwrap();
+                    return (FieldType::Class(String::from(&slice[1..end])), end + 1);
+                }
+                _ => panic!("Malformed method descriptor"),
             },
-            _ => panic!("Malformed method descriptor")
-        }, 1)
+            1,
+        )
     }
-
 }
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct MethodDescriptor {
     pub args: Vec<FieldType>,
     pub return_type: ReturnType,
-    pub string: String
+    pub string: String,
 }
 
 impl TryFrom<&str> for MethodDescriptor {
     type Error = ();
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let parameters_end = value.find(")").ok_or(()).unwrap();
-        let parameters_str = &value[1..parameters_end];
+        let parameters_end = value.find(")").ok_or(())?;
+        let _parameters_str = &value[1..parameters_end];
 
         let mut idx = 1;
 
         let mut args = vec![];
 
         loop {
-            if idx == parameters_end { break; }
+            if idx == parameters_end {
+                break;
+            }
 
             let (field_type, length) = FieldType::from_str(&value[idx..]);
             args.push(field_type);
@@ -170,7 +250,7 @@ impl TryFrom<&str> for MethodDescriptor {
 
         idx += 1;
 
-        let return_type = match &value[idx..idx+1] {
+        let return_type = match &value[idx..idx + 1] {
             "V" => ReturnType::Void,
             _ => ReturnType::FieldType(FieldType::from_str(&value[idx..]).0),
         };
@@ -198,33 +278,38 @@ impl Method {
         _classfile: &ClassFile,
     ) -> Option<Self> {
         Some(Self {
-            access_flags: AccessFlags::from_bits(method_info.access_flags).unwrap(),
+            access_flags: AccessFlags::from_bits(method_info.access_flags)?,
             name: constant_pool
                 .constants
-                .get(&method_info.name_index).unwrap()
-                .as_string().unwrap()
+                .get(&method_info.name_index)?
+                .as_string()?
                 .clone(),
             descriptor: (&**constant_pool
                 .constants
-                .get(&method_info.descriptor_index).unwrap()
-                .as_string().unwrap())[..].try_into().ok().unwrap(),
+                .get(&method_info.descriptor_index)?
+                .as_string()?)[..]
+                .try_into()
+                .ok()?,
             attributes: method_info
                 .attributes
                 .iter()
                 .map(|attr| {
                     let descriptor_kind =
-                        (**(constant_pool.constants.get(&attr.name_index).unwrap().as_string().unwrap())).clone();
+                        (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
 
-                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool).unwrap();
+                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
 
                     Some((descriptor_kind, attribute))
                 })
-                .collect::<Option<HashMap<String, Attribute>>>().unwrap(),
+                .collect::<Option<HashMap<String, Attribute>>>()?,
         })
     }
 
-    pub fn is_instance_initialization(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>, jvm: &JVM) -> bool {
-        !jvm.find_class(classpath, class_loader).unwrap().access_flags.contains(AccessFlags::INTERFACE)
+    pub fn is_init(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>, jvm: &JVM) -> bool {
+        !jvm.find_class(classpath, class_loader)
+            .unwrap()
+            .access_flags
+            .contains(AccessFlags::INTERFACE)
             && &*self.name == "<init>"
             && self.descriptor.return_type == ReturnType::Void
     }
@@ -235,7 +320,7 @@ pub enum Attribute {
     ConstantValue,
     Code(Code),
     StackMapTable,
-    BootstrapMethods,
+    BootstrapMethods(BootstrapMethods),
     NestHost,
     NestMembers,
     PermittedSubclasses,
@@ -262,9 +347,14 @@ impl Attribute {
 
         Some(match kind {
             "Code" => Self::Code(Code::new(
-                &CodeAttributeInfo::from_bytes(&mut cursor).ok().unwrap(),
+                &CodeAttributeInfo::from_bytes(&mut cursor).ok()?,
                 constant_pool,
-            ).unwrap()),
+            )?),
+            "BootstrapMethods" => Self::BootstrapMethods(BootstrapMethods::new(
+                &BootstrapMethodsAttributeInfo::from_bytes(&mut cursor)
+                    .expect(&format!("{:?}", cursor)),
+                constant_pool,
+            )?),
             _ => Self::Other(kind.to_string(), attribute_info.info.clone()),
         })
     }
@@ -272,9 +362,52 @@ impl Attribute {
 
 pub mod attribute {
     use crate::bytecode::Bytecode;
-    use crate::classfile::attribute_info::{CodeAttributeInfo, ExceptionTableInfo};
-    use crate::classfile::resolved::{Attribute, ConstantPool};
+    use crate::classfile::attribute_info::{
+        BootstrapMethodsAttributeInfo, CodeAttributeInfo, ExceptionTableInfo,
+    };
+    use crate::classfile::resolved::{Attribute, Constant, ConstantPool, MethodHandle};
     use std::io::Cursor;
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct BootstrapMethod {
+        pub method_ref: MethodHandle,
+        pub arguments: Vec<Constant>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct BootstrapMethods {
+        pub attribute_name: &'static str,
+        pub bootstrap_methods: Vec<BootstrapMethod>,
+    }
+
+    impl BootstrapMethods {
+        pub fn new(
+            info: &BootstrapMethodsAttributeInfo,
+            constant_pool: &ConstantPool,
+        ) -> Option<Self> {
+            Some(Self {
+                attribute_name: "BootstrapMethods",
+                bootstrap_methods: info
+                    .bootstrap_methods
+                    .iter()
+                    .map(|info| {
+                        Some(BootstrapMethod {
+                            method_ref: constant_pool
+                                .constants
+                                .get(&info.bootstrap_method_ref)?
+                                .as_method_handle()?
+                                .clone(),
+                            arguments: info
+                                .bootstrap_arguments
+                                .iter()
+                                .map(|index| constant_pool.constants.get(index).unwrap().clone())
+                                .collect(),
+                        })
+                    })
+                    .collect::<Option<Vec<BootstrapMethod>>>()?,
+            })
+        }
+    }
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct Instruction {
@@ -324,19 +457,19 @@ pub mod attribute {
                     .map(|exception_table_info| {
                         ExceptionTable::new(exception_table_info, constant_pool)
                     })
-                    .collect::<Option<Vec<ExceptionTable>>>().unwrap(),
+                    .collect::<Option<Vec<ExceptionTable>>>()?,
                 attributes: code_info
                     .attributes
                     .iter()
                     .map(|attribute_info| {
                         let attribute_kind = constant_pool
                             .constants
-                            .get(&attribute_info.name_index).unwrap()
-                            .as_string().unwrap();
+                            .get(&attribute_info.name_index)?
+                            .as_string()?;
 
                         Attribute::new(attribute_kind, attribute_info, constant_pool)
                     })
-                    .collect::<Option<Vec<Attribute>>>().unwrap(),
+                    .collect::<Option<Vec<Attribute>>>()?,
             })
         }
     }
@@ -350,20 +483,20 @@ pub mod attribute {
     }
 
     impl ExceptionTable {
-        pub fn new(info: &ExceptionTableInfo, constant_pool: &ConstantPool) -> Option<Self> {
+        pub fn new(info: &ExceptionTableInfo, _constant_pool: &ConstantPool) -> Option<Self> {
             Some(Self {
                 start_pc: info.start_pc,
                 end_pc: info.end_pc,
                 handler_pc: info.handler_pc,
-                // catch_type: (**constant_pool.constants.get(&info.catch_type).unwrap().as_string().unwrap()).clone(),
-                catch_type: String::new()
+                // catch_type: (**constant_pool.constants.get(&info.catch_type)?.as_string()?).clone(),
+                catch_type: String::new(),
             })
         }
     }
 }
 
 pub fn resolve_string(constant_info_pool: &ConstantInfoPool, index: u16) -> Option<Arc<String>> {
-    let constant = constant_info_pool.constants.get(&index).unwrap();
+    let constant = constant_info_pool.constants.get(&index)?;
 
     match constant {
         ConstantInfo::Class(ClassInfo { name_index }) => {
@@ -413,7 +546,7 @@ fn resolve_constant(
     new_constants: &mut HashMap<u16, Constant>,
     slot: u16,
 ) -> Option<Constant> {
-    let constant = cip.constants.get(&slot).unwrap();
+    let constant = cip.constants.get(&slot)?;
 
     if let Some(constant) = new_constants.get(&slot) {
         return Some(constant.clone());
@@ -421,40 +554,40 @@ fn resolve_constant(
 
     let insert = match constant {
         ConstantInfo::Class(ClassInfo { name_index }) => {
-            Constant::Class(resolve_string(cip, *name_index).unwrap())
+            Constant::Class(resolve_string(cip, *name_index)?)
         }
-        ConstantInfo::FieldRef(_) => Constant::FieldRef(Ref::resolve(cip, new_constants, slot).unwrap()),
-        ConstantInfo::MethodRef(_) => Constant::MethodRef(Ref::resolve(cip, new_constants, slot).unwrap()),
+        ConstantInfo::FieldRef(_) => Constant::FieldRef(Ref::resolve(cip, new_constants, slot)?),
+        ConstantInfo::MethodRef(_) => Constant::MethodRef(Ref::resolve(cip, new_constants, slot)?),
         ConstantInfo::InterfaceMethodRef(_) => {
-            Constant::MethodRef(Ref::resolve(cip, new_constants, slot).unwrap())
+            Constant::MethodRef(Ref::resolve(cip, new_constants, slot)?)
         }
         ConstantInfo::String(StringInfo { string_index }) => {
-            Constant::String(resolve_string(cip, *string_index).unwrap())
+            Constant::String(resolve_string(cip, *string_index)?)
         }
         ConstantInfo::Integer(int) => Constant::Integer(*int),
         ConstantInfo::Float(float) => Constant::Float(*float),
         ConstantInfo::Long(long) => Constant::Long(*long),
         ConstantInfo::Double(double) => Constant::Double(*double),
         ConstantInfo::NameAndType(_) => {
-            Constant::NameAndType(NameAndType::resolve(cip, new_constants, slot).unwrap())
+            Constant::NameAndType(NameAndType::resolve(cip, new_constants, slot)?)
         }
         ConstantInfo::Utf8(Utf8Info { string }) => Constant::Utf8(string.clone()),
         ConstantInfo::MethodHandle(MethodHandleInfo {
             reference_kind,
             reference_index,
         }) => Constant::MethodHandle(MethodHandle {
-            reference_kind: ReferenceKind::from_discriminant(*reference_kind).ok().unwrap(),
-            reference: Ref::resolve(cip, new_constants, *reference_index).unwrap(),
+            reference_kind: ReferenceKind::from_discriminant(*reference_kind).ok()?,
+            reference: Ref::resolve(cip, new_constants, *reference_index)?,
         }),
-        ConstantInfo::MethodType(MethodTypeInfo { descriptor_index: _ }) => {
-            Constant::MethodType(resolve_string(cip, slot).unwrap())
-        }
+        ConstantInfo::MethodType(MethodTypeInfo {
+            descriptor_index: _,
+        }) => Constant::MethodType(resolve_string(cip, slot)?),
         ConstantInfo::Dynamic(DynamicInfo {
-            bootstrap_method_attr_index: _,
+            bootstrap_method_attr_index,
             name_and_type_index,
         }) => Constant::Dynamic(Dynamic {
-            bootstrap_method_attr: (),
-            name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index).unwrap(),
+            bootstrap_method_attr: *bootstrap_method_attr_index,
+            name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index)?,
         }),
         ConstantInfo::InvokeDynamic(_) => todo!(),
         ConstantInfo::Module(_) => todo!(),
@@ -476,7 +609,7 @@ impl ConstantPool {
         let mut new_constants = HashMap::new();
 
         for (index, _constant_info) in &cip.constants {
-            let constant = resolve_constant(classfile, cip, &mut new_constants, *index).unwrap();
+            let constant = resolve_constant(classfile, cip, &mut new_constants, *index)?;
             new_constants.insert(*index, constant);
         }
 
@@ -522,18 +655,29 @@ impl Constant {
         match self {
             Constant::MethodRef(ref_)
             | Constant::FieldRef(ref_)
-            | Constant::InterfaceMethodRef(ref_) => {
-                Some(ref_)
-            }
-            _ => None
+            | Constant::InterfaceMethodRef(ref_) => Some(ref_),
+            _ => None,
         }
     }
 
+    pub fn as_dynamic(&self) -> Option<&Dynamic> {
+        match self {
+            Constant::Dynamic(dynamic) | Constant::InvokeDynamic(dynamic) => Some(dynamic),
+            _ => None,
+        }
+    }
+
+    pub fn as_method_handle(&self) -> Option<&MethodHandle> {
+        match self {
+            Constant::MethodHandle(method_handle) => Some(method_handle),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dynamic {
-    pub bootstrap_method_attr: (),
+    pub bootstrap_method_attr: u16,
     pub name_and_type: Arc<NameAndType>,
 }
 
@@ -576,7 +720,7 @@ impl Ref {
             return Some(ref_.clone());
         }
 
-        let constant = cip.constants.get(&slot).unwrap();
+        let constant = cip.constants.get(&slot)?;
 
         Some(match constant {
             ConstantInfo::InterfaceMethodRef(RefInfo {
@@ -591,8 +735,8 @@ impl Ref {
                 class_index,
                 name_and_type_index,
             }) => Arc::new(Ref {
-                class: resolve_string(cip, *class_index).unwrap(),
-                name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index).unwrap(),
+                class: resolve_string(cip, *class_index)?,
+                name_and_type: NameAndType::resolve(cip, new_constants, *name_and_type_index)?,
             }),
             _ => unreachable!(),
         })
@@ -615,15 +759,15 @@ impl NameAndType {
             return Some(arc.clone());
         }
 
-        let constant = cip.constants.get(&slot).unwrap();
+        let constant = cip.constants.get(&slot)?;
 
         Some(match constant {
             ConstantInfo::NameAndType(NameAndTypeInfo {
                 name_index,
                 descriptor_index,
             }) => Arc::new(NameAndType {
-                name: resolve_string(cip, *name_index).unwrap(),
-                descriptor: resolve_string(cip, *descriptor_index).unwrap(),
+                name: resolve_string(cip, *name_index)?,
+                descriptor: resolve_string(cip, *descriptor_index)?,
             }),
             _ => unreachable!(),
         })
@@ -635,32 +779,44 @@ pub struct Field {
     pub access_flags: AccessFlags,
     pub name: Arc<String>,
     pub descriptor: FieldType,
+    pub descriptor_string: String,
     pub attributes: HashMap<String, Attribute>,
+    pub heap_offset: usize
 }
 
 impl Field {
-
-    fn new(
-        field_info: &FieldInfo,
-        constant_pool: &ConstantPool
-    ) -> Option<Self> {
+    fn new(field_info: &FieldInfo, constant_pool: &ConstantPool, heap_offset: usize) -> Option<Self> {
         Some(Self {
-            access_flags: AccessFlags::from_bits(field_info.access_flags).unwrap(),
-            name: constant_pool.constants.get(&field_info.name_index).unwrap().as_string().unwrap().clone(),
-            descriptor: FieldType::from_str(constant_pool.constants.get(&field_info.descriptor_index).unwrap().as_string().unwrap()).0,
+            access_flags: AccessFlags::from_bits(field_info.access_flags)?,
+            name: constant_pool
+                .constants
+                .get(&field_info.name_index)?
+                .as_string()?
+                .clone(),
+            descriptor: FieldType::from_str(
+                constant_pool
+                    .constants
+                    .get(&field_info.descriptor_index)?
+                    .as_string()?,
+            )
+            .0,
+            descriptor_string: (**constant_pool
+                .constants
+                .get(&field_info.descriptor_index)?
+                .as_string()?).clone(),
             attributes: field_info
                 .attributes
                 .iter()
                 .map(|attr| {
-                    let descriptor_kind = (**(constant_pool.constants.get(&attr.name_index).unwrap().as_string().unwrap())).clone();
+                    let descriptor_kind =
+                        (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
 
-                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool).unwrap();
+                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
 
                     Some((descriptor_kind, attribute))
                 })
-                .collect::<Option<HashMap<String, Attribute>>>().unwrap()
+                .collect::<Option<HashMap<String, Attribute>>>()?,
+            heap_offset,
         })
     }
-
-
 }

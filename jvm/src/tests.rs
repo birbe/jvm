@@ -1,13 +1,8 @@
 #![cfg(test)]
 
-use crate::classfile::resolved::{Attribute, Class};
-use crate::classfile::ClassFile;
-use crate::jit::{find_loops, label_nodes, wasm};
 use jvm_types::JParse;
 use parse_macro::JParse;
-use std::io::{Cursor};
-use std::time::Instant;
-use crate::jit::compile::compile_method;
+use std::io::Cursor;
 
 #[test]
 fn test_jparse() {
