@@ -106,10 +106,14 @@ impl Class {
             .collect();
 
         let static_alloc = unsafe {
-            let layout =
-                Layout::from_size_align(static_fields.len() * size_of::<u64>(), size_of::<u64>())
-                    .unwrap();
-            alloc(layout) as usize
+            if static_fields.len() > 0 {
+                let layout =
+                    Layout::from_size_align(static_fields.len() * size_of::<u64>(), size_of::<u64>())
+                        .unwrap();
+                alloc(layout) as usize
+            } else {
+                0
+            }
         };
 
         Some(Self {

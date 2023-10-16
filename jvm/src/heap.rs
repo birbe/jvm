@@ -157,6 +157,8 @@ impl Heap {
     ) -> *mut RawObject<T> {
         let size = size_of::<RawObject<T>>() + class.heap_size;
 
+        assert_ne!(size, 0);
+
         let layout = Layout::from_size_align(size, 8).unwrap();
         let alloc = unsafe { alloc(layout) };
 
@@ -176,9 +178,12 @@ impl Heap {
         class: &Class,
         length: i32,
     ) -> *mut RawObject<RawArray<Object>> {
-        let size = size_of::<i32>() + size_of::<ObjectHeader>() + (size_of::<Object>() * length as usize);
+        let padding = size_of::<(i32, Object)>() - size_of::<Object>();
+        let size =  size_of::<ObjectHeader>() + size_of::<i32>() + padding + (size_of::<Object>() * length as usize);
+        assert_ne!(size, 0);
 
         let layout = Layout::from_size_align(size, align_of::<usize>()).unwrap();
+
         let alloc = unsafe { alloc(layout) };
 
         let object_ptr: *mut RawObject<RawArray<Object>> =
@@ -210,12 +215,13 @@ impl Heap {
         &self,
         length: i32,
     ) -> *mut RawObject<RawArray<T>> {
-        let size = size_of::<u64>()
-            + size_of::<i32>()
-            + (size_of::<T>() * length as usize)
-            + 4
-            + (align_of::<u64>() - align_of::<T>());
+        let padding = size_of::<(i32, T)>() - size_of::<T>();
+
+        let size = size_of::<ObjectHeader>() + size_of::<i32>() + padding + (size_of::<T>() * length as usize);
+
         let layout = Layout::from_size_align(size, align_of::<u64>()).unwrap();
+
+        assert_ne!(size, 0);
         let alloc = unsafe { alloc(layout) };
 
         let object_ptr: *mut RawObject<RawArray<T>> =
