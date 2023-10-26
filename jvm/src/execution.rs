@@ -1,5 +1,5 @@
 use crate::classfile::resolved::Ref;
-use crate::thread::{FrameStack, RawFrame, Thread};
+use crate::thread::{FrameStack, Operand, RawFrame, Thread};
 
 
 use std::fmt::{Debug, Formatter};
@@ -7,11 +7,11 @@ use std::fmt::{Debug, Formatter};
 use std::ptr;
 use std::sync::{Arc};
 
-pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> u64;
+pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> Operand;
 
 pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
-    Interpret(Box<dyn Fn(&[u64]) -> RawFrame>),
+    Interpret(Box<dyn Fn(&[Operand]) -> RawFrame>),
     JIT,
     Native,
 }
@@ -39,10 +39,10 @@ pub struct MethodHandle {
 impl MethodHandle {
     pub fn invoke(
         &self,
-        args: &[u64],
+        args: &[Operand],
         frame_store: &mut FrameStack,
         thread: &mut Thread,
-    ) -> u64 {
+    ) -> Operand {
         let mut locals = Vec::from(args);
 
         match &self.context {
@@ -58,6 +58,8 @@ impl MethodHandle {
                 stack: ptr::null_mut(),
             }),
         }
+
+        std::mem::forget(locals);
 
         let out = unsafe { (self.ptr)(frame_store, thread) };
 

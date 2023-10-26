@@ -91,19 +91,28 @@ impl Class {
             Some(super_class) => super_class.heap_size,
         };
 
-        let heap_size = super_heap_size + classfile.fields.len() * size_of::<u64>();
+        let mut index = 0;
 
         let fields = classfile
             .fields
             .iter()
-            .enumerate()
-            .map(|(index, field_info)| Field::new(field_info, &constant_pool, super_heap_size + index * size_of::<u64>()))
+            .map(|field_info| {
+                let field = Field::new(field_info, &constant_pool, super_heap_size + index * size_of::<u64>());
+
+                if !AccessFlags::from_bits(field_info.access_flags).unwrap().contains(AccessFlags::STATIC) {
+                    index += 1;
+                }
+
+                field
+            })
             .collect::<Option<Vec<Field>>>()?;
 
         let static_fields: Vec<&Field> = fields
             .iter()
             .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
             .collect();
+
+        let heap_size = super_heap_size + (fields.len() - static_fields.len()) * size_of::<u64>();
 
         let static_alloc = unsafe {
             if static_fields.len() > 0 {

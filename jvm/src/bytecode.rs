@@ -5,6 +5,7 @@ use parse_macro::JParse;
 use std::fmt::{Display, Formatter};
 use std::io::{Error, Read, Seek};
 use std::ops::Deref;
+use crate::thread::Operand;
 
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
 pub struct LookupEntry {
@@ -24,15 +25,15 @@ pub enum JValue {
 }
 
 impl JValue {
-    pub fn as_u64(&self) -> u64 {
+    pub fn as_operand(&self) -> Operand {
         match self {
-            JValue::Reference(ptr) => ptr.get_raw() as usize as u64,
-            JValue::Int(int) => *int as u64,
-            JValue::Long(long) => *long as u64,
-            JValue::Float(float) => u32::from_ne_bytes(float.to_ne_bytes()) as u64,
-            JValue::Double(double) => u64::from_ne_bytes(double.to_ne_bytes()),
-            JValue::Short(short) => *short as u64,
-            JValue::Byte(byte) => *byte as u64,
+            JValue::Reference(object) => Operand { objectref: object.ptr },
+            JValue::Int(int) => Operand { data: *int as u64 },
+            JValue::Long(long) => Operand { data: *long as u64 },
+            JValue::Float(float) => Operand { data: u32::from_ne_bytes(float.to_ne_bytes()) as u64 },
+            JValue::Double(double) => Operand { data: u64::from_ne_bytes(double.to_ne_bytes()) },
+            JValue::Short(short) => Operand { data: *short as u64 },
+            JValue::Byte(byte) => Operand { data: *byte as u64 },
         }
     }
 }

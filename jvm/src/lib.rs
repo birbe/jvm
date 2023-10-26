@@ -1,13 +1,12 @@
 #![feature(slice_ptr_get)]
 #![feature(slice_ptr_len)]
 #![feature(ptr_metadata)]
-
-
+#![feature(pointer_byte_offsets)]
 
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, NameAndType, Ref};
 use crate::classfile::{ClassFile};
 use crate::execution::{ExecutionContext, MethodHandle};
-use crate::thread::{FrameStack, RawFrame, Thread, ThreadHandle};
+use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use bitflags::Flags;
 
 use heap::{Heap};
@@ -188,10 +187,10 @@ impl JVM {
                             &ref_clone.clone(),
                             args.iter()
                                 .copied()
-                                .chain(std::iter::repeat(0).take(max_locals))
-                                .collect::<Vec<u64>>()
+                                .chain(std::iter::repeat(Operand { data: 0 }).take(max_locals))
+                                .collect::<Vec<Operand>>()
                                 .into_boxed_slice(),
-                            vec![0u64; max_stack].into_boxed_slice(),
+                            vec![Operand { data: 0 }; max_stack].into_boxed_slice(),
                         )
                     })),
                     method_ref: ref_.clone(),

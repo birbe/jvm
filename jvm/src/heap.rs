@@ -5,6 +5,7 @@ use cesu8str::Cesu8String;
 use parking_lot::RwLock;
 use std::alloc::{alloc, Layout};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::mem::{align_of, size_of};
 
 use std::sync::Arc;
@@ -15,23 +16,23 @@ pub unsafe trait NonArrayObject {}
 #[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct Object {
-    pub(crate) ptr: u64,
+    pub(crate) ptr: *mut (),
 }
 
 //May seem weird but it's convenient for representing Object[] as *mut RawObject<RawArray<Object>>
 unsafe impl ObjectInternal for Object {}
 
 impl Object {
-    pub const NULL: Self = Self { ptr: 0 };
+    pub const NULL: Self = Self { ptr: std::ptr::null_mut() };
 
     pub unsafe fn from_raw<T: ?Sized>(ptr: *mut RawObject<T>) -> Self {
         Self {
-            ptr: ptr.to_raw_parts().0 as usize as u64,
+            ptr: ptr.to_raw_parts().0,
         }
     }
 
     pub fn get_body(&self) -> *mut () {
-        (self.ptr as usize + size_of::<FieldType>()) as *mut ()
+        unsafe { (self.ptr.byte_offset(size_of::<ObjectHeader>() as isize)) }
     }
 
     pub fn get_raw(&self) -> *mut () {
@@ -155,12 +156,14 @@ impl Heap {
         &self,
         class: &Class,
     ) -> *mut RawObject<T> {
-        let size = size_of::<RawObject<T>>() + class.heap_size;
+        let object_header = Layout::from_size_align(size_of::<RawObject<T>>(), align_of::<RawObject<T>>()).unwrap();
 
-        assert_ne!(size, 0);
+        let object_body = Layout::from_size_align(class.heap_size, align_of::<u64>()).unwrap();
+        let layout = object_header.extend(object_body).unwrap().0;
 
-        let layout = Layout::from_size_align(size, 8).unwrap();
         let alloc = unsafe { alloc(layout) };
+
+        println!("Allocating {} with size {}, layout size {} @ {}", &class.this_class, class.heap_size, layout.size(), alloc as usize);
 
         let object_ptr: *mut RawObject<T> = std::ptr::from_raw_parts_mut(alloc as *mut (), ());
 
@@ -178,13 +181,17 @@ impl Heap {
         class: &Class,
         length: i32,
     ) -> *mut RawObject<RawArray<Object>> {
-        let padding = size_of::<(i32, Object)>() - size_of::<Object>();
-        let size =  size_of::<ObjectHeader>() + size_of::<i32>() + padding + (size_of::<Object>() * length as usize);
-        assert_ne!(size, 0);
 
-        let layout = Layout::from_size_align(size, align_of::<usize>()).unwrap();
+        let object_header = Layout::from_size_align(size_of::<RawObject<()>>(), align_of::<RawObject<()>>()).unwrap();
+
+        let length_header = Layout::from_size_align(4, 4).unwrap();
+        let array_body = Layout::array::<Object>(length as usize).unwrap();
+
+        let layout = object_header.extend(length_header).unwrap().0.extend(array_body).unwrap().0;
 
         let alloc = unsafe { alloc(layout) };
+
+        println!("Allocating {}[] with size {}, layout size {} @ {}", &class.this_class, class.heap_size, layout.size(), alloc as usize);
 
         let object_ptr: *mut RawObject<RawArray<Object>> =
             std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
@@ -211,7 +218,7 @@ impl Heap {
 
     ///Safety: Class is instantiated only by the JVM, and it contains an Arc to its instantiating [ClassLoader],
     /// which means Class will live for as long as the ClassLoader.
-    pub fn allocate_raw_primitive_array<T: AsJavaPrimitive + Default>(
+    pub fn allocate_raw_primitive_array<T: AsJavaPrimitive + ObjectInternal + Default>(
         &self,
         length: i32,
     ) -> *mut RawObject<RawArray<T>> {
@@ -250,15 +257,16 @@ impl Heap {
     }
 
     ///SAFETY: the [Field] type must belong to either the [Class] that represents the [Object], or one of its child classes
-    pub unsafe fn set_class_field<T: AsJavaPrimitive + Copy>(&self, object: &Object, field: &Field, value: T) {
-        let ptr = unsafe { (object.get_body() as *mut u8).offset(field.heap_offset as isize) };
+    pub unsafe fn set_class_field<T: Copy>(&self, object: &Object, field: &Field, value: T) {
+        let ptr = unsafe { (object.ptr as *mut u8).offset(field.heap_offset as isize) };
 
         unsafe {
             *(ptr as *mut T) = value;
         }
     }
 
-    pub unsafe fn get_class_field<T: AsJavaPrimitive + Copy>(&self, object: &Object, field: &Field) -> T {
+    ///SAFETY: the [Field] type must belong to either the [Class] that represents the [Object], or one of its child classes
+    pub unsafe fn get_class_field<T: Copy>(&self, object: &Object, field: &Field) -> T {
         let ptr = unsafe { (object.get_body() as *mut u8).offset(field.heap_offset as isize) };
 
         unsafe {
@@ -361,7 +369,7 @@ pub enum JavaPrimitive {
     Float,
 }
 
-pub trait AsJavaPrimitive: Default + ObjectInternal {
+pub trait AsJavaPrimitive: Default {
     fn get(&self) -> JavaPrimitive;
 
     fn field_type() -> FieldType

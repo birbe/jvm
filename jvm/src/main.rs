@@ -10,9 +10,10 @@ use jvm::{JVM};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::fs;
+
 use std::io::{stdout};
-use std::path::PathBuf;
+
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -49,11 +50,12 @@ impl NativeClassLoader {
 
 impl ClassLoader for NativeClassLoader {
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
-        let mut path = PathBuf::new();
-        path.push("./jvm/test_classes");
-        path.push(format!("{classpath}.class"));
-
-        fs::read(path).ok()
+        match classpath {
+            "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
+            "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
+            "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
+            _ => panic!("{classpath} not found")
+        }
     }
 
     fn register_class(&self, classpath: &str, class: Arc<Class>) {
@@ -81,12 +83,14 @@ fn main() {
         bootstrapper.clone() as Arc<dyn ClassLoader>,
         Mutex::new(Box::new(stdout())),
     );
+
     let _class = jvm
         .find_class("Main", bootstrapper.clone())
         // .find_class("net/minecraft/bundler/Main", bootstrapper.clone())
         .unwrap();
 
     let mut handle = jvm.create_thread(bootstrapper.clone());
+
     let now = Instant::now();
 
     let string = jvm.heap.allocate_string("OwO", &jvm);
@@ -96,8 +100,6 @@ fn main() {
     unsafe { (&mut *string_array).body.body[0] = string.value };
 
     let array_object = unsafe { Object::from_raw(string_array) };
-
-    println!("{}", array_object.get_raw() as usize);
 
     let result = handle
         .call(
