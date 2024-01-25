@@ -15,10 +15,12 @@ use crate::JVM;
 use discrim::FromDiscriminant;
 use jvm_types::JParse;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::mem::size_of;
 use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
+use crate::thread::Operand;
 
 bitflags! {
 
@@ -35,7 +37,7 @@ bitflags! {
         const NATIVE = 0x0100;
         const STRICT = 0x0800;
         const SUPER = 0x0020;
-        const INTERFACE = 0x0300;
+        const INTERFACE = 0x0200;
         const ABSTRACT = 0x0400;
         const SYNTHETIC = 0x1000;
         const ANNOTATION = 0x2000;
@@ -51,7 +53,7 @@ pub struct Class {
     pub this_class: Arc<String>,
     pub super_class: Option<Arc<Class>>,
     pub access_flags: AccessFlags,
-    // pub interfaces: Vec<Interface>,
+    pub interfaces: Vec<Arc<Class>>,
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
 
@@ -69,6 +71,7 @@ impl Class {
         jvm: &JVM,
         class_loader: Arc<dyn ClassLoader>,
     ) -> Option<Self> {
+
         let constant_pool =
             ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
 
@@ -86,6 +89,11 @@ impl Class {
             None
         };
 
+        let interfaces = classfile.interfaces.iter().map(|classinfo| {
+            let interface_classpath = resolve_string(&classfile.constant_pool, classinfo.name_index).unwrap();
+            jvm.find_class(&interface_classpath, class_loader.clone()).unwrap()
+        }).collect();
+
         let super_heap_size = match &super_class {
             None => 0,
             Some(super_class) => super_class.heap_size,
@@ -97,7 +105,7 @@ impl Class {
             .fields
             .iter()
             .map(|field_info| {
-                let field = Field::new(field_info, &constant_pool, super_heap_size + index * size_of::<u64>());
+                let field = Field::new(field_info, &constant_pool, super_heap_size + index * size_of::<Operand>());
 
                 if !AccessFlags::from_bits(field_info.access_flags).unwrap().contains(AccessFlags::STATIC) {
                     index += 1;
@@ -112,12 +120,12 @@ impl Class {
             .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
             .collect();
 
-        let heap_size = super_heap_size + (fields.len() - static_fields.len()) * size_of::<u64>();
+        let heap_size = super_heap_size + (fields.len() - static_fields.len()) * size_of::<Operand>();
 
         let static_alloc = unsafe {
             if static_fields.len() > 0 {
                 let layout =
-                    Layout::from_size_align(static_fields.len() * size_of::<u64>(), size_of::<u64>())
+                    Layout::from_size_align(static_fields.len() * size_of::<Operand>(), size_of::<Operand>())
                         .unwrap();
                 alloc(layout) as usize
             } else {
@@ -129,6 +137,7 @@ impl Class {
             super_class,
             this_class,
             access_flags: AccessFlags::from_bits(classfile.access_flags)?,
+            interfaces,
             fields,
             methods: classfile
                 .methods
@@ -168,7 +177,34 @@ impl Class {
                 && field.descriptor_string == *name_and_type.descriptor
         })
     }
+
+    pub fn find_overriding_method(&self, lower_method: &Method) -> Option<&Method> {
+        self.methods.iter().find(|higher_method| {
+            !higher_method.access_flags.contains(AccessFlags::STATIC)
+            && higher_method.name == lower_method.name
+            && higher_method.descriptor == lower_method.descriptor
+            && (lower_method.access_flags.contains(AccessFlags::PUBLIC)
+                || lower_method.access_flags.contains(AccessFlags::PROTECTED)
+                || todo!())
+        })
+    }
+
 }
+
+impl Hash for Class {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(self.this_class.as_bytes())
+    }
+}
+
+impl PartialEq<Self> for Class {
+    fn eq(&self, other: &Self) -> bool {
+        &self.this_class == &other.this_class
+    }
+}
+
+impl Eq for Class {}
+
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub enum FieldType {
@@ -226,7 +262,7 @@ impl FieldType {
                     let end = slice.find(";").unwrap();
                     return (FieldType::Class(String::from(&slice[1..end])), end + 1);
                 }
-                _ => panic!("Malformed method descriptor"),
+                _ => panic!("Malformed method descriptor {}", slice),
             },
             1,
         )
@@ -326,6 +362,13 @@ impl Method {
             && &*self.name == "<init>"
             && self.descriptor.return_type == ReturnType::Void
     }
+
+    pub fn is_signature_polymorphic(&self, classpath: &str) -> bool {
+        classpath == "java/lang/invoke/MethodHandle" || classpath == "java/lang/invoke/VarHandle"
+        && matches!(self.descriptor.args.first(), Some(FieldType::Class(classpath)) if classpath == "java/lang/Object")
+        && self.access_flags.contains(AccessFlags::VARARGS | AccessFlags::NATIVE)
+    }
+
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -567,7 +610,19 @@ fn resolve_constant(
 
     let insert = match constant {
         ConstantInfo::Class(ClassInfo { name_index }) => {
-            Constant::Class(resolve_string(cip, *name_index)?)
+            let string = resolve_string(cip, *name_index)?;
+            let mut path = string.replace("[", "");
+
+            let depth = (string.len() - path.len()) as u8;
+
+            if depth > 0 {
+                path = String::from(path.trim_start_matches("L"));
+            }
+
+            Constant::Class {
+                path,
+                depth,
+            }
         }
         ConstantInfo::FieldRef(_) => Constant::FieldRef(Ref::resolve(cip, new_constants, slot)?),
         ConstantInfo::MethodRef(_) => Constant::MethodRef(Ref::resolve(cip, new_constants, slot)?),
@@ -634,7 +689,10 @@ impl ConstantPool {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
-    Class(Arc<String>),
+    Class {
+        path: String,
+        depth: u8
+    },
     FieldRef(Arc<Ref>),
     MethodRef(Arc<Ref>),
     InterfaceMethodRef(Arc<Ref>),
@@ -657,7 +715,6 @@ impl Constant {
     pub fn as_string(&self) -> Option<&Arc<String>> {
         match self {
             Constant::String(string)
-            | Constant::Class(string)
             | Constant::Utf8(string)
             | Constant::MethodType(string) => Some(string),
             _ => None,

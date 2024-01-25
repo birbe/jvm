@@ -1,5 +1,4 @@
 use jvm::bytecode::JValue;
-use jvm::classfile::resolved::Class;
 
 use jvm::heap::{Object};
 
@@ -8,8 +7,9 @@ use jvm::linker::ClassLoader;
 use jvm::{JVM};
 
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
+use std::fs;
 
 use std::io::{stdout};
 
@@ -17,20 +17,9 @@ use std::io::{stdout};
 use std::sync::Arc;
 use std::time::Instant;
 
-use wasmtime::{Engine, Instance, Store};
+use jvm::classfile::resolved::Class;
 
 extern crate jvm;
-
-fn run(wasm: &[u8]) {
-    let engine = Engine::default();
-    let module = wasmtime::Module::from_binary(&engine, wasm).unwrap();
-    let mut store = Store::new(&engine, ());
-    let instance = Instance::new(&mut store, &module, &[]).unwrap();
-
-    let main_func = instance.get_func(&mut store, "main").unwrap();
-    let _main = main_func.typed::<i32, i32>(&store).unwrap();
-    // main.call(&mut store, 0);
-}
 
 struct NativeClassLoader {
     pub classes: RwLock<HashMap<String, Arc<Class>>>,
@@ -50,12 +39,16 @@ impl NativeClassLoader {
 
 impl ClassLoader for NativeClassLoader {
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
-        match classpath {
-            "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
-            "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
-            "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
-            _ => panic!("{classpath} not found")
-        }
+        // if cfg!(miri) {
+            match classpath {
+                "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
+                "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
+                "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
+                _ => panic!("{classpath} not found")
+            }
+        // } else {
+        //     fs::read(format!("./jvm/test_classes/{}.class", classpath)).ok()
+        // }
     }
 
     fn register_class(&self, classpath: &str, class: Arc<Class>) {
@@ -73,22 +66,7 @@ impl ClassLoader for NativeClassLoader {
     }
 }
 
-fn main() {
-    let mock = NativeClassLoader {
-        classes: Default::default(),
-    };
-
-    let bootstrapper = Arc::new(mock);
-    let jvm = JVM::new(
-        bootstrapper.clone() as Arc<dyn ClassLoader>,
-        Mutex::new(Box::new(stdout())),
-    );
-
-    let _class = jvm
-        .find_class("Main", bootstrapper.clone())
-        // .find_class("net/minecraft/bundler/Main", bootstrapper.clone())
-        .unwrap();
-
+fn start_native(jvm: Arc<JVM>, bootstrapper: Arc<NativeClassLoader>) {
     let mut handle = jvm.create_thread(bootstrapper.clone());
 
     let now = Instant::now();
@@ -115,13 +93,38 @@ fn main() {
         result,
         Instant::now().duration_since(now).as_millis()
     );
+}
 
-    // let compiled = compile_class(&class, &jvm);
+fn compile_wasm(jvm: Arc<JVM>, bootstrapper: Arc<NativeClassLoader>) -> Vec<u8> {
+    let class = jvm
+        .find_class("Main", bootstrapper.clone())
+        .unwrap();
+
+    // let compiled = create_module(&class, &jvm);
     // let wasm = compiled.module.finish();
     //
     // let wat = wasmprinter::print_bytes(&wasm).unwrap();
     //
     // wasmparser::validate(&wasm).unwrap();
     //
-    // run(&wasm);
+    // wasm
+
+    todo!()
+}
+fn main() {
+    let mock = NativeClassLoader {
+        classes: Default::default(),
+    };
+
+    let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
+    let jvm = JVM::new(
+        bootstrapper.clone(),
+        Mutex::new(Box::new(stdout())),
+    );
+
+    let _main = jvm.find_class("Main", bootstrapper.clone());
+
+    let mut thread = jvm.create_thread(bootstrapper.clone());
+    let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
+        .unwrap();
 }

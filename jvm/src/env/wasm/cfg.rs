@@ -1,15 +1,9 @@
+use std::collections::HashMap;
+use std::ops::Range;
+use std::mem;
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
-use crate::jit::scc::{enumerate_graph, StronglyConnectedComponents};
-
-use std::collections::HashMap;
-
-use std::mem;
-use std::ops::Range;
-
-pub mod compile;
-mod scc;
-pub mod wasm;
+use crate::env::wasm::scc::{enumerate_graph, StronglyConnectedComponents};
 
 pub type Index = usize;
 
@@ -340,9 +334,9 @@ pub fn label_nodes(
 }
 
 #[derive(Debug)]
-struct ScopeMetrics {
-    loops: Vec<Range<usize>>,
-    blocks: Vec<Range<usize>>,
+pub struct ScopeMetrics {
+    pub loops: Vec<Range<usize>>,
+    pub blocks: Vec<Range<usize>>,
 }
 
 fn recurse_get_earliest_index(block: usize, blocks: &[Range<usize>]) -> usize {
@@ -371,7 +365,7 @@ fn recurse_get_earliest_index(block: usize, blocks: &[Range<usize>]) -> usize {
     }
 }
 
-fn identify_scopes(
+pub fn identify_scopes(
     nodes: &[(&ComponentNode, &LabeledNode)],
     scc_s: &HashMap<usize, Vec<usize>>,
 ) -> ScopeMetrics {
@@ -430,7 +424,7 @@ fn identify_scopes(
     ScopeMetrics { loops, blocks }
 }
 
-fn create_scopes<'a, 'b: 'a>(
+pub fn create_scopes<'a, 'b: 'a>(
     block_ranges: &'a mut &'b [Range<usize>],
     loop_ranges: &'a mut &'b [Range<usize>],
     nodes: &[(&ComponentNode, &LabeledNode)],

@@ -9,6 +9,13 @@ use std::sync::{Arc};
 
 pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> Operand;
 
+#[link(wasm_import_module = "JVM")]
+extern "C" {
+
+    pub fn invoke_table_function(function_id: u32, frame_stack: &mut FrameStack, thread: &mut Thread);
+
+}
+
 pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
     Interpret(Box<dyn Fn(&[Operand]) -> RawFrame>),
@@ -49,7 +56,7 @@ impl MethodHandle {
             ExecutionContext::Interpret(frame) => (*frame_store).push(frame(args)),
             ExecutionContext::JIT => {}
             ExecutionContext::Native => (*frame_store).push(RawFrame {
-                method_ref: ptr::null(),
+                method_ref: &*self.method_ref,
                 program_counter: 0,
                 locals_length: args.len(),
                 locals: locals.as_mut_ptr(),

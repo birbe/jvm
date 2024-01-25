@@ -17,3 +17,5 @@ Cargo.lock
 *.pdb
 
 .idea
+
+jvm/pkg

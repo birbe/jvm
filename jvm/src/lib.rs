@@ -2,10 +2,14 @@
 #![feature(slice_ptr_len)]
 #![feature(ptr_metadata)]
 #![feature(pointer_byte_offsets)]
+#![feature(alloc_layout_extra)]
+#![feature(const_alloc_layout)]
+#![feature(if_let_guard)]
 
-use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, NameAndType, Ref};
+extern crate core;
+
+use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, Method, NameAndType, Ref};
 use crate::classfile::{ClassFile};
-use crate::execution::{ExecutionContext, MethodHandle};
 use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use bitflags::Flags;
 
@@ -14,26 +18,38 @@ use jvm_types::JParse;
 use linker::ClassLoader;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 
-use std::io::{Cursor, Write};
+use std::io::{Cursor, stdout, Write};
 
 
 
 use std::pin::Pin;
 
 use std::sync::Arc;
+use wasm_bindgen::prelude::wasm_bindgen;
+use crate::bytecode::JValue;
+use crate::env::Compiler;
+use crate::execution::{ExecutionContext, invoke_table_function, MethodHandle};
+use crate::heap::Object;
 
 pub mod classfile;
 mod tests;
 
 pub mod bytecode;
-pub mod execution;
 pub mod heap;
-pub mod jit;
 pub mod linker;
+pub mod execution;
 pub mod native;
 pub mod thread;
+pub mod env;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    pub fn log(s: &str);
+
+}
 
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {
@@ -57,7 +73,7 @@ pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
     pub heap: Heap,
-    pub class_loaders: RwLock<Vec<Pin<Box<ClassLoaderStore>>>>,
+    pub class_loaders: RwLock<Vec<Pin<Box<ClassLoaderStore>>>>
 }
 
 impl JVM {
@@ -70,7 +86,7 @@ impl JVM {
                 loader: class_loader,
                 refs: RwLock::new(HashSet::new()),
                 method_refs: RwLock::new(HashMap::new()),
-            }))]),
+            }))])
         })
     }
 
@@ -145,10 +161,7 @@ impl JVM {
 
         std::mem::forget(thread.lock());
 
-        ThreadHandle {
-            thread: thread.data_ptr(),
-            guard: thread,
-        }
+        unsafe { ThreadHandle::new(thread.data_ptr(), thread) }
     }
 
     fn register_refs(&self, loader: &dyn ClassLoader, class: &Class) {
@@ -179,7 +192,6 @@ impl JVM {
             let ref_clone = ref_.clone();
 
             if !method.access_flags.contains(AccessFlags::NATIVE) {
-                #[cfg(not(target_arch = "wasm32"))]
                 let method_handle = MethodHandle {
                     ptr: ThreadHandle::interpret,
                     context: ExecutionContext::Interpret(Box::new(move |args| {
@@ -195,9 +207,6 @@ impl JVM {
                     })),
                     method_ref: ref_.clone(),
                 };
-
-                #[cfg(target_arch = "wasm32")]
-                let method_handle = panic!("Linking on wasm32 has not yet been implemented");
 
                 method_refs.insert(ref_.clone(), Arc::new(method_handle));
             } else {
@@ -219,7 +228,8 @@ impl JVM {
     }
 }
 
-pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Arc<Ref>) {
+
+pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Ref) {
     match class.get_method(&method_ref.name_and_type) {
         None => {}
         Some(_other_method) => {}
@@ -243,4 +253,100 @@ pub fn routine_resolve_field<'a>(name_and_type: &'a NameAndType, class: &'a Clas
         }
         Some(field) => Some((field, class)),
     }
+}
+
+pub enum ResolveMethodError {
+    IncompatibleClassChangeError
+}
+
+pub fn routine_resolve_method<'class>(jvm: &JVM, ref_: &Ref, class: &'class Class) -> Result<&'class Method, ResolveMethodError> {
+    if class.access_flags.contains(AccessFlags::INTERFACE) {
+        return Err(ResolveMethodError::IncompatibleClassChangeError);
+    }
+
+    fn step2<'class>(ref_: &Ref, class: &'class Class) -> Option<&'class Method> {
+        let methods: Vec<&Method> = class.methods.iter().filter(|m| m.name == ref_.name_and_type.name).collect();
+
+        if methods.len() == 1 && methods[0].is_signature_polymorphic(&class.this_class) {
+            //TODO resolve references
+            return Some(methods[0]);
+        }
+
+        if let Some(method) = class.get_method(&ref_.name_and_type) {
+            return Some(method);
+        }
+
+        class.super_class.as_ref().and_then(|super_class| {
+            step2(ref_, super_class)
+        })
+    }
+
+    if let Some(method) = step2(ref_, class) {
+        return Ok(method);
+    }
+
+    todo!()
+}
+
+struct NativeClassLoader {
+    pub classes: RwLock<HashMap<String, Arc<Class>>>,
+}
+
+impl Debug for NativeClassLoader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NativeClassLoader")
+    }
+}
+
+impl NativeClassLoader {
+    unsafe fn dropper(ptr: *const ()) {
+        Arc::from_raw(ptr as *const NativeClassLoader);
+    }
+}
+
+impl ClassLoader for NativeClassLoader {
+    fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
+        match classpath {
+            "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
+            "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
+            "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
+            _ => panic!("{classpath} not found")
+        }
+    }
+
+    fn register_class(&self, classpath: &str, class: Arc<Class>) {
+        let mut classes = self.classes.write();
+        classes.insert(classpath.into(), class);
+    }
+
+    fn get_class(&self, classpath: &str) -> Option<Arc<Class>> {
+        let classes = self.classes.read();
+        classes.get(classpath).cloned()
+    }
+
+    fn id(&self) -> usize {
+        0
+    }
+}
+
+
+#[wasm_bindgen]
+pub fn wasm_test() {
+    console_error_panic_hook::set_once();
+
+    let mock = NativeClassLoader {
+        classes: Default::default(),
+    };
+
+    let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
+    let jvm = JVM::new(
+        bootstrapper.clone(),
+        Mutex::new(Box::new(stdout())),
+    );
+
+    let _main = jvm.find_class("Main", bootstrapper.clone());
+
+    let mut thread = jvm.create_thread(bootstrapper.clone());
+    let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
+        .unwrap();
 }

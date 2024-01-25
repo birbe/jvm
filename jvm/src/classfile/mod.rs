@@ -80,8 +80,7 @@ impl JParse for ConstantInfoPool {
 }
 
 pub mod constant {
-    
-    use cesu8str::Cesu8String;
+
     use jvm_types::JParse;
     use parse_macro::JParse;
     use std::fmt::{Debug, Formatter};
@@ -123,7 +122,7 @@ pub mod constant {
         ) -> Result<Self::Output, Error> {
             let vec = <Vec<u8>>::from_bytes(&mut r)?;
             //TODO proper error handling for JParse
-            let string = Cesu8String::try_from_bytes(vec.clone()).unwrap();
+            let string = String::from_utf8(mutf8::mutf8_to_utf8(&vec).unwrap().into()).unwrap();
 
             Ok(Self {
                 string: Arc::new(string.into()),
@@ -131,9 +130,9 @@ pub mod constant {
         }
 
         fn to_bytes_prefixed<const PREFIX: usize>(&self) -> Vec<u8> {
-            let bytes = Cesu8String::from(&(*self.string)[..]).into_bytes();
+            let bytes = mutf8::utf8_to_mutf8(&self.string.as_bytes()).unwrap();
             let mut out: Vec<u8> = (bytes.len() as u16).to_be_bytes().into();
-            out.extend(bytes);
+            out.extend(bytes.iter());
             out
         }
     }

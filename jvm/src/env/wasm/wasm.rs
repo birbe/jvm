@@ -1,19 +1,17 @@
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Code;
-use crate::classfile::resolved::{
-    attribute, AccessFlags, Attribute, Class, Constant, Method, Ref, ReturnType,
-};
-use crate::jit::{
-    create_scopes, find_loops, identify_scopes, label_nodes, Block, LabeledNode, ScopeMetrics,
-};
+use crate::classfile::resolved::{AccessFlags, attribute, Attribute, Class, Constant, Method, Ref, ReturnType};
 use crate::JVM;
 use bitflags::Flags;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use wasm_encoder::{
-    BlockType, CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction,
-    MemArg, Module, RefType, TableSection, TableType, TypeSection, ValType,
+    BlockType, CodeSection, Function, FunctionSection, Instruction,
+    Module, TableSection, TypeSection, ValType,
 };
+use crate::env::aot::analyze_class;
+use crate::env::wasm::cfg::{Block, create_scopes, find_loops, identify_scopes, label_nodes, LabeledNode, ScopeMetrics};
+use crate::linker::ClassLoader;
 
 pub const POINTER_SIZE: i32 = 4;
 pub const POINTER_TYPE: ValType = ValType::I32;
@@ -23,7 +21,7 @@ pub struct CompiledClass {
     pub link: HashMap<Arc<Ref>, u32>,
 }
 
-pub fn compile_class(class: &Class, jvm: &JVM) -> CompiledClass {
+pub fn create_module(entry_class: Arc<Class>, class_loader: Arc<dyn ClassLoader>, jvm: &JVM) -> CompiledClass {
     let mut module = Module::new();
 
     let mut function_section = FunctionSection::new();
@@ -31,65 +29,13 @@ pub fn compile_class(class: &Class, jvm: &JVM) -> CompiledClass {
     let mut code_section = CodeSection::new();
     let mut table = TableSection::new();
 
-    let external_references: HashMap<Arc<Ref>, u32> = class
-        .constant_pool
-        .constants
-        .iter()
-        .filter_map(|(_idx, constant)| match constant {
-            Constant::MethodRef(ref_) | Constant::InterfaceMethodRef(ref_) => {
-                if ref_.class != class.this_class {
-                    Some((*ref_).clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-        .enumerate()
-        .map(|(a, b)| (b, a as u32))
-        .collect();
+    let mut classes = HashSet::new();
 
-    let table_type = TableType {
-        element_type: RefType::FUNCREF,
-        minimum: external_references.len() as u32,
-        maximum: None,
-    };
 
-    table.table(table_type);
 
-    let method_func_idx_map: HashMap<&str, usize> = class
-        .methods
-        .iter()
-        .enumerate()
-        .map(|(index, method)| (&method.name[..], index))
-        .collect();
+    analyze_class(entry_class.clone(), &class_loader, jvm, &mut classes);
 
-    let mut export_section = ExportSection::new();
-
-    for method in &class.methods {
-        export_section.export(&method.name, ExportKind::Func, function_section.len());
-        compile_method(
-            method,
-            class,
-            &mut function_section,
-            &mut code_section,
-            &mut type_section,
-            &method_func_idx_map,
-            jvm,
-            &external_references,
-        );
-    }
-
-    module.section(&type_section);
-    module.section(&function_section);
-    module.section(&table);
-    module.section(&export_section);
-    module.section(&code_section);
-
-    CompiledClass {
-        module,
-        link: external_references,
-    }
+    todo!()
 }
 
 fn get_method_params(method: &Method) -> (Vec<ValType>, Vec<ValType>) {
@@ -254,45 +200,72 @@ fn get_jump_offset(
     }
 }
 
+struct BuiltinRoutines {
+    invoke_special_routine: u32
+}
+
+struct PrimitiveTypes {
+    object_array: u32
+}
+
+struct Globals {
+    jvm_ptr: u32,
+}
+
+struct CompilerState {
+    routines: BuiltinRoutines,
+    primitives: PrimitiveTypes,
+    globals: Globals,
+
+    descriptor_to_wasm_type_id: HashMap<String, u32>,
+
+    hot_function_table: u32
+}
+
+struct ContextState {
+    temp_local1: u32,
+    temp_local2: u32
+}
+
 fn translate_bytecode(
+    compiler_state: &CompilerState,
+    context_state: &ContextState,
+
     bytecode: &Bytecode,
     idx: usize,
     byte_index: u32,
     function: &mut Function,
-    _instructions: &[attribute::Instruction],
-    _labeled: &[LabeledNode],
-    helper_start: u32,
     scope_metrics: &ScopeMetrics,
     byte_to_idx_map: &HashMap<u32, u32>,
-    _scc_s: &HashMap<usize, Vec<usize>>,
     type_section: &mut TypeSection,
-    _skip: bool,
     method_func_idx_map: &HashMap<&str, usize>,
     class: &Class,
     jvm: &JVM,
     external_references: &HashMap<Arc<Ref>, u32>,
     scope_offset: u32,
-    block_idx: u32,
+    block_idx: u32
 ) {
     match bytecode {
-        Bytecode::Aaload => {
-            function
-                .instruction(&Instruction::Block(BlockType::Empty))
-                .instruction(&Instruction::LocalSet(helper_start))
-                .instruction(&Instruction::BrOnNonNull(0))
-                .instruction(&Instruction::Unreachable)
-                .instruction(&Instruction::End)
-                .instruction(&Instruction::LocalGet(helper_start));
+        Bytecode::Invokespecial(index) => {
+            let method_constant = class.constant_pool.constants.get(index).unwrap();
+            let method_ref = method_constant.as_ref().unwrap();
 
-            function
-                .instruction(&Instruction::I32Const(POINTER_SIZE))
-                .instruction(&Instruction::I32Mul)
-                .instruction(&Instruction::I32Add)
-                .instruction(&Instruction::I32Load(MemArg {
-                    offset: 0,
-                    align: 4,
-                    memory_index: 0,
-                }));
+            // let ty = *compiler_state.descriptor_to_wasm_type_id.get(&method_ref.name_and_type.descriptor).unwrap();
+
+            // function.instruction(&Instruction::Call(compiler_state.routines.invoke_special_routine));
+            //
+            // function.instruction(&Instruction::LocalTee(context_state.temp_local1));
+            // function.instruction(&Instruction::LocalGet(context_state.temp_local1));
+            //
+            // function.instruction(&Instruction::GlobalGet(compiler_state.globals.jvm_ptr));
+            // // function.instruction(&Instruction::StructGet {});
+            // function.instruction(&Instruction::Call(compiler_state.routines.invoke_special_routine));
+            // function.instruction(&Instruction::CallIndirect {
+            //     ty,
+            //     table: compiler_state.hot_function_table,
+            // });
+
+            todo!()
         }
         Bytecode::Pop => {
             function.instruction(&Instruction::Drop);
@@ -460,6 +433,12 @@ fn translate_bytecode(
         Bytecode::Imul => {
             function.instruction(&Instruction::I32Mul);
         }
+        Bytecode::Invokevirtual(index) => {
+            let constant = class.constant_pool.constants.get(index).unwrap();
+            let method_ref = constant.as_ref().unwrap();
+
+            todo!()
+        }
         Bytecode::Invokestatic(constant_pool) => {
             let constant = class.constant_pool.constants.get(constant_pool).unwrap();
             match constant {
@@ -529,6 +508,9 @@ fn translate_bytecode(
         | Bytecode::Freturn
         | Bytecode::Lreturn => {
             function.instruction(&Instruction::Return);
+        }
+        Bytecode::New(index) => {
+            // function.instruction(Instruction::I31);
         }
         bytecode => unimplemented!("Bytecode not implemented {:?} @ {}", bytecode, idx),
     }
@@ -737,26 +719,22 @@ fn translate_block(
                     _ => {}
                 };
 
-                translate_bytecode(
-                    bytecode,
-                    idx,
-                    byte_index,
-                    function,
-                    instructions,
-                    labeled,
-                    helper_start,
-                    scope_metrics,
-                    byte_to_idx_map,
-                    scc_s,
-                    type_section,
-                    false,
-                    method_func_idx_map,
-                    class,
-                    jvm,
-                    external_references,
-                    0,
-                    *block_index,
-                );
+                todo!()
+
+                // translate_bytecode(
+                //     bytecode,
+                //     idx,
+                //     function,
+                //     scope_metrics,
+                //     byte_to_idx_map,
+                //     type_section,
+                //     method_func_idx_map,
+                //     class,
+                //     jvm,
+                //     external_references,
+                //     0,
+                //     *block_index,
+                // );
             }
         }
     }

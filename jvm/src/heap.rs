@@ -1,7 +1,6 @@
 use crate::classfile::resolved::{AccessFlags, Class, Field, FieldType};
 use crate::JVM;
 use bitflags::Flags;
-use cesu8str::Cesu8String;
 use parking_lot::RwLock;
 use std::alloc::{alloc, Layout};
 use std::collections::{HashMap, HashSet};
@@ -9,6 +8,9 @@ use std::fmt::Debug;
 use std::mem::{align_of, size_of};
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8};
+use mutf8::utf8_to_mutf8;
+use crate::thread::Operand;
 
 pub unsafe trait ObjectInternal {}
 pub unsafe trait NonArrayObject {}
@@ -32,7 +34,10 @@ impl Object {
     }
 
     pub fn get_body(&self) -> *mut () {
-        unsafe { (self.ptr.byte_offset(size_of::<ObjectHeader>() as isize)) }
+        let layout = Layout::from_size_align(size_of::<ObjectHeader>(), align_of::<ObjectHeader>()).unwrap();
+        let padding = layout.padding_needed_for(align_of::<Operand>());
+
+        unsafe { (self.ptr.byte_offset(padding as isize)) }
     }
 
     pub fn get_raw(&self) -> *mut () {
@@ -40,10 +45,12 @@ impl Object {
     }
 
     pub fn cast_class<T: NonArrayObject>(&self) -> *mut RawObject<T> {
-        std::ptr::from_raw_parts_mut(self.ptr as usize as *mut (), ())
+        std::ptr::from_raw_parts_mut(self.ptr, ())
     }
 
-    pub fn get_header(&self) -> &ObjectHeader {
+
+    ///SAFETY: The pointer this [Object] represents must still be valid
+    pub unsafe fn get_header(&self) -> &ObjectHeader {
         assert_ne!(self, &Self::NULL);
 
         let this = self.cast_class::<()>();
@@ -53,30 +60,60 @@ impl Object {
     pub unsafe fn cast_array<T: ObjectInternal>(&self) -> *mut RawObject<RawArray<T>> {
         //TODO type checking
 
+        #[repr(C)]
+       struct PartialArray {
+           header: ObjectHeader,
+           length: i32
+       }
+
         unsafe {
-            let ptr = self.ptr as usize as *mut ();
-            let length = *ptr
-                .cast_const()
-                .cast::<u8>()
-                .add(size_of::<*const FieldType>())
-                .cast::<i32>();
-            std::ptr::from_raw_parts_mut(ptr, length as usize)
+            let partial = self.ptr as *const PartialArray;
+            let length = unsafe { (*partial).length };
+
+            std::ptr::from_raw_parts_mut(self.ptr, length as usize)
         }
     }
 }
 
+
+
 #[derive(Debug)]
 #[repr(C)]
-pub enum ObjectHeader {
+pub struct ObjectHeader {
+    pub type_: ObjectType,
+    pub synchronized: AtomicU8
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub enum ObjectType {
     Class(*const Class),
     Array(*const FieldType)
+}
+
+impl ObjectType {
+
+    pub unsafe fn get_class(&self) -> Option<&Class> {
+        match self {
+            Self::Class(class) => Some(&**class),
+            _ => None
+        }
+    }
+
+    pub unsafe fn get_type(&self) -> Option<&FieldType> {
+        match self {
+            Self::Array(array) => Some(&**array),
+            _ => None
+        }
+    }
+
 }
 
 #[derive(Debug)]
 #[repr(C)]
 pub struct RawObject<T: ?Sized> {
     pub header: ObjectHeader,
-    pub body: T,
+    pub body: T
 }
 
 macro_rules! impl_primitive {
@@ -140,7 +177,7 @@ impl Heap {
             .iter()
             .map(|field| (!field.access_flags.contains(AccessFlags::STATIC)) as usize)
             .sum::<usize>()
-            * size_of::<u64>();
+            * size_of::<Operand>();
         match &class.super_class {
             None => {}
             Some(superclass) => size += Self::recurse_get_heap_size(superclass),
@@ -163,12 +200,13 @@ impl Heap {
 
         let alloc = unsafe { alloc(layout) };
 
-        println!("Allocating {} with size {}, layout size {} @ {}", &class.this_class, class.heap_size, layout.size(), alloc as usize);
-
         let object_ptr: *mut RawObject<T> = std::ptr::from_raw_parts_mut(alloc as *mut (), ());
 
         unsafe {
-            (*object_ptr).header = ObjectHeader::Class(class as *const Class);
+            (*object_ptr).header = ObjectHeader {
+                type_: ObjectType::Class(class as *const Class),
+                synchronized: AtomicU8::new(0),
+            };
         }
 
         object_ptr
@@ -191,8 +229,6 @@ impl Heap {
 
         let alloc = unsafe { alloc(layout) };
 
-        println!("Allocating {}[] with size {}, layout size {} @ {}", &class.this_class, class.heap_size, layout.size(), alloc as usize);
-
         let object_ptr: *mut RawObject<RawArray<Object>> =
             std::ptr::from_raw_parts_mut(alloc as *mut (), length as usize);
 
@@ -210,7 +246,10 @@ impl Heap {
 
         unsafe {
             (*object_ptr).body.length = length;
-            (*object_ptr).header = ObjectHeader::Array(field_type);
+            (*object_ptr).header = ObjectHeader {
+                type_: ObjectType::Array(field_type),
+                synchronized: AtomicU8::new(0)
+            };
         }
 
         object_ptr
@@ -244,7 +283,10 @@ impl Heap {
         let field_type = &**types.get(&field_type).unwrap() as *const FieldType;
 
         unsafe {
-            (*object_ptr).header = ObjectHeader::Array(field_type);
+            (*object_ptr).header = ObjectHeader {
+                type_: ObjectType::Array(field_type),
+                synchronized: AtomicU8::new(0),
+            };
             (*object_ptr).body.length = length;
         }
 
@@ -283,8 +325,8 @@ impl Heap {
 
         let string_class = jvm.find_class("java/lang/String", class_loader).unwrap();
 
-        let cesu = Cesu8String::from(string);
-        let chars: Vec<u16> = cesu.into_bytes().iter().map(|b| *b as u16).collect();
+        let cesu = utf8_to_mutf8(string.as_bytes()).unwrap();
+        let chars: Vec<u16> = cesu.iter().map(|b| *b as u16).collect();
 
         let string = self.allocate_class(&string_class);
 
@@ -351,9 +393,10 @@ impl StringObject {
     pub fn get_string(&self) -> String {
         let raw_string = self.value.cast_class::<RawString>();
         let array = unsafe { &(*(*raw_string).body.value.cast_array::<u16>()).body.body };
-        Cesu8String::try_from_bytes(array.iter().map(|c| *c as u8).collect())
-            .unwrap()
-            .to_string()
+
+        let bytes: Vec<u8> = array.iter().map(|char| *char as u8).collect();
+
+        String::from_utf8(mutf8::mutf8_to_utf8(&bytes).unwrap().into()).unwrap()
     }
 }
 
