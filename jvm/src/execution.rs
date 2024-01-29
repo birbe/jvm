@@ -1,10 +1,9 @@
-use crate::classfile::resolved::Ref;
+use crate::classfile::resolved::{Class, Method, Ref};
 use crate::thread::{FrameStack, Operand, RawFrame, Thread};
 
 
 use std::fmt::{Debug, Formatter};
 
-use std::ptr;
 use std::sync::{Arc};
 
 pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> Operand;
@@ -16,10 +15,27 @@ extern "C" {
 
 }
 
+pub struct InterpreterContext {
+    //RawFrame contains a pointer to the Ref and the Class, these keep the pointers alive
+    ref_: Arc<Ref>,
+    class: Arc<Class>
+}
+
+impl InterpreterContext {
+
+    pub fn new(ref_: Arc<Ref>, class: Arc<Class>) -> Self {
+        Self {
+            ref_,
+            class
+        }
+    }
+
+}
+
 pub enum ExecutionContext {
     //Interpret requires that any caller pushes the appropriate frame onto the stack before calling
-    Interpret(Box<dyn Fn(&[Operand]) -> RawFrame>),
-    JIT,
+    Interpret(InterpreterContext),
+    Compiled,
     Native,
 }
 
@@ -30,7 +46,7 @@ impl Debug for ExecutionContext {
             "ExecutionContext::{}",
             match self {
                 ExecutionContext::Interpret(_) => "Interpret",
-                ExecutionContext::JIT => "JIT",
+                ExecutionContext::Compiled => "JIT",
                 ExecutionContext::Native => "Native",
             }
         )
@@ -53,16 +69,17 @@ impl MethodHandle {
         let mut locals = Vec::from(args);
 
         match &self.context {
-            ExecutionContext::Interpret(frame) => (*frame_store).push(frame(args)),
-            ExecutionContext::JIT => {}
+            ExecutionContext::Interpret(context) => todo!(),
+            ExecutionContext::Compiled => {}
             ExecutionContext::Native => (*frame_store).push(RawFrame {
                 method_ref: &*self.method_ref,
+                class: std::ptr::null(),
                 program_counter: 0,
                 locals_length: args.len(),
                 locals: locals.as_mut_ptr(),
                 stack_index: 0,
                 stack_length: 0,
-                stack: ptr::null_mut(),
+                stack: std::ptr::null_mut(),
             }),
         }
 
@@ -72,7 +89,7 @@ impl MethodHandle {
 
         match &self.context {
             ExecutionContext::Interpret(_) => {}
-            ExecutionContext::JIT => {}
+            ExecutionContext::Compiled => {}
             ExecutionContext::Native => { frame_store.pop(); },
         }
 

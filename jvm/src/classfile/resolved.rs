@@ -47,6 +47,8 @@ bitflags! {
 
 }
 
+pub type ClassId = u32;
+
 #[derive(Debug)]
 pub struct Class {
     pub constant_pool: ConstantPool,
@@ -62,7 +64,8 @@ pub struct Class {
     pub static_init_state: AtomicU8,
     pub attributes: Vec<Attribute>,
 
-    pub heap_size: usize
+    pub heap_size: usize,
+    internal_id: ClassId
 }
 
 impl Class {
@@ -70,6 +73,7 @@ impl Class {
         classfile: &ClassFile,
         jvm: &JVM,
         class_loader: Arc<dyn ClassLoader>,
+        internal_id: ClassId
     ) -> Option<Self> {
 
         let constant_pool =
@@ -161,6 +165,7 @@ impl Class {
                 .collect::<Option<Vec<Attribute>>>()?,
             constant_pool,
             heap_size,
+            internal_id,
         })
     }
 
@@ -187,6 +192,26 @@ impl Class {
                 || lower_method.access_flags.contains(AccessFlags::PROTECTED)
                 || todo!())
         })
+    }
+
+    pub fn parents(&self) -> Vec<Arc<Class>> {
+        let mut parents = vec![];
+
+        let mut current = self.super_class.as_ref();
+        loop {
+            if let Some(super_) = current {
+                parents.push(super_.clone());
+                current = super_.super_class.as_ref();
+            } else {
+                break;
+            }
+        }
+
+        parents
+    }
+
+    pub(crate) fn get_id(&self) -> ClassId {
+        self.internal_id
     }
 
 }

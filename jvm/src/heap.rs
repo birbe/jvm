@@ -317,29 +317,31 @@ impl Heap {
     }
 
     pub fn allocate_string(&self, string: &str, jvm: &JVM) -> StringObject {
-        let class_loaders = jvm.class_loaders.read();
-        let bootstrapper = &class_loaders[0];
+        todo!()
 
-        let class_loader = bootstrapper.loader.clone();
-        drop(class_loaders);
-
-        let string_class = jvm.find_class("java/lang/String", class_loader).unwrap();
-
-        let cesu = utf8_to_mutf8(string.as_bytes()).unwrap();
-        let chars: Vec<u16> = cesu.iter().map(|b| *b as u16).collect();
-
-        let string = self.allocate_class(&string_class);
-
-        let char_array = self.allocate_raw_primitive_array::<u16>(chars.len() as i32);
-        unsafe {
-            (*char_array).body.body.copy_from_slice(&chars);
-            (*string.cast_class::<RawString>()).body.value = Object::from_raw(char_array);
-        }
-
-        StringObject {
-            value: string,
-            class: string_class.clone(),
-        }
+        // let class_loaders = jvm.class_loaders.read();
+        // let bootstrapper = &class_loaders[0];
+        //
+        // let class_loader = bootstrapper.loader.clone();
+        // drop(class_loaders);
+        //
+        // let string_class = jvm.find_class("java/lang/String", class_loader).unwrap();
+        //
+        // let cesu = utf8_to_mutf8(string.as_bytes()).unwrap();
+        // let chars: Vec<u16> = cesu.iter().map(|b| *b as u16).collect();
+        //
+        // let string = self.allocate_class(&string_class);
+        //
+        // let char_array = self.allocate_raw_primitive_array::<u16>(chars.len() as i32);
+        // unsafe {
+        //     (*char_array).body.body.copy_from_slice(&chars);
+        //     (*string.cast_class::<RawString>()).body.value = Object::from_raw(char_array);
+        // }
+        //
+        // StringObject {
+        //     value: string,
+        //     class: string_class.clone(),
+        // }
     }
 
     pub fn get_string(&self, string: &str, jvm: &JVM) -> StringObject {

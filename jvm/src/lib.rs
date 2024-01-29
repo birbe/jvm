@@ -27,10 +27,11 @@ use std::io::{Cursor, stdout, Write};
 use std::pin::Pin;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use wasm_bindgen::prelude::wasm_bindgen;
 use crate::bytecode::JValue;
-use crate::env::Compiler;
-use crate::execution::{ExecutionContext, invoke_table_function, MethodHandle};
+use crate::env::{Compiler, Environment};
+use crate::execution::{ExecutionContext, InterpreterContext, invoke_table_function, MethodHandle};
 use crate::heap::Object;
 
 pub mod classfile;
@@ -65,28 +66,24 @@ pub enum RuntimeError {
 
 pub struct ClassLoaderStore {
     pub loader: Arc<dyn ClassLoader>,
-    pub refs: RwLock<HashSet<Pin<Arc<Ref>>>>,
-    pub method_refs: RwLock<HashMap<Arc<Ref>, Arc<MethodHandle>>>,
 }
 
 pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
     pub heap: Heap,
-    pub class_loaders: RwLock<Vec<Pin<Box<ClassLoaderStore>>>>
+    pub environment: Box<dyn Environment>,
+    class_ids: AtomicU32
 }
 
 impl JVM {
-    pub fn new(class_loader: Arc<dyn ClassLoader>, stdout: Mutex<Box<dyn Write>>) -> Arc<Self> {
+    pub fn new(stdout: Mutex<Box<dyn Write>>, environment: Box<dyn Environment>) -> Arc<Self> {
         Arc::new(Self {
             stdout,
             threads: Default::default(),
             heap: Heap::new(),
-            class_loaders: RwLock::new(vec![Pin::new(Box::new(ClassLoaderStore {
-                loader: class_loader,
-                refs: RwLock::new(HashSet::new()),
-                method_refs: RwLock::new(HashMap::new()),
-            }))])
+            environment,
+            class_ids: AtomicU32::new(0),
         })
     }
 
@@ -125,13 +122,13 @@ impl JVM {
             ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
 
         let class = Arc::new(
-            Class::init(&classfile, &self, class_loader.clone())
+            Class::init(&classfile, &self, class_loader.clone(), self.class_ids.fetch_add(1, Ordering::Relaxed))
                 .ok_or(ClassLoadError::MalformedClassDef)?,
         );
 
         class_loader.register_class(classpath, class.clone());
 
-        self.register_refs(&*class_loader, &class);
+        self.link_class(&*class_loader, class.clone());
 
         Ok(class)
     }
@@ -164,13 +161,7 @@ impl JVM {
         unsafe { ThreadHandle::new(thread.data_ptr(), thread) }
     }
 
-    fn register_refs(&self, loader: &dyn ClassLoader, class: &Class) {
-        let stores = self.class_loaders.read();
-
-        let store = &stores[loader.id()];
-        let mut method_refs = store.method_refs.write();
-        let mut refs = store.refs.write();
-
+    fn link_class(&self, loader: &dyn ClassLoader, class: Arc<Class>) {
         for method in &class.methods {
             let ref_ = Arc::new(Ref {
                 class: class.this_class.clone(),
@@ -180,50 +171,29 @@ impl JVM {
                 }),
             });
 
-            refs.insert(Pin::new(ref_.clone()));
-
-            let (max_stack, max_locals) =
-                if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
-                    (code.max_stack as usize + 1, code.max_locals as usize)
-                } else {
-                    (0, 0)
-                };
-
-            let ref_clone = ref_.clone();
-
-            if !method.access_flags.contains(AccessFlags::NATIVE) {
-                let method_handle = MethodHandle {
+            let method_handle = if !method.access_flags.contains(AccessFlags::NATIVE) {
+                MethodHandle {
                     ptr: ThreadHandle::interpret,
-                    context: ExecutionContext::Interpret(Box::new(move |args| {
-                        RawFrame::new(
-                            &ref_clone.clone(),
-                            args.iter()
-                                .copied()
-                                .chain(std::iter::repeat(Operand { data: 0 }).take(max_locals))
-                                .collect::<Vec<Operand>>()
-                                .into_boxed_slice(),
-                            vec![Operand { data: 0 }; max_stack].into_boxed_slice(),
-                        )
-                    })),
+                    context: ExecutionContext::Interpret(InterpreterContext::new(
+                        ref_.clone(),
+                        class.clone(),
+                    )),
                     method_ref: ref_.clone(),
-                };
-
-                method_refs.insert(ref_.clone(), Arc::new(method_handle));
+                }
             } else {
                 match native::link(&ref_) {
-                    None => {}
+                    None => return,
                     Some(ptr) => {
-                        method_refs.insert(
-                            ref_.clone(),
-                            Arc::new(MethodHandle {
-                                ptr,
-                                context: ExecutionContext::Native,
-                                method_ref: ref_.clone(),
-                            }),
-                        );
+                        MethodHandle {
+                            ptr,
+                            context: ExecutionContext::Native,
+                            method_ref: ref_.clone(),
+                        }
                     }
                 }
-            }
+            };
+
+            self.environment.register_method_handle(loader, ref_, method_handle);
         }
     }
 }
@@ -334,19 +304,19 @@ impl ClassLoader for NativeClassLoader {
 pub fn wasm_test() {
     console_error_panic_hook::set_once();
 
-    let mock = NativeClassLoader {
-        classes: Default::default(),
-    };
-
-    let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
-    let jvm = JVM::new(
-        bootstrapper.clone(),
-        Mutex::new(Box::new(stdout())),
-    );
-
-    let _main = jvm.find_class("Main", bootstrapper.clone());
-
-    let mut thread = jvm.create_thread(bootstrapper.clone());
-    let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
-        .unwrap();
+    // let mock = NativeClassLoader {
+    //     classes: Default::default(),
+    // };
+    //
+    // let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
+    // let jvm = JVM::new(
+    //     bootstrapper.clone(),
+    //     Mutex::new(Box::new(stdout())),
+    // );
+    //
+    // let _main = jvm.find_class("Main", bootstrapper.clone());
+    //
+    // let mut thread = jvm.create_thread(bootstrapper.clone());
+    // let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
+    //     .unwrap();
 }

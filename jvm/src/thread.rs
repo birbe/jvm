@@ -1,4 +1,4 @@
-use crate::{JVM, log, routine_resolve_field};
+use crate::{JVM, routine_resolve_field};
 use crate::bytecode::{Bytecode, JValue};
 
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Constant, FieldType, MethodDescriptor, NameAndType, Ref, ReferenceKind, ReturnType};
@@ -30,10 +30,11 @@ pub enum ThreadError {
 #[repr(C)]
 #[derive(Debug)]
 pub struct RawFrame {
-    pub(crate) method_ref: *const Ref,
-    pub(crate) program_counter: u32,
     pub(crate) locals_length: usize,
     pub(crate) locals: *mut Operand,
+    pub(crate) method_ref: *const Ref,
+    pub(crate) class: *const Class,
+    pub(crate) program_counter: u32,
     pub(crate) stack_index: usize,
     pub(crate) stack_length: usize,
     pub(crate) stack: *mut Operand,
@@ -43,6 +44,7 @@ impl RawFrame {
 
     pub const UNINIT: Self = RawFrame {
         method_ref: std::ptr::null(),
+        class: std::ptr::null(),
         program_counter: 0,
         locals_length: 0,
         locals: std::ptr::null_mut(),
@@ -51,12 +53,13 @@ impl RawFrame {
         stack: std::ptr::null_mut(),
     };
 
-    pub fn new(method_identifier: &Ref, locals: Box<[Operand]>, stack: Box<[Operand]>) -> Self {
+    pub fn new(method_identifier: &Ref, class: &Class, locals: Box<[Operand]>, stack: Box<[Operand]>) -> Self {
         let locals = Box::into_raw(locals);
         let stack = Box::into_raw(stack);
 
         Self {
             method_ref: method_identifier as *const Ref,
+            class: class as *const Class,
             program_counter: 0,
             locals_length: locals.len(),
             locals: locals.as_mut_ptr(),
@@ -70,6 +73,7 @@ impl RawFrame {
         unsafe {
             Frame {
                 method_ref: &*self.method_ref,
+                class: &*self.class,
                 program_counter: &mut self.program_counter,
                 locals: std::slice::from_raw_parts_mut::<'a>(self.locals, self.locals_length),
                 stack_length: &mut self.stack_index,
@@ -115,6 +119,7 @@ impl Operand {
 #[repr(C)]
 pub struct Frame<'a> {
     pub method_ref: &'a Ref,
+    pub class: &'a Class,
     pub program_counter: &'a mut u32,
     pub locals: &'a mut [Operand],
     pub stack_length: &'a mut usize,
@@ -258,62 +263,63 @@ impl ThreadHandle {
             .find(|method| *method.name == method_name && method_descriptor == method_descriptor)
             .ok_or(JavaBarrierError::MethodNotFound)?;
 
-        let handle = {
-            let id = self.class_loader.id();
-            let class_loader_stores = self.jvm.class_loaders.read();
-            let store = &class_loader_stores[id];
-            let refs = store.method_refs.read();
+        todo!()
 
-            let method_ref = Ref {
-                class: Arc::new(classpath.to_string()),
-                name_and_type: Arc::new(NameAndType {
-                    name: Arc::new(method_name.to_string()),
-                    descriptor: Arc::new(method_descriptor.to_string()),
-                }),
-            };
-
-            refs.get(&method_ref)
-                .ok_or(JavaBarrierError::MethodNotFound)?
-                .clone()
-        };
-
-        let operands: Vec<Operand> = args.iter().map(|arg| arg.as_operand()).collect();
-
-        let thread_ptr = self.thread;
-        let return_value = handle.invoke(&operands, &mut self.frame_store, unsafe { &mut *thread_ptr });
-
-        let jvalue = match &method.descriptor.return_type {
-            ReturnType::FieldType(field_type) => Some(match field_type {
-                FieldType::Array { .. } => JValue::Reference(unsafe {
-                    Object::from_raw(return_value.objectref as *mut RawObject<()>)
-                }),
-                FieldType::Byte => JValue::Byte(unsafe { return_value.data } as Byte),
-                FieldType::Char => todo!(),
-                FieldType::Double => {
-                    JValue::Double(f64::from_ne_bytes(unsafe { return_value.data }.to_ne_bytes()))
-                }
-                FieldType::Float => {
-                    JValue::Float(f32::from_ne_bytes((unsafe { return_value.data } as u32).to_ne_bytes()))
-                }
-                FieldType::Int => JValue::Int(unsafe { return_value.data } as i32),
-                FieldType::Long => JValue::Long(unsafe { return_value.data } as i64),
-                FieldType::Short => JValue::Short(unsafe { return_value.data } as i16),
-                FieldType::Boolean => JValue::Int(unsafe { return_value.data } as i32),
-                FieldType::Class(_) => JValue::Reference(unsafe {
-                    Object::from_raw(return_value.objectref as *mut RawObject<()>)
-                }),
-            }),
-            ReturnType::Void => None,
-        };
-
-        Ok(jvalue)
+        // let handle = {
+        //     let id = self.class_loader.id();
+        //     let class_loader_stores = self.jvm.class_loaders.read();
+        //     let store = &class_loader_stores[id];
+        //     let refs = store.method_refs.read();
+        //
+        //     let method_ref = Ref {
+        //         class: Arc::new(classpath.to_string()),
+        //         name_and_type: Arc::new(NameAndType {
+        //             name: Arc::new(method_name.to_string()),
+        //             descriptor: Arc::new(method_descriptor.to_string()),
+        //         }),
+        //     };
+        //
+        //     refs.get(&method_ref)
+        //         .ok_or(JavaBarrierError::MethodNotFound)?
+        //         .clone()
+        // };
+        //
+        // let operands: Vec<Operand> = args.iter().map(|arg| arg.as_operand()).collect();
+        //
+        // let thread_ptr = self.thread;
+        // let return_value = handle.invoke(&operands, &mut self.frame_store, unsafe { &mut *thread_ptr });
+        //
+        // let jvalue = match &method.descriptor.return_type {
+        //     ReturnType::FieldType(field_type) => Some(match field_type {
+        //         FieldType::Array { .. } => JValue::Reference(unsafe {
+        //             Object::from_raw(return_value.objectref as *mut RawObject<()>)
+        //         }),
+        //         FieldType::Byte => JValue::Byte(unsafe { return_value.data } as Byte),
+        //         FieldType::Char => todo!(),
+        //         FieldType::Double => {
+        //             JValue::Double(f64::from_ne_bytes(unsafe { return_value.data }.to_ne_bytes()))
+        //         }
+        //         FieldType::Float => {
+        //             JValue::Float(f32::from_ne_bytes((unsafe { return_value.data } as u32).to_ne_bytes()))
+        //         }
+        //         FieldType::Int => JValue::Int(unsafe { return_value.data } as i32),
+        //         FieldType::Long => JValue::Long(unsafe { return_value.data } as i64),
+        //         FieldType::Short => JValue::Short(unsafe { return_value.data } as i16),
+        //         FieldType::Boolean => JValue::Int(unsafe { return_value.data } as i32),
+        //         FieldType::Class(_) => JValue::Reference(unsafe {
+        //             Object::from_raw(return_value.objectref as *mut RawObject<()>)
+        //         }),
+        //     }),
+        //     ReturnType::Void => None,
+        // };
+        //
+        // Ok(jvalue)
     }
 
     pub extern "C" fn interpret(
         frame_stack: &mut FrameStack,
         thread: &mut Thread,
     ) -> Operand {
-
         let mut raw_frame = frame_stack.pop();
 
         loop {
@@ -359,20 +365,22 @@ impl ThreadHandle {
                     }),
                 };
 
-                let method_handle = {
-                    let loaders = thread.jvm.class_loaders.read();
-                    let loader_store = &loaders[thread.class_loader.id()];
+                // let method_handle = {
+                //     let loaders = thread.jvm.class_loaders.read();
+                //     let loader_store = &loaders[thread.class_loader.id()];
+                //
+                //     let refs = loader_store.method_refs.read();
+                //
+                //     refs.get(&clinit_ref).unwrap().clone()
+                // };
+                //
+                // unsafe {
+                //     method_handle.invoke(&[], frame_stack, thread);
+                // };
+                //
+                // class.static_init_state.store(2, Ordering::Release);
 
-                    let refs = loader_store.method_refs.read();
-
-                    refs.get(&clinit_ref).unwrap().clone()
-                };
-
-                unsafe {
-                    method_handle.invoke(&[], frame_stack, thread);
-                };
-
-                class.static_init_state.store(2, Ordering::Release);
+                todo!()
             }
             //Another thread is initializing, so wait until that's not the case
             Err(_) => while class.static_init_state.load(Ordering::Acquire) == 1 {},
@@ -387,10 +395,7 @@ impl ThreadHandle {
         let mut frame = raw_frame.as_frame();
 
         //TODO: Super slow to do this at *every* instruction
-        let class = thread
-            .class_loader
-            .get_class(&frame.method_ref.class)
-            .unwrap();
+        let class = frame.class;
         let method = class.get_method(&frame.method_ref.name_and_type).unwrap();
 
         let code = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
@@ -436,27 +441,29 @@ impl ThreadHandle {
                     .as_ref()
                     .unwrap();
 
-                let method_handle = {
-                    let loaders = thread.jvm.class_loaders.read();
-                    let loader_store = &loaders[thread.class_loader.id()];
-                    let refs = loader_store.method_refs.read();
+                // let method_handle = {
+                //     let loaders = thread.jvm.class_loaders.read();
+                //     let loader_store = &loaders[thread.class_loader.id()];
+                //     let refs = loader_store.method_refs.read();
+                //
+                //     refs.get(ref_).expect(&format!("{:?}", ref_)).clone()
+                // };
+                //
+                // let method_descriptor =
+                //     MethodDescriptor::try_from(&**ref_.name_and_type.descriptor).unwrap();
+                //
+                // let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..];
+                //
+                // let result = method_handle.invoke(args, frame_stack, thread);
+                //
+                // *frame.stack_length -= method_descriptor.args.len();
+                //
+                // if method_descriptor.return_type != ReturnType::Void {
+                //     frame.stack[*frame.stack_length] = result;
+                //     *frame.stack_length += 1;
+                // }
 
-                    refs.get(ref_).expect(&format!("{:?}", ref_)).clone()
-                };
-
-                let method_descriptor =
-                    MethodDescriptor::try_from(&**ref_.name_and_type.descriptor).unwrap();
-
-                let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..];
-
-                let result = method_handle.invoke(args, frame_stack, thread);
-
-                *frame.stack_length -= method_descriptor.args.len();
-
-                if method_descriptor.return_type != ReturnType::Void {
-                    frame.stack[*frame.stack_length] = result;
-                    *frame.stack_length += 1;
-                }
+                todo!()
             }
             Bytecode::Invokespecial(constant_index) => {
                 let method_ref = class
@@ -509,15 +516,17 @@ impl ThreadHandle {
                     panic!()
                 }
 
-                let method_handle = {
-                    let loaders = thread.jvm.class_loaders.read();
-                    let loader_store = &loaders[thread.class_loader.id()];
-                    let refs = loader_store.method_refs.read();
+                todo!()
 
-                    refs.get(method_ref).unwrap().clone()
-                };
-
-                method_handle.invoke(args, frame_stack, thread);
+                // let method_handle = {
+                //     let loaders = thread.jvm.class_loaders.read();
+                //     let loader_store = &loaders[thread.class_loader.id()];
+                //     let refs = loader_store.method_refs.read();
+                //
+                //     refs.get(method_ref).unwrap().clone()
+                // };
+                //
+                // method_handle.invoke(args, frame_stack, thread);
             }
             Bytecode::Invokevirtual(constant_index) => {
                 let [objectref] = frame.pop();
@@ -666,26 +675,30 @@ impl ThreadHandle {
             Bytecode::Getfield(constant_index) => {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
 
-                let field_ref = constant.as_ref().unwrap();
+                todo!()
 
-                let classpath = &field_ref.class;
-                let target_class = thread
-                    .jvm
-                    .find_class(classpath, thread.class_loader.clone())
-                    .unwrap();
+                // thread.jvm.environment.get_object_field()
 
-                let (field, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
-
-                if field_class.this_class != class.this_class {
-                    Self::init_static(&field_class, frame_stack, thread);
-                }
-
-                let [ptr] = frame.pop();
-
-                let object = unsafe { Object::from_raw(ptr.objectref as *mut RawObject<()>) };
-
-                let value = unsafe { thread.jvm.heap.get_class_field::<Operand>(&object, field) };
-                frame.push([value]);
+                // let field_ref = constant.as_ref().unwrap();
+                //
+                // let classpath = &field_ref.class;
+                // let target_class = thread
+                //     .jvm
+                //     .find_class(classpath, thread.class_loader.clone())
+                //     .unwrap();
+                //
+                // let (field, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+                //
+                // if field_class.this_class != class.this_class {
+                //     Self::init_static(&field_class, frame_stack, thread);
+                // }
+                //
+                // let [ptr] = frame.pop();
+                //
+                // let object = unsafe { Object::from_raw(ptr.objectref as *mut RawObject<()>) };
+                //
+                // let value = unsafe { thread.jvm.heap.get_class_field::<Operand>(&object, field) };
+                // frame.push([value]);
             }
             Bytecode::Iconst_n_m1(value) => {
                 frame.push([Operand { data: *value as u64 }]);

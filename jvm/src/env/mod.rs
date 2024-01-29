@@ -1,21 +1,24 @@
 use std::sync::Arc;
-use crate::classfile::resolved::Class;
-use crate::JVM;
-use crate::thread::Thread;
+use crate::classfile::resolved::{Class, Ref};
+use crate::execution::MethodHandle;
+use crate::heap::Object;
+use crate::linker::ClassLoader;
+use crate::thread::{Operand, Thread, ThreadHandle};
 
 pub mod wasm;
 pub mod interpreter;
 pub mod aot;
+pub mod native;
 
 pub trait Environment {
 
-    type Compiler;
+    fn link_class(&self, class: Arc<Class>);
 
-    fn compiler(&self) -> &Self::Compiler;
+    fn invoke_handle(&self, thread: &mut Thread, method_handle: &MethodHandle, args: Box<[Operand]>) -> u64;
 
-    fn visit_class(class: Arc<Class>);
+    fn register_method_handle(&self, class_loader: &dyn ClassLoader, method: Arc<Ref>, handle: MethodHandle);
 
-    fn step(thread: &mut Thread);
+    fn get_object_field(&self, object: Object, class: &Class, field: &Ref) -> Operand;
 
 }
 

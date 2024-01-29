@@ -16,8 +16,11 @@ use std::io::{stdout};
 
 use std::sync::Arc;
 use std::time::Instant;
+use wasm_encoder::{CodeSection, CompositeType, ExportKind, ExportSection, FieldType, Function, FunctionSection, HeapType, Instruction, Module, RefType, StorageType, StructType, SubType, TypeSection, ValType};
+use wasmparser::{Validator, WasmFeatures};
 
 use jvm::classfile::resolved::Class;
+use jvm::env::wasm::{create_stub_module, WasmEnvironment};
 
 extern crate jvm;
 
@@ -118,13 +121,22 @@ fn main() {
 
     let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
     let jvm = JVM::new(
-        bootstrapper.clone(),
         Mutex::new(Box::new(stdout())),
+        Box::new(WasmEnvironment::new())
     );
 
-    let _main = jvm.find_class("Main", bootstrapper.clone());
-
-    let mut thread = jvm.create_thread(bootstrapper.clone());
-    let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
+    let main = jvm.find_class("Main", bootstrapper.clone())
         .unwrap();
+
+    // Validator::new_with_features(WasmFeatures {
+    //     gc: true,
+    //     ..Default::default()
+    // }).validate_all(&bytes).unwrap();
+
+    // let mut thread = jvm.create_thread(bootstrapper.clone());
+    // let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
+    //     .unwrap();
+
+    let main_stub = create_stub_module(&main);
+    println!("{}", wasmprinter::print_bytes(main_stub.finish()).unwrap());
 }
