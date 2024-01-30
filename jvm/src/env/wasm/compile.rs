@@ -1,4 +1,3 @@
 pub enum CompileError {
     NoCode,
 }
-

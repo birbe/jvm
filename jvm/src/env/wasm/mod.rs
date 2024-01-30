@@ -1,28 +1,34 @@
-use std::collections::HashMap;
-use std::mem::{MaybeUninit, take};
-use std::sync::Arc;
-use futures_executor::block_on;
-use js_sys::WebAssembly;
-use once_cell::sync::{Lazy, OnceCell};
-use parking_lot::RwLock;
-use wasm_bindgen::describe::REF;
-use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
-use wasm_encoder::{CodeSection, CompositeType, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType, ImportSection, Instruction, MemArg, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
-use wasmparser::WasmFeatures;
-use crate::classfile::resolved::{AccessFlags, Class, ClassId, FieldType, Method, MethodDescriptor, NameAndType, Ref, ReturnType};
+use crate::classfile::resolved::{
+    AccessFlags, Class, ClassId, FieldType, Method, MethodDescriptor, NameAndType, Ref, ReturnType,
+};
 use crate::env::{Compiler, Environment};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::heap::Object;
 use crate::linker::ClassLoader;
 use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
+use futures_executor::block_on;
+use js_sys::WebAssembly;
+use once_cell::sync::{Lazy, OnceCell};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::mem::{take, MaybeUninit};
+use std::sync::Arc;
+use wasm_bindgen::describe::REF;
+use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::JsFuture;
+use wasm_encoder::{
+    CodeSection, CompositeType, EntityType, ExportKind, ExportSection, Function, FunctionSection,
+    HeapType, ImportSection, Instruction, MemArg, MemoryType, Module, RefType, StorageType,
+    StructType, SubType, TableSection, TableType, TypeSection, ValType,
+};
+use wasmparser::WasmFeatures;
 
 pub static mut REFS: MaybeUninit<RefSlots> = MaybeUninit::uninit();
 
+pub mod cfg;
 pub mod compile;
 mod scc;
 pub mod wasm;
-pub mod cfg;
 
 macro_rules! console_log {
     ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
@@ -31,36 +37,36 @@ macro_rules! console_log {
 pub struct RefSlots {
     pub available: Vec<i32>,
     pub len: u32,
-    pub table: WebAssembly::Table
+    pub table: WebAssembly::Table,
 }
 
 type MethodId = u32;
 
 struct ClassReflector {
     pub field_accessors: HashMap<String, u32>,
-    pub trampolines: HashMap<String, u32>
+    pub trampolines: HashMap<String, u32>,
 }
 
 pub struct WasmEnvironment {
     pub class_function_pointers: RwLock<HashMap<ClassId, HashMap<String, u32>>>,
-    pub object_table: WebAssembly::Table
+    pub object_table: WebAssembly::Table,
 }
 
 impl WasmEnvironment {
-
     pub fn new(object_table: WebAssembly::Table) -> Self {
-        unsafe { REFS.write(RefSlots {
-            available: vec![],
-            len: 0,
-            table: object_table.clone(),
-        }); }
+        unsafe {
+            REFS.write(RefSlots {
+                available: vec![],
+                len: 0,
+                table: object_table.clone(),
+            });
+        }
 
         Self {
             class_function_pointers: Default::default(),
             object_table,
         }
     }
-
 }
 
 #[no_mangle]
@@ -103,7 +109,6 @@ pub extern "C" fn interpret(frame_stack: i32, thread: i32) -> i64 {
 }
 
 impl Environment for WasmEnvironment {
-
     fn link_class(&self, class: Arc<Class>) {
         let stub = create_stub_module(&class);
 
@@ -113,20 +118,15 @@ impl Environment for WasmEnvironment {
         let meta_memory = wasm_bindgen::memory();
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
 
-        for cross_import in [
-            "alloc_ref",
-            "dealloc_ref",
-            "malloc",
-            "free",
-            "interpret"
-        ] {
+        for cross_import in ["alloc_ref", "dealloc_ref", "malloc", "free", "interpret"] {
             let key: JsValue = cross_import.into();
 
             js_sys::Reflect::set(
                 &jvm_import_object,
                 &key,
-                &js_sys::Reflect::get(&meta_exports,&key).unwrap()
-            ).unwrap();
+                &js_sys::Reflect::get(&meta_exports, &key).unwrap(),
+            )
+            .unwrap();
         }
 
         js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &self.object_table).unwrap();
@@ -138,7 +138,11 @@ impl Environment for WasmEnvironment {
 
         let wasm_bytes = stub.wasm.finish();
 
-        console_log!("Loading class {}\n{}", class.this_class, wasmprinter::print_bytes(&wasm_bytes).unwrap());
+        console_log!(
+            "Loading class {}\n{}",
+            class.this_class,
+            wasmprinter::print_bytes(&wasm_bytes).unwrap()
+        );
 
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
@@ -147,35 +151,52 @@ impl Environment for WasmEnvironment {
 
         let exports = js_sys::Reflect::get(&instance, &"exports".into()).unwrap();
 
-        let mut funcs_to_link: Vec<String> = class.methods.iter().map(|method| method.get_identifier().to_string()).collect();
+        let mut funcs_to_link: Vec<String> = class
+            .methods
+            .iter()
+            .map(|method| method.get_identifier().to_string())
+            .collect();
 
         funcs_to_link.extend(stub.accessors.clone());
         funcs_to_link.push("new".into());
 
         let old_length = WebAssembly::Table::grow(&func_table, funcs_to_link.len() as u32).unwrap();
 
-        let ptrs: HashMap<String, u32> = funcs_to_link.into_iter().enumerate().map(|(index, func_name)| {
-            let func = js_sys::Function::from(
-                js_sys::Reflect::get(&exports, &func_name.clone().into()).unwrap()
-            );
+        let ptrs: HashMap<String, u32> = funcs_to_link
+            .into_iter()
+            .enumerate()
+            .map(|(index, func_name)| {
+                let func = js_sys::Function::from(
+                    js_sys::Reflect::get(&exports, &func_name.clone().into()).unwrap(),
+                );
 
-            let indirect_index = (index as u32) + old_length;
+                let indirect_index = (index as u32) + old_length;
 
-            WebAssembly::Table::set(&func_table, indirect_index, &func).unwrap();
+                WebAssembly::Table::set(&func_table, indirect_index, &func).unwrap();
 
-            (func_name, indirect_index)
-        }).collect();
+                (func_name, indirect_index)
+            })
+            .collect();
 
         let mut cfp = self.class_function_pointers.write();
         cfp.insert(class.get_id(), ptrs);
     }
 
-    fn invoke_handle(&self, thread: &mut Thread, method_handle: &MethodHandle, args: Box<[Operand]>) -> u64 {
+    fn invoke_handle(
+        &self,
+        thread: &mut Thread,
+        method_handle: &MethodHandle,
+        args: Box<[Operand]>,
+    ) -> u64 {
         todo!()
     }
 
-    fn register_method_handle(&self, class_loader: &dyn ClassLoader, method: Arc<Ref>, handle: MethodHandle) {
-
+    fn register_method_handle(
+        &self,
+        class_loader: &dyn ClassLoader,
+        method: Arc<Ref>,
+        handle: MethodHandle,
+    ) {
     }
 
     fn get_object_field(&self, object: Object, class: &Class, field: &Ref) -> Operand {
@@ -187,36 +208,43 @@ impl Environment for WasmEnvironment {
 
         todo!()
     }
-
 }
 
 struct MethodSignature {
     pub params: Vec<ValType>,
     pub return_type: Option<ValType>,
-    pub thread_local: u32
+    pub thread_local: u32,
 }
 
 impl MethodSignature {
-
     fn field_type_to_val_type(field_type: &FieldType) -> ValType {
         match field_type {
             FieldType::Array { .. } => ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Array,
             }),
-            FieldType::Byte | FieldType::Char | FieldType::Int | FieldType::Short | FieldType::Boolean => ValType::I32,
+            FieldType::Byte
+            | FieldType::Char
+            | FieldType::Int
+            | FieldType::Short
+            | FieldType::Boolean => ValType::I32,
             FieldType::Double => ValType::F64,
             FieldType::Float => ValType::F32,
             FieldType::Long => ValType::I64,
             FieldType::Class(_) => ValType::Ref(RefType {
                 nullable: true,
                 heap_type: HeapType::Any,
-            })
+            }),
         }
     }
 
     pub fn new(method: &Method) -> Self {
-        let mut params: Vec<ValType> = method.descriptor.args.iter().map(Self::field_type_to_val_type).collect();
+        let mut params: Vec<ValType> = method
+            .descriptor
+            .args
+            .iter()
+            .map(Self::field_type_to_val_type)
+            .collect();
 
         //*mut FrameStack
         params.push(ValType::I32);
@@ -224,15 +252,18 @@ impl MethodSignature {
         params.push(ValType::I32);
 
         if !method.access_flags.contains(AccessFlags::STATIC) {
-            params.insert(0, ValType::Ref(RefType {
-                nullable: false,
-                heap_type: HeapType::Any,
-            }));
+            params.insert(
+                0,
+                ValType::Ref(RefType {
+                    nullable: false,
+                    heap_type: HeapType::Any,
+                }),
+            );
         }
 
         let return_type = match &method.descriptor.return_type {
             ReturnType::FieldType(field_type) => Some(Self::field_type_to_val_type(field_type)),
-            ReturnType::Void => None
+            ReturnType::Void => None,
         };
 
         Self {
@@ -241,14 +272,12 @@ impl MethodSignature {
             return_type,
         }
     }
-
 }
 
 pub struct StubModule {
     wasm: Module,
-    accessors: Vec<String>
+    accessors: Vec<String>,
 }
-
 
 pub fn create_stub_module(class: &Class) -> StubModule {
     let mut module = Module::new();
@@ -257,67 +286,86 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     let mut exports = ExportSection::new();
 
     types.rec(
-        class.parents().iter().map(|class_arc| &**class_arc).rev().chain([class]).enumerate().map(|(index, class)| {
-            let parents = class.parents();
-            let fields = parents.iter().rev().map(|class| class.fields.iter()).flatten().chain(class.fields.iter());
+        class
+            .parents()
+            .iter()
+            .map(|class_arc| &**class_arc)
+            .rev()
+            .chain([class])
+            .enumerate()
+            .map(|(index, class)| {
+                let parents = class.parents();
+                let fields = parents
+                    .iter()
+                    .rev()
+                    .map(|class| class.fields.iter())
+                    .flatten()
+                    .chain(class.fields.iter());
 
-            console_log!("{:?}", fields.clone().collect::<Vec<_>>());
+                console_log!("{:?}", fields.clone().collect::<Vec<_>>());
 
-            SubType {
-                is_final: false,
-                supertype_idx: if index > 0 {
-                    Some((index - 1) as u32)
-                } else {
-                    None
-                },
-                composite_type: CompositeType::Struct(StructType {
-                    fields: fields.filter(|field| !field.access_flags.contains(AccessFlags::STATIC)).map(|field| {
-                        match field.descriptor {
-                            FieldType::Array { .. } => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::Ref(RefType {
-                                    nullable: true,
-                                    heap_type: HeapType::Array,
-                                })),
-                                mutable: true,
-                            },
-                            FieldType::Boolean | FieldType::Byte => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::I32),
-                                // element_type: StorageType::I8,
-                                mutable: true,
-                            },
-                            FieldType::Char | FieldType::Short => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::I32),
-                                // element_type: StorageType::I16,
-                                mutable: true,
-                            },
-                            FieldType::Double => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::F64),
-                                mutable: true,
-                            },
-                            FieldType::Float => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::F32),
-                                mutable: true,
-                            },
-                            FieldType::Int => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::I32),
-                                mutable: true,
-                            },
-                            FieldType::Long => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::I64),
-                                mutable: true,
-                            },
-                            FieldType::Class(_) => wasm_encoder::FieldType {
-                                element_type: StorageType::Val(ValType::Ref(RefType {
-                                    nullable: true,
-                                    heap_type: HeapType::Any,
-                                })),
-                                mutable: true,
-                            }
-                        }
-                    }).collect::<Vec<_>>().into_boxed_slice(),
-                }),
-            }
-        }).collect::<Vec<_>>()
+                SubType {
+                    is_final: false,
+                    supertype_idx: if index > 0 {
+                        Some((index - 1) as u32)
+                    } else {
+                        None
+                    },
+                    composite_type: CompositeType::Struct(StructType {
+                        fields: fields
+                            .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
+                            .map(|field| {
+                                match field.descriptor {
+                                    FieldType::Array { .. } => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::Ref(RefType {
+                                            nullable: true,
+                                            heap_type: HeapType::Array,
+                                        })),
+                                        mutable: true,
+                                    },
+                                    FieldType::Boolean | FieldType::Byte => {
+                                        wasm_encoder::FieldType {
+                                            element_type: StorageType::Val(ValType::I32),
+                                            // element_type: StorageType::I8,
+                                            mutable: true,
+                                        }
+                                    }
+                                    FieldType::Char | FieldType::Short => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::I32),
+                                        // element_type: StorageType::I16,
+                                        mutable: true,
+                                    },
+                                    FieldType::Double => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::F64),
+                                        mutable: true,
+                                    },
+                                    FieldType::Float => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::F32),
+                                        mutable: true,
+                                    },
+                                    FieldType::Int => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::I32),
+                                        mutable: true,
+                                    },
+                                    FieldType::Long => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::I64),
+                                        mutable: true,
+                                    },
+                                    FieldType::Class(_) => wasm_encoder::FieldType {
+                                        element_type: StorageType::Val(ValType::Ref(RefType {
+                                            nullable: true,
+                                            heap_type: HeapType::Any,
+                                        })),
+                                        mutable: true,
+                                    },
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    }),
+                }
+            })
+            .collect::<Vec<_>>(),
     );
 
     let struct_type_index = class.parents().len() as u32;
@@ -326,18 +374,29 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     let mut imports = ImportSection::new();
 
-    imports.import("jvm", "objects", EntityType::Table(TableType {
-        element_type: RefType { nullable: true, heap_type: HeapType::Any },
-        minimum: 0,
-        maximum: None,
-    }));
+    imports.import(
+        "jvm",
+        "objects",
+        EntityType::Table(TableType {
+            element_type: RefType {
+                nullable: true,
+                heap_type: HeapType::Any,
+            },
+            minimum: 0,
+            maximum: None,
+        }),
+    );
 
-    imports.import("jvm", "memory", EntityType::Memory(MemoryType {
-        minimum: 0,
-        maximum: None,
-        memory64: false,
-        shared: false,
-    }));
+    imports.import(
+        "jvm",
+        "memory",
+        EntityType::Memory(MemoryType {
+            minimum: 0,
+            maximum: None,
+            memory64: false,
+            shared: false,
+        }),
+    );
 
     let i32_out = types.len() + desync;
     types.function([], [ValType::I32]);
@@ -360,7 +419,11 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     let free = 3;
     imports.import("jvm", "free", EntityType::Function(free_type));
     let interpret = 4;
-    imports.import("jvm", "interpret", EntityType::Function(interpret_func_type));
+    imports.import(
+        "jvm",
+        "interpret",
+        EntityType::Function(interpret_func_type),
+    );
 
     let func_imports_len = 5;
 
@@ -369,20 +432,31 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     let mut accessors = vec![];
 
-    for (index, field) in class.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC)).enumerate() {
+    for (index, field) in class
+        .fields
+        .iter()
+        .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
+        .enumerate()
+    {
         for is_setter in [true, false] {
-
             let func_type_index = types.len() + desync;
 
             let field_type = match field.descriptor {
                 FieldType::Double => ValType::F64,
                 FieldType::Float => ValType::F32,
-                FieldType::Char | FieldType::Boolean | FieldType::Short | FieldType::Int | FieldType::Byte => ValType::I32,
+                FieldType::Char
+                | FieldType::Boolean
+                | FieldType::Short
+                | FieldType::Int
+                | FieldType::Byte => ValType::I32,
                 FieldType::Long => ValType::I64,
-                FieldType::Class(_) | FieldType::Array { .. } => ValType::I32
+                FieldType::Class(_) | FieldType::Array { .. } => ValType::I32,
             };
 
-            let is_object = matches!(field.descriptor, FieldType::Class(_) | FieldType::Array { .. });
+            let is_object = matches!(
+                field.descriptor,
+                FieldType::Class(_) | FieldType::Array { .. }
+            );
 
             let mut function = Function::new(if is_object {
                 vec![(1u32, ValType::I32)]
@@ -391,25 +465,15 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             });
 
             if is_setter {
-                types.function(
-                    [
-                        ValType::I32,
-                        field_type
-                    ],
-                    []
-                );
+                types.function([ValType::I32, field_type], []);
 
                 //Push the reference index onto the stack
-                function.instruction(
-                    &Instruction::LocalGet(0)
-                );
+                function.instruction(&Instruction::LocalGet(0));
                 //Push the actual reference onto the stack
-                function.instruction(
-                    &Instruction::TableGet(0)
-                );
-                function.instruction(
-                    &Instruction::RefCastNullable(HeapType::Concrete(struct_type_index))
-                );
+                function.instruction(&Instruction::TableGet(0));
+                function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
+                    struct_type_index,
+                )));
 
                 //Push the value onto the stack
                 function.instruction(&Instruction::LocalGet(1));
@@ -423,38 +487,27 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 }
 
                 //Set the field
-                function.instruction(
-                    &Instruction::StructSet {
-                        struct_type_index,
-                        field_index: index as u32,
-                    }
-                );
+                function.instruction(&Instruction::StructSet {
+                    struct_type_index,
+                    field_index: index as u32,
+                });
             } else {
-                types.function(
-                    [
-                        ValType::I32
-                    ],
-                    [
-                        field_type
-                    ]
-                );
+                types.function([ValType::I32], [field_type]);
 
                 if is_object {
                     function.instruction(&Instruction::Call(alloc_ref));
                     function.instruction(&Instruction::LocalTee(1));
                 }
 
-                function.instruction(
-                    &Instruction::LocalGet(0)
-                );
+                function.instruction(&Instruction::LocalGet(0));
                 function.instruction(&Instruction::TableGet(0));
-                function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(struct_type_index)));
-                function.instruction(
-                    &Instruction::StructGet {
-                        struct_type_index,
-                        field_index: index as u32,
-                    }
-                );
+                function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
+                    struct_type_index,
+                )));
+                function.instruction(&Instruction::StructGet {
+                    struct_type_index,
+                    field_index: index as u32,
+                });
 
                 if is_object {
                     function.instruction(&Instruction::RefCastNullable(HeapType::Any));
@@ -463,17 +516,16 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 }
             }
 
-            function.instruction(
-                &Instruction::End
+            function.instruction(&Instruction::End);
+
+            let accessor_name =
+                format!("{}_{}", if is_setter { "set" } else { "get" }, &field.name);
+
+            exports.export(
+                &accessor_name,
+                ExportKind::Func,
+                funcs.len() + func_imports_len,
             );
-
-            let accessor_name = format!("{}_{}", if is_setter {
-                "set"
-            } else {
-                "get"
-            }, &field.name);
-
-            exports.export(&accessor_name, ExportKind::Func, funcs.len() + func_imports_len);
 
             accessors.push(accessor_name);
 
@@ -496,20 +548,24 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         let box_size = (method.descriptor.args.len() * 8) as i32;
 
         func.instruction(&Instruction::LocalGet(frame_stack_local));
-        func.instruction(&Instruction::I32Load(MemArg { //(*frame_stack).frames
+        func.instruction(&Instruction::I32Load(MemArg {
+            //(*frame_stack).frames
             offset: 0,
             align: 2,
             memory_index: 0,
         }));
         func.instruction(&Instruction::LocalGet(frame_stack_local));
-        func.instruction(&Instruction::I32Load(MemArg { //(*frame_stack).index
+        func.instruction(&Instruction::I32Load(MemArg {
+            //(*frame_stack).index
             offset: 4,
             align: 2,
             memory_index: 0,
         }));
         func.instruction(&Instruction::I32Const(1));
         func.instruction(&Instruction::I32Add); //Increment the isize, this is the index for the RawFrame
-        func.instruction(&Instruction::I32Const(std::mem::size_of::<RawFrame>() as i32));
+        func.instruction(&Instruction::I32Const(
+            std::mem::size_of::<RawFrame>() as i32
+        ));
         func.instruction(&Instruction::I32Mul); //Calculate the offset in bytes from the *mut [RawFrame]
         func.instruction(&Instruction::I32Add); //Add the offset to the *mut RawFrame
         func.instruction(&Instruction::LocalTee(frame_address_local)); //This is the address for the RawFrame
@@ -517,14 +573,18 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         func.instruction(&Instruction::LocalGet(frame_address_local));
         func.instruction(&Instruction::LocalGet(frame_address_local));
 
-        func.instruction(&Instruction::I32Const((&**method as *const Method as usize) as i32));
+        func.instruction(&Instruction::I32Const(
+            (&**method as *const Method as usize) as i32,
+        ));
         func.instruction(&Instruction::I32Store(MemArg {
             offset: 8,
             align: 2,
             memory_index: 0,
         }));
 
-        func.instruction(&Instruction::I32Const((class as *const Class as usize) as i32));
+        func.instruction(&Instruction::I32Const(
+            (class as *const Class as usize) as i32,
+        ));
         func.instruction(&Instruction::I32Store(MemArg {
             offset: 12,
             align: 2,
@@ -544,7 +604,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
         func.instruction(&Instruction::LocalGet(frame_address_local));
         func.instruction(&Instruction::LocalTee(box_address_local)); //Tee the address of the Box<[i64]>
-        func.instruction(&Instruction::I32Store(MemArg { //(*raw_frame_addr).locals = box.ptr;
+        func.instruction(&Instruction::I32Store(MemArg {
+            //(*raw_frame_addr).locals = box.ptr;
             offset: std::mem::size_of::<usize>() as u64,
             align: 2,
             memory_index: 0,
@@ -558,7 +619,6 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         }
 
         for (index, arg) in params.iter().enumerate() {
-
             match arg {
                 //Heap type
                 FieldType::Array { .. } | FieldType::Class(_) => {
@@ -582,9 +642,13 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         align: 2,
                         memory_index: 0,
                     }));
-                },
+                }
                 //Scalar type
-                FieldType::Int | FieldType::Byte | FieldType::Short | FieldType::Char | FieldType::Boolean => {
+                FieldType::Int
+                | FieldType::Byte
+                | FieldType::Short
+                | FieldType::Char
+                | FieldType::Boolean => {
                     func.instruction(&Instruction::LocalGet(box_address_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
                     func.instruction(&Instruction::I32Store(MemArg {
@@ -592,7 +656,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         align: 2,
                         memory_index: 0,
                     }));
-                },
+                }
                 FieldType::Long => {
                     func.instruction(&Instruction::LocalGet(box_address_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
@@ -601,7 +665,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         align: 3,
                         memory_index: 0,
                     }));
-                },
+                }
                 FieldType::Double => {
                     func.instruction(&Instruction::LocalGet(box_address_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
@@ -622,7 +686,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         memory_index: 0,
                     }));
                 }
-                _ => unimplemented!("{:?}", arg)
+                _ => unimplemented!("{:?}", arg),
             }
         }
 
@@ -653,7 +717,9 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
         match &method.descriptor.return_type {
             ReturnType::FieldType(field_type) => match field_type {
-                FieldType::Double => { func.instruction(&Instruction::F64ReinterpretI64); },
+                FieldType::Double => {
+                    func.instruction(&Instruction::F64ReinterpretI64);
+                }
                 FieldType::Float => {
                     func.instruction(&Instruction::I32WrapI64);
                     func.instruction(&Instruction::F32ReinterpretI32);
@@ -673,21 +739,28 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                     if matches!(field_type, FieldType::Array { .. }) {
                         func.instruction(&Instruction::RefCastNullable(HeapType::Array));
                     }
-                },
+                }
                 //Int
-                _ => { func.instruction(&Instruction::I32WrapI64); }
-            }
+                _ => {
+                    func.instruction(&Instruction::I32WrapI64);
+                }
+            },
             //Drop the returned i64 from calling the interpreter
-            ReturnType::Void => { func.instruction(&Instruction::Drop); }
+            ReturnType::Void => {
+                func.instruction(&Instruction::Drop);
+            }
         }
 
         func.instruction(&Instruction::End);
 
-        exports.export(method.get_identifier(), ExportKind::Func, funcs.len() + func_imports_len);
+        exports.export(
+            method.get_identifier(),
+            ExportKind::Func,
+            funcs.len() + func_imports_len,
+        );
         funcs.function(types.len() + desync);
         types.function(sig.params, sig.return_type);
         code.function(&func);
-
     }
 
     {
@@ -719,7 +792,9 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     match wasmparser::Validator::new_with_features(WasmFeatures {
         gc: true,
         ..Default::default()
-    }).validate_all(&bytes) {
+    })
+    .validate_all(&bytes)
+    {
         Ok(_) => {}
         Err(error) => {
             let wat = wasmprinter::print_bytes(&bytes).unwrap();
@@ -730,6 +805,6 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     StubModule {
         wasm: module,
-        accessors
+        accessors,
     }
 }

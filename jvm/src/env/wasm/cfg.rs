@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::ops::Range;
-use std::mem;
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Instruction;
 use crate::env::wasm::scc::{enumerate_graph, StronglyConnectedComponents};
+use std::collections::HashMap;
+use std::mem;
+use std::ops::Range;
 
 pub type Index = usize;
 

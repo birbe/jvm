@@ -1,17 +1,21 @@
 use crate::bytecode::Bytecode;
 use crate::classfile::resolved::attribute::Code;
-use crate::classfile::resolved::{AccessFlags, attribute, Attribute, Class, Constant, Method, Ref, ReturnType};
+use crate::classfile::resolved::{
+    attribute, AccessFlags, Attribute, Class, Constant, Method, Ref, ReturnType,
+};
+use crate::env::aot::analyze_class;
+use crate::env::wasm::cfg::{
+    create_scopes, find_loops, identify_scopes, label_nodes, Block, LabeledNode, ScopeMetrics,
+};
+use crate::linker::ClassLoader;
 use crate::JVM;
 use bitflags::Flags;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use wasm_encoder::{
-    BlockType, CodeSection, Function, FunctionSection, Instruction,
-    Module, TableSection, TypeSection, ValType,
+    BlockType, CodeSection, Function, FunctionSection, Instruction, Module, TableSection,
+    TypeSection, ValType,
 };
-use crate::env::aot::analyze_class;
-use crate::env::wasm::cfg::{Block, create_scopes, find_loops, identify_scopes, label_nodes, LabeledNode, ScopeMetrics};
-use crate::linker::ClassLoader;
 
 pub const POINTER_SIZE: i32 = 4;
 pub const POINTER_TYPE: ValType = ValType::I32;
@@ -21,7 +25,11 @@ pub struct CompiledClass {
     pub link: HashMap<Arc<Ref>, u32>,
 }
 
-pub fn create_module(entry_class: Arc<Class>, class_loader: Arc<dyn ClassLoader>, jvm: &JVM) -> CompiledClass {
+pub fn create_module(
+    entry_class: Arc<Class>,
+    class_loader: Arc<dyn ClassLoader>,
+    jvm: &JVM,
+) -> CompiledClass {
     let mut module = Module::new();
 
     let mut function_section = FunctionSection::new();
@@ -30,8 +38,6 @@ pub fn create_module(entry_class: Arc<Class>, class_loader: Arc<dyn ClassLoader>
     let mut table = TableSection::new();
 
     let mut classes = HashSet::new();
-
-
 
     analyze_class(entry_class.clone(), &class_loader, jvm, &mut classes);
 
@@ -201,11 +207,11 @@ fn get_jump_offset(
 }
 
 struct BuiltinRoutines {
-    invoke_special_routine: u32
+    invoke_special_routine: u32,
 }
 
 struct PrimitiveTypes {
-    object_array: u32
+    object_array: u32,
 }
 
 struct Globals {
@@ -219,12 +225,12 @@ struct CompilerState {
 
     descriptor_to_wasm_type_id: HashMap<String, u32>,
 
-    hot_function_table: u32
+    hot_function_table: u32,
 }
 
 struct ContextState {
     temp_local1: u32,
-    temp_local2: u32
+    temp_local2: u32,
 }
 
 fn translate_bytecode(
@@ -243,7 +249,7 @@ fn translate_bytecode(
     jvm: &JVM,
     external_references: &HashMap<Arc<Ref>, u32>,
     scope_offset: u32,
-    block_idx: u32
+    block_idx: u32,
 ) {
     match bytecode {
         Bytecode::Invokespecial(index) => {

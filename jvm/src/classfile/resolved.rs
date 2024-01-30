@@ -11,6 +11,7 @@ use bitflags::{bitflags, Flags};
 use std::alloc::{alloc, Layout};
 
 use crate::linker::ClassLoader;
+use crate::thread::Operand;
 use crate::JVM;
 use discrim::FromDiscriminant;
 use jvm_types::JParse;
@@ -20,7 +21,6 @@ use std::io::Cursor;
 use std::mem::size_of;
 use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
-use crate::thread::Operand;
 
 bitflags! {
 
@@ -65,7 +65,7 @@ pub struct Class {
     pub attributes: Vec<Attribute>,
 
     pub heap_size: usize,
-    internal_id: ClassId
+    internal_id: ClassId,
 }
 
 impl Class {
@@ -73,9 +73,8 @@ impl Class {
         classfile: &ClassFile,
         jvm: &JVM,
         class_loader: Arc<dyn ClassLoader>,
-        internal_id: ClassId
+        internal_id: ClassId,
     ) -> Option<Self> {
-
         let constant_pool =
             ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
 
@@ -87,16 +86,22 @@ impl Class {
                     &resolve_string(&classfile.constant_pool, classfile.super_class).unwrap(),
                     class_loader.clone(),
                 )
-                    .unwrap(),
+                .unwrap(),
             )
         } else {
             None
         };
 
-        let interfaces = classfile.interfaces.iter().map(|classinfo| {
-            let interface_classpath = resolve_string(&classfile.constant_pool, classinfo.name_index).unwrap();
-            jvm.find_class(&interface_classpath, class_loader.clone()).unwrap()
-        }).collect();
+        let interfaces = classfile
+            .interfaces
+            .iter()
+            .map(|classinfo| {
+                let interface_classpath =
+                    resolve_string(&classfile.constant_pool, classinfo.name_index).unwrap();
+                jvm.find_class(&interface_classpath, class_loader.clone())
+                    .unwrap()
+            })
+            .collect();
 
         let super_heap_size = match &super_class {
             None => 0,
@@ -109,9 +114,16 @@ impl Class {
             .fields
             .iter()
             .map(|field_info| {
-                let field = Field::new(field_info, &constant_pool, super_heap_size + index * size_of::<Operand>());
+                let field = Field::new(
+                    field_info,
+                    &constant_pool,
+                    super_heap_size + index * size_of::<Operand>(),
+                );
 
-                if !AccessFlags::from_bits(field_info.access_flags).unwrap().contains(AccessFlags::STATIC) {
+                if !AccessFlags::from_bits(field_info.access_flags)
+                    .unwrap()
+                    .contains(AccessFlags::STATIC)
+                {
                     index += 1;
                 }
 
@@ -124,13 +136,16 @@ impl Class {
             .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
             .collect();
 
-        let heap_size = super_heap_size + (fields.len() - static_fields.len()) * size_of::<Operand>();
+        let heap_size =
+            super_heap_size + (fields.len() - static_fields.len()) * size_of::<Operand>();
 
         let static_alloc = unsafe {
             if static_fields.len() > 0 {
-                let layout =
-                    Layout::from_size_align(static_fields.len() * size_of::<Operand>(), size_of::<Operand>())
-                        .unwrap();
+                let layout = Layout::from_size_align(
+                    static_fields.len() * size_of::<Operand>(),
+                    size_of::<Operand>(),
+                )
+                .unwrap();
                 alloc(layout) as usize
             } else {
                 0
@@ -146,7 +161,9 @@ impl Class {
             methods: classfile
                 .methods
                 .iter()
-                .map(|method_info| Method::new(method_info, &constant_pool, classfile).map(Arc::new))
+                .map(|method_info| {
+                    Method::new(method_info, &constant_pool, classfile).map(Arc::new)
+                })
                 .collect::<Option<Vec<Arc<Method>>>>()?,
             class_loader,
             statics: static_alloc,
@@ -178,19 +195,18 @@ impl Class {
 
     pub fn get_field(&self, name_and_type: &NameAndType) -> Option<&Field> {
         self.fields.iter().find(|field| {
-            field.name == name_and_type.name
-                && field.descriptor_string == *name_and_type.descriptor
+            field.name == name_and_type.name && field.descriptor_string == *name_and_type.descriptor
         })
     }
 
     pub fn find_overriding_method(&self, lower_method: &Method) -> Option<&Arc<Method>> {
         self.methods.iter().find(|higher_method| {
             !higher_method.access_flags.contains(AccessFlags::STATIC)
-            && higher_method.name == lower_method.name
-            && higher_method.descriptor == lower_method.descriptor
-            && (lower_method.access_flags.contains(AccessFlags::PUBLIC)
-                || lower_method.access_flags.contains(AccessFlags::PROTECTED)
-                || todo!())
+                && higher_method.name == lower_method.name
+                && higher_method.descriptor == lower_method.descriptor
+                && (lower_method.access_flags.contains(AccessFlags::PUBLIC)
+                    || lower_method.access_flags.contains(AccessFlags::PROTECTED)
+                    || todo!())
         })
     }
 
@@ -213,7 +229,6 @@ impl Class {
     pub(crate) fn get_id(&self) -> ClassId {
         self.internal_id
     }
-
 }
 
 impl Hash for Class {
@@ -229,7 +244,6 @@ impl PartialEq<Self> for Class {
 }
 
 impl Eq for Class {}
-
 
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub enum FieldType {
@@ -343,7 +357,7 @@ pub struct Method {
     pub name: Arc<String>,
     pub descriptor: MethodDescriptor,
     pub attributes: HashMap<String, Attribute>,
-    identifier: String
+    identifier: String,
 }
 
 impl Method {
@@ -364,11 +378,8 @@ impl Method {
 
         Some(Self {
             access_flags: AccessFlags::from_bits(method_info.access_flags)?,
-            name: method_name
-                .clone(),
-            descriptor: descriptor_string[..]
-                .try_into()
-                .ok()?,
+            name: method_name.clone(),
+            descriptor: descriptor_string[..].try_into().ok()?,
             attributes: method_info
                 .attributes
                 .iter()
@@ -395,15 +406,17 @@ impl Method {
     }
 
     pub fn is_signature_polymorphic(&self, classpath: &str) -> bool {
-        classpath == "java/lang/invoke/MethodHandle" || classpath == "java/lang/invoke/VarHandle"
-        && matches!(self.descriptor.args.first(), Some(FieldType::Class(classpath)) if classpath == "java/lang/Object")
-        && self.access_flags.contains(AccessFlags::VARARGS | AccessFlags::NATIVE)
+        classpath == "java/lang/invoke/MethodHandle"
+            || classpath == "java/lang/invoke/VarHandle"
+                && matches!(self.descriptor.args.first(), Some(FieldType::Class(classpath)) if classpath == "java/lang/Object")
+                && self
+                    .access_flags
+                    .contains(AccessFlags::VARARGS | AccessFlags::NATIVE)
     }
 
     pub fn get_identifier(&self) -> &str {
         &self.identifier
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -654,10 +667,7 @@ fn resolve_constant(
                 path = String::from(path.trim_start_matches("L"));
             }
 
-            Constant::Class {
-                path,
-                depth,
-            }
+            Constant::Class { path, depth }
         }
         ConstantInfo::FieldRef(_) => Constant::FieldRef(Ref::resolve(cip, new_constants, slot)?),
         ConstantInfo::MethodRef(_) => Constant::MethodRef(Ref::resolve(cip, new_constants, slot)?),
@@ -724,10 +734,7 @@ impl ConstantPool {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
-    Class {
-        path: String,
-        depth: u8
-    },
+    Class { path: String, depth: u8 },
     FieldRef(Arc<Ref>),
     MethodRef(Arc<Ref>),
     InterfaceMethodRef(Arc<Ref>),
@@ -749,9 +756,9 @@ pub enum Constant {
 impl Constant {
     pub fn as_string(&self) -> Option<&Arc<String>> {
         match self {
-            Constant::String(string)
-            | Constant::Utf8(string)
-            | Constant::MethodType(string) => Some(string),
+            Constant::String(string) | Constant::Utf8(string) | Constant::MethodType(string) => {
+                Some(string)
+            }
             _ => None,
         }
     }
@@ -886,11 +893,15 @@ pub struct Field {
     pub descriptor: FieldType,
     pub descriptor_string: String,
     pub attributes: HashMap<String, Attribute>,
-    pub heap_offset: usize
+    pub heap_offset: usize,
 }
 
 impl Field {
-    fn new(field_info: &FieldInfo, constant_pool: &ConstantPool, heap_offset: usize) -> Option<Self> {
+    fn new(
+        field_info: &FieldInfo,
+        constant_pool: &ConstantPool,
+        heap_offset: usize,
+    ) -> Option<Self> {
         Some(Self {
             access_flags: AccessFlags::from_bits(field_info.access_flags)?,
             name: constant_pool
@@ -908,7 +919,8 @@ impl Field {
             descriptor_string: (**constant_pool
                 .constants
                 .get(&field_info.descriptor_index)?
-                .as_string()?).clone(),
+                .as_string()?)
+            .clone(),
             attributes: field_info
                 .attributes
                 .iter()

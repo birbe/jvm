@@ -1,22 +1,24 @@
 use jvm::bytecode::JValue;
 
-use jvm::heap::{Object};
+use jvm::heap::Object;
 
 use jvm::linker::ClassLoader;
 
-use jvm::{JVM, wasm_test};
+use jvm::{wasm_test, JVM};
 
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::fs;
 
-use std::io::{stdout};
-
+use std::io::stdout;
 
 use std::sync::Arc;
 use std::time::Instant;
-use wasm_encoder::{CodeSection, CompositeType, ExportKind, ExportSection, FieldType, Function, FunctionSection, HeapType, Instruction, Module, RefType, StorageType, StructType, SubType, TypeSection, ValType};
+use wasm_encoder::{
+    CodeSection, CompositeType, ExportKind, ExportSection, FieldType, Function, FunctionSection,
+    HeapType, Instruction, Module, RefType, StorageType, StructType, SubType, TypeSection, ValType,
+};
 use wasmparser::{Validator, WasmFeatures};
 
 use jvm::classfile::resolved::Class;
@@ -36,12 +38,16 @@ impl Debug for NativeClassLoader {
 impl ClassLoader for NativeClassLoader {
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
         // if cfg!(miri) {
-            match classpath {
-                "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
-                "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
-                "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
-                _ => panic!("{classpath} not found")
+        match classpath {
+            "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
+            "java/lang/Object" => {
+                Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into())
             }
+            "java/lang/String" => {
+                Some(include_bytes!("../test_classes/java/lang/String.class")[..].into())
+            }
+            _ => panic!("{classpath} not found"),
+        }
         // } else {
         //     fs::read(format!("./jvm/test_classes/{}.class", classpath)).ok()
         // }

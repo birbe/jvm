@@ -9,41 +9,39 @@
 extern crate core;
 
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, Method, NameAndType, Ref};
-use crate::classfile::{ClassFile};
+use crate::classfile::ClassFile;
 use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use bitflags::Flags;
 
-use heap::{Heap};
+use heap::Heap;
 use jvm_types::JParse;
 use linker::ClassLoader;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 
-use std::io::{Cursor, stdout, Write};
-
-
+use std::io::{stdout, Cursor, Write};
 
 use std::pin::Pin;
 
-use std::sync::Arc;
+use crate::env::wasm::{RefSlots, WasmEnvironment, REFS};
+use crate::env::{Compiler, Environment};
+use crate::execution::{ExecutionContext, InterpreterContext, MethodHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::spawn_local;
-use crate::env::{Compiler, Environment};
-use crate::env::wasm::{REFS, RefSlots, WasmEnvironment};
-use crate::execution::{ExecutionContext, InterpreterContext, MethodHandle};
 
 pub mod classfile;
 mod tests;
 
 pub mod bytecode;
+pub mod env;
+pub mod execution;
 pub mod heap;
 pub mod linker;
-pub mod execution;
 pub mod native;
 pub mod thread;
-pub mod env;
 
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {
@@ -66,7 +64,7 @@ pub struct JVM {
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
     pub heap: Heap,
     pub environment: Box<dyn Environment>,
-    class_ids: AtomicU32
+    class_ids: AtomicU32,
 }
 
 impl JVM {
@@ -115,8 +113,13 @@ impl JVM {
             ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
 
         let class = Arc::new(
-            Class::init(&classfile, &self, class_loader.clone(), self.class_ids.fetch_add(1, Ordering::Relaxed))
-                .ok_or(ClassLoadError::MalformedClassDef)?,
+            Class::init(
+                &classfile,
+                &self,
+                class_loader.clone(),
+                self.class_ids.fetch_add(1, Ordering::Relaxed),
+            )
+            .ok_or(ClassLoadError::MalformedClassDef)?,
         );
 
         class_loader.register_class(classpath, class.clone());
@@ -167,26 +170,30 @@ impl JVM {
             });
 
             let method_handle = if !method.access_flags.contains(AccessFlags::NATIVE) {
-                unsafe { MethodHandle::new(ThreadHandle::interpret, ExecutionContext::Interpret(InterpreterContext::new(
-                    ref_.clone(),
-                    class.clone(),
-                )), method.clone()) }
+                unsafe {
+                    MethodHandle::new(
+                        ThreadHandle::interpret,
+                        ExecutionContext::Interpret(InterpreterContext::new(
+                            ref_.clone(),
+                            class.clone(),
+                        )),
+                        method.clone(),
+                    )
+                }
             } else {
                 match native::link(&ref_) {
                     None => return,
-                    Some(ptr) => {
-                        unsafe {
-                            MethodHandle::new(ptr, ExecutionContext::Native, method.clone())
-                        }
-                    }
+                    Some(ptr) => unsafe {
+                        MethodHandle::new(ptr, ExecutionContext::Native, method.clone())
+                    },
                 }
             };
 
-            self.environment.register_method_handle(loader, ref_, method_handle);
+            self.environment
+                .register_method_handle(loader, ref_, method_handle);
         }
     }
 }
-
 
 pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Ref) {
     match class.get_method(&method_ref.name_and_type) {
@@ -195,7 +202,10 @@ pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Ref) {
     }
 }
 
-pub fn routine_resolve_field<'a>(name_and_type: &'a NameAndType, class: &'a Class) -> Option<(&'a Field, &'a Class)> {
+pub fn routine_resolve_field<'a>(
+    name_and_type: &'a NameAndType,
+    class: &'a Class,
+) -> Option<(&'a Field, &'a Class)> {
     match class.get_field(name_and_type) {
         None => {
             //TODO: superinterfaces?
@@ -215,16 +225,24 @@ pub fn routine_resolve_field<'a>(name_and_type: &'a NameAndType, class: &'a Clas
 }
 
 pub enum ResolveMethodError {
-    IncompatibleClassChangeError
+    IncompatibleClassChangeError,
 }
 
-pub fn routine_resolve_method<'class>(jvm: &JVM, ref_: &Ref, class: &'class Class) -> Result<&'class Method, ResolveMethodError> {
+pub fn routine_resolve_method<'class>(
+    jvm: &JVM,
+    ref_: &Ref,
+    class: &'class Class,
+) -> Result<&'class Method, ResolveMethodError> {
     if class.access_flags.contains(AccessFlags::INTERFACE) {
         return Err(ResolveMethodError::IncompatibleClassChangeError);
     }
 
     fn step2<'class>(ref_: &Ref, class: &'class Class) -> Option<&'class Method> {
-        let methods: Vec<&Arc<Method>> = class.methods.iter().filter(|m| m.name == ref_.name_and_type.name).collect();
+        let methods: Vec<&Arc<Method>> = class
+            .methods
+            .iter()
+            .filter(|m| m.name == ref_.name_and_type.name)
+            .collect();
 
         if methods.len() == 1 && methods[0].is_signature_polymorphic(&class.this_class) {
             //TODO resolve references
@@ -235,9 +253,10 @@ pub fn routine_resolve_method<'class>(jvm: &JVM, ref_: &Ref, class: &'class Clas
             return Some(method);
         }
 
-        class.super_class.as_ref().and_then(|super_class| {
-            step2(ref_, super_class)
-        })
+        class
+            .super_class
+            .as_ref()
+            .and_then(|super_class| step2(ref_, super_class))
     }
 
     if let Some(method) = step2(ref_, class) {
@@ -267,18 +286,38 @@ impl ClassLoader for NativeClassLoader {
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
         match classpath {
             "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
-            "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
-            "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
-            "javax/swing/BorderFactory" => Some(include_bytes!("../test_classes/javax/swing/BorderFactory.class")[..].into()),
-            "javax/swing/JColorChooser" => Some(include_bytes!("../test_classes/javax/swing/JColorChooser.class")[..].into()),
-            "javax/swing/JComponent" => Some(include_bytes!("../test_classes/javax/swing/JComponent.class")[..].into()),
-            "java/awt/Container" => Some(include_bytes!("../test_classes/java/awt/Container.class")[..].into()),
-            "java/awt/Component" => Some(include_bytes!("../test_classes/java/awt/Component.class")[..].into()),
-            "java/awt/image/ImageObserver" => Some(include_bytes!("../test_classes/java/awt/image/ImageObserver.class")[..].into()),
-            "java/awt/MenuContainer" => Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into()),
-            "java/io/Serializable" => Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into()),
+            "java/lang/Object" => {
+                Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into())
+            }
+            "java/lang/String" => {
+                Some(include_bytes!("../test_classes/java/lang/String.class")[..].into())
+            }
+            "javax/swing/BorderFactory" => {
+                Some(include_bytes!("../test_classes/javax/swing/BorderFactory.class")[..].into())
+            }
+            "javax/swing/JColorChooser" => {
+                Some(include_bytes!("../test_classes/javax/swing/JColorChooser.class")[..].into())
+            }
+            "javax/swing/JComponent" => {
+                Some(include_bytes!("../test_classes/javax/swing/JComponent.class")[..].into())
+            }
+            "java/awt/Container" => {
+                Some(include_bytes!("../test_classes/java/awt/Container.class")[..].into())
+            }
+            "java/awt/Component" => {
+                Some(include_bytes!("../test_classes/java/awt/Component.class")[..].into())
+            }
+            "java/awt/image/ImageObserver" => Some(
+                include_bytes!("../test_classes/java/awt/image/ImageObserver.class")[..].into(),
+            ),
+            "java/awt/MenuContainer" => {
+                Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into())
+            }
+            "java/io/Serializable" => {
+                Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into())
+            }
 
-            _ => panic!("{classpath} not found")
+            _ => panic!("{classpath} not found"),
         }
     }
 
@@ -316,7 +355,7 @@ pub fn wasm_test() {
 
     let jvm = JVM::new(
         Mutex::new(Box::new(stdout())),
-        Box::new(WasmEnvironment::new(table))
+        Box::new(WasmEnvironment::new(table)),
     );
 
     let _main = jvm.find_class("javax/swing/JColorChooser", bootstrapper.clone());

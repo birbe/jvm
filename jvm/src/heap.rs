@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::mem::{align_of, size_of};
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8};
-use mutf8::utf8_to_mutf8;
 use crate::thread::Operand;
+use mutf8::utf8_to_mutf8;
+use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::Arc;
 
 pub unsafe trait ObjectInternal {}
 pub unsafe trait NonArrayObject {}
@@ -25,7 +25,9 @@ pub struct Object {
 unsafe impl ObjectInternal for Object {}
 
 impl Object {
-    pub const NULL: Self = Self { ptr: std::ptr::null_mut() };
+    pub const NULL: Self = Self {
+        ptr: std::ptr::null_mut(),
+    };
 
     pub unsafe fn from_raw<T: ?Sized>(ptr: *mut RawObject<T>) -> Self {
         Self {
@@ -34,7 +36,8 @@ impl Object {
     }
 
     pub fn get_body(&self) -> *mut () {
-        let layout = Layout::from_size_align(size_of::<ObjectHeader>(), align_of::<ObjectHeader>()).unwrap();
+        let layout =
+            Layout::from_size_align(size_of::<ObjectHeader>(), align_of::<ObjectHeader>()).unwrap();
         let padding = layout.padding_needed_for(align_of::<Operand>());
 
         unsafe { (self.ptr.byte_offset(padding as isize)) }
@@ -48,7 +51,6 @@ impl Object {
         std::ptr::from_raw_parts_mut(self.ptr, ())
     }
 
-
     ///SAFETY: The pointer this [Object] represents must still be valid
     pub unsafe fn get_header(&self) -> &ObjectHeader {
         assert_ne!(self, &Self::NULL);
@@ -61,10 +63,10 @@ impl Object {
         //TODO type checking
 
         #[repr(C)]
-       struct PartialArray {
-           header: ObjectHeader,
-           length: i32
-       }
+        struct PartialArray {
+            header: ObjectHeader,
+            length: i32,
+        }
 
         unsafe {
             let partial = self.ptr as *const PartialArray;
@@ -75,45 +77,41 @@ impl Object {
     }
 }
 
-
-
 #[derive(Debug)]
 #[repr(C)]
 pub struct ObjectHeader {
     pub type_: ObjectType,
-    pub synchronized: AtomicU8
+    pub synchronized: AtomicU8,
 }
 
 #[derive(Debug)]
 #[repr(C)]
 pub enum ObjectType {
     Class(*const Class),
-    Array(*const FieldType)
+    Array(*const FieldType),
 }
 
 impl ObjectType {
-
     pub unsafe fn get_class(&self) -> Option<&Class> {
         match self {
             Self::Class(class) => Some(&**class),
-            _ => None
+            _ => None,
         }
     }
 
     pub unsafe fn get_type(&self) -> Option<&FieldType> {
         match self {
             Self::Array(array) => Some(&**array),
-            _ => None
+            _ => None,
         }
     }
-
 }
 
 #[derive(Debug)]
 #[repr(C)]
 pub struct RawObject<T: ?Sized> {
     pub header: ObjectHeader,
-    pub body: T
+    pub body: T,
 }
 
 macro_rules! impl_primitive {
@@ -193,7 +191,8 @@ impl Heap {
         &self,
         class: &Class,
     ) -> *mut RawObject<T> {
-        let object_header = Layout::from_size_align(size_of::<RawObject<T>>(), align_of::<RawObject<T>>()).unwrap();
+        let object_header =
+            Layout::from_size_align(size_of::<RawObject<T>>(), align_of::<RawObject<T>>()).unwrap();
 
         let object_body = Layout::from_size_align(class.heap_size, align_of::<u64>()).unwrap();
         let layout = object_header.extend(object_body).unwrap().0;
@@ -219,13 +218,20 @@ impl Heap {
         class: &Class,
         length: i32,
     ) -> *mut RawObject<RawArray<Object>> {
-
-        let object_header = Layout::from_size_align(size_of::<RawObject<()>>(), align_of::<RawObject<()>>()).unwrap();
+        let object_header =
+            Layout::from_size_align(size_of::<RawObject<()>>(), align_of::<RawObject<()>>())
+                .unwrap();
 
         let length_header = Layout::from_size_align(4, 4).unwrap();
         let array_body = Layout::array::<Object>(length as usize).unwrap();
 
-        let layout = object_header.extend(length_header).unwrap().0.extend(array_body).unwrap().0;
+        let layout = object_header
+            .extend(length_header)
+            .unwrap()
+            .0
+            .extend(array_body)
+            .unwrap()
+            .0;
 
         let alloc = unsafe { alloc(layout) };
 
@@ -248,7 +254,7 @@ impl Heap {
             (*object_ptr).body.length = length;
             (*object_ptr).header = ObjectHeader {
                 type_: ObjectType::Array(field_type),
-                synchronized: AtomicU8::new(0)
+                synchronized: AtomicU8::new(0),
             };
         }
 
@@ -263,7 +269,10 @@ impl Heap {
     ) -> *mut RawObject<RawArray<T>> {
         let padding = size_of::<(i32, T)>() - size_of::<T>();
 
-        let size = size_of::<ObjectHeader>() + size_of::<i32>() + padding + (size_of::<T>() * length as usize);
+        let size = size_of::<ObjectHeader>()
+            + size_of::<i32>()
+            + padding
+            + (size_of::<T>() * length as usize);
 
         let layout = Layout::from_size_align(size, align_of::<u64>()).unwrap();
 
@@ -311,9 +320,7 @@ impl Heap {
     pub unsafe fn get_class_field<T: Copy>(&self, object: &Object, field: &Field) -> T {
         let ptr = unsafe { (object.get_body() as *mut u8).offset(field.heap_offset as isize) };
 
-        unsafe {
-            *(ptr as *mut T)
-        }
+        unsafe { *(ptr as *mut T) }
     }
 
     pub fn allocate_string(&self, string: &str, jvm: &JVM) -> StringObject {

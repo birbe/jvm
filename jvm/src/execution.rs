@@ -1,28 +1,22 @@
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::thread::{FrameStack, Operand, RawFrame, Thread};
 
-
 use std::fmt::{Debug, Formatter};
 
-use std::sync::{Arc};
+use std::sync::Arc;
 
 pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> Operand;
 
 pub struct InterpreterContext {
     //RawFrame contains a pointer to the Ref and the Class, these keep the pointers alive
     ref_: Arc<Ref>,
-    class: Arc<Class>
+    class: Arc<Class>,
 }
 
 impl InterpreterContext {
-
     pub fn new(ref_: Arc<Ref>, class: Arc<Class>) -> Self {
-        Self {
-            ref_,
-            class
-        }
+        Self { ref_, class }
     }
-
 }
 
 pub enum ExecutionContext {
@@ -53,7 +47,6 @@ pub struct MethodHandle {
 }
 
 impl MethodHandle {
-    
     pub unsafe fn new(ptr: ABIHandlePtr, context: ExecutionContext, method: Arc<Method>) -> Self {
         Self {
             ptr,
@@ -61,5 +54,4 @@ impl MethodHandle {
             method,
         }
     }
-
 }
