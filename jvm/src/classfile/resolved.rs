@@ -21,6 +21,7 @@ use std::io::Cursor;
 use std::mem::size_of;
 use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
+use once_cell::sync::OnceCell;
 
 bitflags! {
 
@@ -182,7 +183,7 @@ impl Class {
                 .collect::<Option<Vec<Attribute>>>()?,
             constant_pool,
             heap_size,
-            internal_id,
+            internal_id
         })
     }
 

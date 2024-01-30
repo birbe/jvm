@@ -5,7 +5,7 @@ use std::fmt::{Debug, Formatter};
 
 use std::sync::Arc;
 
-pub type ABIHandlePtr = unsafe extern "C" fn(&mut FrameStack, thread: &mut Thread) -> Operand;
+pub type ABIHandlePtr = unsafe extern "C" fn(thread: &mut Thread) -> Operand;
 
 pub struct InterpreterContext {
     //RawFrame contains a pointer to the Ref and the Class, these keep the pointers alive
@@ -43,14 +43,22 @@ impl Debug for ExecutionContext {
 pub struct MethodHandle {
     pub(crate) ptr: ABIHandlePtr,
     pub(crate) context: ExecutionContext,
+    pub(crate) class: Arc<Class>,
     pub(crate) method: Arc<Method>,
 }
 
+impl Debug for MethodHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MethodHandle").finish()
+    }
+}
+
 impl MethodHandle {
-    pub unsafe fn new(ptr: ABIHandlePtr, context: ExecutionContext, method: Arc<Method>) -> Self {
+    pub unsafe fn new(ptr: ABIHandlePtr, context: ExecutionContext, method: Arc<Method>, class: Arc<Class>) -> Self {
         Self {
             ptr,
             context,
+            class,
             method,
         }
     }

@@ -33,8 +33,7 @@ use std::io::Write;
 // }
 
 #[allow(non_snake_case)]
-extern "C" fn java_lang_System_registerNatives(
-    _frame_stack: &mut FrameStack,
+extern "C" fn retNull(
     _thread: &mut Thread,
 ) -> Operand {
     Operand { data: 0 }
@@ -42,7 +41,6 @@ extern "C" fn java_lang_System_registerNatives(
 
 #[allow(non_snake_case)]
 extern "C" fn java_lang_Object_registerNatives(
-    _frame_stack: *mut FrameStack,
     _thread: *mut Thread,
 ) -> Operand {
     Operand { data: 0 }
@@ -55,8 +53,10 @@ pub fn link(method_ref: &Ref) -> Option<ABIHandlePtr> {
         &method_ref.name_and_type.descriptor[..],
     ) {
         // ("Main", "println", "(Ljava/lang/String;)V") => Some(println),
-        ("java/lang/System", "registerNatives", "()V") => Some(java_lang_System_registerNatives),
-        ("java/lang/Object", "registerNatives", "()V") => Some(java_lang_System_registerNatives),
+        ("java/lang/System", "registerNatives", "()V") => Some(retNull),
+        ("java/lang/Object", "registerNatives", "()V") => Some(retNull),
+        ("java/lang/Object", "getClass", "()Ljava/lang/Class;") => Some(retNull),
+        ("java/lang/Object", "hashCode", "()I") => Some(retNull),
         _ => None,
     }
 }

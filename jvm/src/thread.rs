@@ -1,3 +1,4 @@
+use std::fmt::{Debug, DebugList, Formatter};
 use crate::bytecode::{Bytecode, JValue};
 use crate::{routine_resolve_field, JVM};
 
@@ -16,6 +17,11 @@ use std::pin::Pin;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use crate::execution::MethodHandle;
+
+macro_rules! console_log {
+    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
+}
 
 #[derive(Debug)]
 pub enum RuntimeException {
@@ -155,6 +161,21 @@ impl<'a> Frame<'a> {
     }
 }
 
+impl<'a> Debug for Frame<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let locals: Vec<u64> = self.locals.iter().map(|op| unsafe { op.data }).collect();
+        let stack: Vec<u64> = self.stack[..*self.stack_length].iter().map(|op| unsafe { op.data }).collect();
+
+        f.debug_struct("Frame")
+            .field("method", &self.method.get_identifier())
+            .field("class", &self.class.this_class)
+            .field("program_counter", self.program_counter)
+            .field("locals", &locals)
+            .field("stack", &stack)
+            .finish()
+    }
+}
+
 ///Stack of frames
 #[derive(Debug)]
 #[repr(C)]
@@ -204,10 +225,19 @@ pub enum ThreadStepResult {
 
 #[repr(C)]
 pub struct Thread {
+    pub frame_stack: Box<FrameStack>,
     pub jvm: Arc<JVM>,
     pub class_loader: Arc<dyn ClassLoader>,
-    pub frame_store: Pin<Box<FrameStack>>,
     pub killed: bool,
+}
+
+impl Thread {
+
+    fn invoke(&mut self, method_handle: &MethodHandle, args: Box<[Operand]>) -> Option<Operand> {
+        let jvm = self.jvm.clone();
+        jvm.environment.invoke_handle(self, method_handle, args)
+    }
+
 }
 
 #[derive(Debug)]
@@ -255,89 +285,64 @@ impl ThreadHandle {
         method_descriptor: &str,
         args: &[JValue],
     ) -> Result<Option<JValue>, JavaBarrierError> {
-        let class = self
-            .class_loader
-            .get_class(classpath)
-            .ok_or(JavaBarrierError::ClassNotFound)?;
-        let method = class
-            .methods
-            .iter()
-            .find(|method| *method.name == method_name && method_descriptor == method_descriptor)
-            .ok_or(JavaBarrierError::MethodNotFound)?;
+        let ref_ = Ref {
+            class: Arc::new(classpath.into()),
+            name_and_type: Arc::new(NameAndType { name: Arc::new(method_name.into()), descriptor: Arc::new(method_descriptor.into()) }),
+        };
 
-        todo!()
+        let method_handle = self.class_loader.get_method_handle(&ref_);
+        let method = &*method_handle.method;
 
-        // let handle = {
-        //     let id = self.class_loader.id();
-        //     let class_loader_stores = self.jvm.class_loaders.read();
-        //     let store = &class_loader_stores[id];
-        //     let refs = store.method_refs.read();
-        //
-        //     let method_ref = Ref {
-        //         class: Arc::new(classpath.to_string()),
-        //         name_and_type: Arc::new(NameAndType {
-        //             name: Arc::new(method_name.to_string()),
-        //             descriptor: Arc::new(method_descriptor.to_string()),
-        //         }),
-        //     };
-        //
-        //     refs.get(&method_ref)
-        //         .ok_or(JavaBarrierError::MethodNotFound)?
-        //         .clone()
-        // };
-        //
-        // let operands: Vec<Operand> = args.iter().map(|arg| arg.as_operand()).collect();
-        //
-        // let thread_ptr = self.thread;
-        // let return_value = handle.invoke(&operands, &mut self.frame_store, unsafe { &mut *thread_ptr });
-        //
-        // let jvalue = match &method.descriptor.return_type {
-        //     ReturnType::FieldType(field_type) => Some(match field_type {
-        //         FieldType::Array { .. } => JValue::Reference(unsafe {
-        //             Object::from_raw(return_value.objectref as *mut RawObject<()>)
-        //         }),
-        //         FieldType::Byte => JValue::Byte(unsafe { return_value.data } as Byte),
-        //         FieldType::Char => todo!(),
-        //         FieldType::Double => {
-        //             JValue::Double(f64::from_ne_bytes(unsafe { return_value.data }.to_ne_bytes()))
-        //         }
-        //         FieldType::Float => {
-        //             JValue::Float(f32::from_ne_bytes((unsafe { return_value.data } as u32).to_ne_bytes()))
-        //         }
-        //         FieldType::Int => JValue::Int(unsafe { return_value.data } as i32),
-        //         FieldType::Long => JValue::Long(unsafe { return_value.data } as i64),
-        //         FieldType::Short => JValue::Short(unsafe { return_value.data } as i16),
-        //         FieldType::Boolean => JValue::Int(unsafe { return_value.data } as i32),
-        //         FieldType::Class(_) => JValue::Reference(unsafe {
-        //             Object::from_raw(return_value.objectref as *mut RawObject<()>)
-        //         }),
-        //     }),
-        //     ReturnType::Void => None,
-        // };
-        //
-        // Ok(jvalue)
+        let operands: Vec<Operand> = args.iter().map(|arg| arg.as_operand()).collect();
+
+        let operand = self.invoke(&method_handle, operands.into_boxed_slice());
+
+        let jvalue = match (&method.descriptor.return_type, operand) {
+            (ReturnType::FieldType(field_type), Some(return_value)) => Some(match field_type {
+                FieldType::Array { .. } => JValue::Reference(unsafe {
+                    Object::from_raw(return_value.objectref as *mut RawObject<()>)
+                }),
+                FieldType::Byte => JValue::Byte(unsafe { return_value.data } as Byte),
+                FieldType::Char => todo!(),
+                FieldType::Double => {
+                    JValue::Double(f64::from_ne_bytes(unsafe { return_value.data }.to_ne_bytes()))
+                }
+                FieldType::Float => {
+                    JValue::Float(f32::from_ne_bytes((unsafe { return_value.data } as u32).to_ne_bytes()))
+                }
+                FieldType::Int => JValue::Int(unsafe { return_value.data } as i32),
+                FieldType::Long => JValue::Long(unsafe { return_value.data } as i64),
+                FieldType::Short => JValue::Short(unsafe { return_value.data } as i16),
+                FieldType::Boolean => JValue::Int(unsafe { return_value.data } as i32),
+                FieldType::Class(_) => JValue::Reference(unsafe {
+                    Object::from_raw(return_value.objectref as *mut RawObject<()>)
+                }),
+            }),
+            (_, _) => None,
+        };
+
+        Ok(jvalue)
     }
 
-    pub extern "C" fn interpret(frame_stack: &mut FrameStack, thread: &mut Thread) -> Operand {
-        panic!("{}", frame_stack as *mut FrameStack as usize);
+    #[no_mangle]
+    pub extern "C" fn interpret(thread: &mut Thread) -> Operand {
+        let mut raw_frame = thread.frame_stack.pop();
 
-        // let mut raw_frame = frame_stack.pop();
-        //
-        // loop {
-        //     match Self::step(raw_frame, frame_stack, thread) {
-        //         ThreadStepResult::Ok(frame) => raw_frame = frame,
-        //         ThreadStepResult::Error(error) => panic!("{:?}", error),
-        //         ThreadStepResult::Return(value) => {
-        //             return value.unwrap_or(JValue::Long(0)).as_operand()
-        //         }
-        //     }
-        // }
+        loop {
+            match Self::step(raw_frame, thread) {
+                ThreadStepResult::Ok(frame) => raw_frame = frame,
+                ThreadStepResult::Error(error) => panic!("{:?}", error),
+                ThreadStepResult::Return(value) => {
+                    return value.unwrap_or(JValue::Long(0)).as_operand()
+                }
+            }
+        }
     }
 
-    fn init_static(class: &Class, frame_stack: &mut FrameStack, thread: &mut Thread) {
+    fn init_static(class: &Class, thread: &mut Thread) {
         match &class.super_class {
             None => {}
-            Some(superclass) => Self::init_static(superclass, frame_stack, thread),
+            Some(superclass) => Self::init_static(superclass, thread),
         }
 
         if !class.methods.iter().any(|field| *field.name == "<clinit>") {
@@ -358,30 +363,11 @@ impl ThreadHandle {
         {
             //This thread has to call <clinit>
             Ok(_) => {
-                let clinit_ref = Ref {
-                    class: class.this_class.clone(),
-                    name_and_type: Arc::new(NameAndType {
-                        name: Arc::new("<clinit>".to_string()),
-                        descriptor: Arc::new("()V".to_string()),
-                    }),
-                };
+                let method_handle = thread.class_loader.get_method_by_name(&class.this_class, "<clinit>", "()V");
 
-                // let method_handle = {
-                //     let loaders = thread.jvm.class_loaders.read();
-                //     let loader_store = &loaders[thread.class_loader.id()];
-                //
-                //     let refs = loader_store.method_refs.read();
-                //
-                //     refs.get(&clinit_ref).unwrap().clone()
-                // };
-                //
-                // unsafe {
-                //     method_handle.invoke(&[], frame_stack, thread);
-                // };
-                //
-                // class.static_init_state.store(2, Ordering::Release);
+                thread.invoke(&method_handle, Box::new([]));
 
-                todo!()
+                class.static_init_state.store(2, Ordering::Release);
             }
             //Another thread is initializing, so wait until that's not the case
             Err(_) => while class.static_init_state.load(Ordering::Acquire) == 1 {},
@@ -390,7 +376,6 @@ impl ThreadHandle {
 
     fn step(
         mut raw_frame: RawFrame,
-        frame_stack: &mut FrameStack,
         thread: &mut Thread,
     ) -> ThreadStepResult {
         let mut frame = raw_frame.as_frame();
@@ -411,25 +396,13 @@ impl ThreadHandle {
         let bytes_index = instruction.bytes_index;
         let bytecode = &instruction.bytecode;
 
-        // if cfg!(miri) {
-        //     unsafe { log(
-        //         &format!(
-        //             "{:<25} | {:<10} | {:<50} | {:<10}",
-        //             format!("{bytecode:?}"),
-        //             frame.program_counter,
-        //             method.name,
-        //             class.this_class
-        //         )
-        //     ) };
-        // } else {
-        //     writeln!(
-        //         "{:<25} | {:<10} | {:<50} | {:<10}",
-        //         format!("{bytecode:?}").yellow(),
-        //         frame.program_counter,
-        //         method.name.green(),
-        //         class.this_class.blue()
-        //     );
-        // }
+        console_log!(
+            "{:<25} | {:<10} | {:<50} | {:<10}",
+            format!("{bytecode:?}"),
+            frame.program_counter,
+            method.name,
+            class.this_class
+        );
 
         match bytecode {
             Bytecode::Invokestatic(constant_index) => {
@@ -441,29 +414,18 @@ impl ThreadHandle {
                     .as_ref()
                     .unwrap();
 
-                // let method_handle = {
-                //     let loaders = thread.jvm.class_loaders.read();
-                //     let loader_store = &loaders[thread.class_loader.id()];
-                //     let refs = loader_store.method_refs.read();
-                //
-                //     refs.get(ref_).expect(&format!("{:?}", ref_)).clone()
-                // };
-                //
-                // let method_descriptor =
-                //     MethodDescriptor::try_from(&**ref_.name_and_type.descriptor).unwrap();
-                //
-                // let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..];
-                //
-                // let result = method_handle.invoke(args, frame_stack, thread);
-                //
-                // *frame.stack_length -= method_descriptor.args.len();
-                //
-                // if method_descriptor.return_type != ReturnType::Void {
-                //     frame.stack[*frame.stack_length] = result;
-                //     *frame.stack_length += 1;
-                // }
+                let method_handle = thread.class_loader.get_method_handle(ref_);
+                let method_descriptor = &method_handle.method.descriptor;
 
-                todo!()
+                let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..];
+
+                let operand = thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
+
+                *frame.stack_length -= method_descriptor.args.len();
+
+                if let Some(return_value) = operand {
+                    frame.push([return_value]);
+                }
             }
             Bytecode::Invokespecial(constant_index) => {
                 let method_ref = class
@@ -493,7 +455,7 @@ impl ThreadHandle {
                     &target_class
                 };
 
-                Self::init_static(c, frame_stack, thread);
+                Self::init_static(c, thread);
 
                 let method = match c.get_method(&method_ref.name_and_type) {
                     None => todo!(),
@@ -516,17 +478,11 @@ impl ThreadHandle {
                     panic!()
                 }
 
-                todo!()
+                panic!("invokespecial");
 
-                // let method_handle = {
-                //     let loaders = thread.jvm.class_loaders.read();
-                //     let loader_store = &loaders[thread.class_loader.id()];
-                //     let refs = loader_store.method_refs.read();
-                //
-                //     refs.get(method_ref).unwrap().clone()
-                // };
-                //
-                // method_handle.invoke(args, frame_stack, thread);
+                let method_handle = thread.class_loader.get_method_handle(method_ref);
+
+                thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
             }
             Bytecode::Invokevirtual(constant_index) => {
                 let [objectref] = frame.pop();
@@ -664,7 +620,7 @@ impl ThreadHandle {
                     routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
                 if field_class.this_class != class.this_class {
-                    Self::init_static(&field_class, frame_stack, thread);
+                    Self::init_static(&field_class, thread);
                 }
 
                 let [object, value] = frame.pop();
@@ -772,7 +728,7 @@ impl ThreadHandle {
                     Constant::String(string) => {
                         let string_object = thread.jvm.heap.get_string(&string, &thread.jvm);
 
-                        Self::init_static(&string_object.class, frame_stack, thread);
+                        Self::init_static(&string_object.class, thread);
 
                         frame.push([Operand {
                             objectref: string_object.value.ptr,
@@ -858,7 +814,7 @@ impl ThreadHandle {
                     routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
                 if field_class.this_class != class.this_class {
-                    Self::init_static(&field_class, frame_stack, thread);
+                    Self::init_static(&field_class, thread);
                 }
 
                 let [value] = frame.pop();
@@ -885,7 +841,7 @@ impl ThreadHandle {
                     .unwrap();
 
                 if target_class.this_class != class.this_class {
-                    Self::init_static(&target_class, frame_stack, thread);
+                    Self::init_static(&target_class, thread);
                 }
 
                 let index = target_class
@@ -909,7 +865,7 @@ impl ThreadHandle {
                         .unwrap();
 
                     if target_class.this_class != class.this_class {
-                        Self::init_static(&target_class, frame_stack, thread);
+                        Self::init_static(&target_class, thread);
                     }
 
                     let object = thread.jvm.heap.allocate_class(&target_class);

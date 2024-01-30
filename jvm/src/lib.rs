@@ -19,18 +19,23 @@ use linker::ClassLoader;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 
 use std::io::{stdout, Cursor, Write};
 
 use std::pin::Pin;
 
-use crate::env::wasm::{RefSlots, WasmEnvironment, REFS};
+use crate::env::wasm::{RefSlots, WasmEnvironment, OBJECT_REF_SLOTS};
 use crate::env::{Compiler, Environment};
 use crate::execution::{ExecutionContext, InterpreterContext, MethodHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use highway::{HighwayHash, HighwayHasher, Key};
+use js_sys::Atomics::load;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_futures::spawn_local;
+use crate::bytecode::JValue;
+use crate::heap::Object;
 
 pub mod classfile;
 mod tests;
@@ -145,7 +150,7 @@ impl JVM {
         let thread = Arc::new(Mutex::new(Thread {
             jvm: self.clone(),
             class_loader,
-            frame_store: Pin::new(Box::new(FrameStack::new())),
+            frame_stack: Box::new(FrameStack::new()),
             killed: false,
         }));
 
@@ -170,27 +175,18 @@ impl JVM {
             });
 
             let method_handle = if !method.access_flags.contains(AccessFlags::NATIVE) {
-                unsafe {
-                    MethodHandle::new(
-                        ThreadHandle::interpret,
-                        ExecutionContext::Interpret(InterpreterContext::new(
-                            ref_.clone(),
-                            class.clone(),
-                        )),
-                        method.clone(),
-                    )
-                }
+                self.environment
+                    .create_method_handle(loader, ref_.clone(), method.clone(), class.clone())
             } else {
                 match native::link(&ref_) {
-                    None => return,
+                    None => continue,
                     Some(ptr) => unsafe {
-                        MethodHandle::new(ptr, ExecutionContext::Native, method.clone())
+                        MethodHandle::new(ptr, ExecutionContext::Native, method.clone(), class.clone())
                     },
                 }
             };
 
-            self.environment
-                .register_method_handle(loader, ref_, method_handle);
+            loader.link_ref(ref_, Arc::new(method_handle));
         }
     }
 }
@@ -266,8 +262,10 @@ pub fn routine_resolve_method<'class>(
     todo!()
 }
 
+#[derive(Default)]
 struct NativeClassLoader {
     pub classes: RwLock<HashMap<String, Arc<Class>>>,
+    pub handles: RwLock<HashMap<u64, Arc<MethodHandle>>>
 }
 
 impl Debug for NativeClassLoader {
@@ -331,6 +329,40 @@ impl ClassLoader for NativeClassLoader {
         classes.get(classpath).cloned()
     }
 
+    fn link_ref(&self, ref_: Arc<Ref>, method_handle: Arc<MethodHandle>) {
+        let mut hasher = HighwayHasher::new(Key([0; 4]));
+        hasher.append(ref_.class.as_bytes());
+        hasher.append(ref_.name_and_type.name.as_bytes());
+        hasher.append(ref_.name_and_type.descriptor.as_bytes());
+        let key = hasher.finish();
+
+        self.handles.write().insert(key, method_handle);
+    }
+
+    fn get_method_handle(&self, ref_: &Ref) -> Arc<MethodHandle> {
+        let handles = self.handles.read();
+
+        let mut hasher = HighwayHasher::new(Key([0; 4]));
+        hasher.append(ref_.class.as_bytes());
+        hasher.append(ref_.name_and_type.name.as_bytes());
+        hasher.append(ref_.name_and_type.descriptor.as_bytes());
+        let key = hasher.finish();
+
+        handles.get(&key).unwrap().clone()
+    }
+
+    fn get_method_by_name(&self, classpath: &str, name: &str, descriptor: &str) -> Arc<MethodHandle> {
+        let handles = self.handles.read();
+
+        let mut hasher = HighwayHasher::new(Key([0; 4]));
+        hasher.append(classpath.as_bytes());
+        hasher.append(name.as_bytes());
+        hasher.append(descriptor.as_bytes());
+        let key = hasher.finish();
+
+        handles.get(&key).unwrap().clone()
+    }
+
     fn id(&self) -> usize {
         0
     }
@@ -341,7 +373,7 @@ pub fn wasm_test() {
     console_error_panic_hook::set_once();
 
     let mock = NativeClassLoader {
-        classes: Default::default(),
+        ..Default::default()
     };
 
     let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
@@ -358,9 +390,9 @@ pub fn wasm_test() {
         Box::new(WasmEnvironment::new(table)),
     );
 
-    let _main = jvm.find_class("javax/swing/JColorChooser", bootstrapper.clone());
+    let _main = jvm.find_class("Main", bootstrapper.clone());
     //
-    // let mut thread = jvm.create_thread(bootstrapper.clone());
-    // let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])
-    //     .unwrap();
+    let mut thread = jvm.create_thread(bootstrapper.clone());
+    let result = thread.call("Main", "main", "()V", &[])
+        .unwrap();
 }

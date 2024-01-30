@@ -1,4 +1,4 @@
-use crate::classfile::resolved::{Class, Ref};
+use crate::classfile::resolved::{Class, Method, Ref};
 use crate::execution::MethodHandle;
 use crate::heap::Object;
 use crate::linker::ClassLoader;
@@ -18,14 +18,15 @@ pub trait Environment {
         thread: &mut Thread,
         method_handle: &MethodHandle,
         args: Box<[Operand]>,
-    ) -> u64;
+    ) -> Option<Operand>;
 
-    fn register_method_handle(
+    fn create_method_handle(
         &self,
         class_loader: &dyn ClassLoader,
-        method: Arc<Ref>,
-        handle: MethodHandle,
-    );
+        ref_: Arc<Ref>,
+        method: Arc<Method>,
+        class: Arc<Class>,
+    ) -> MethodHandle;
 
     fn get_object_field(&self, object: Object, class: &Class, field: &Ref) -> Operand;
 }
