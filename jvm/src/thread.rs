@@ -1,7 +1,7 @@
 use crate::{JVM, routine_resolve_field};
 use crate::bytecode::{Bytecode, JValue};
 
-use crate::classfile::resolved::{AccessFlags, Attribute, Class, Constant, FieldType, MethodDescriptor, NameAndType, Ref, ReferenceKind, ReturnType};
+use crate::classfile::resolved::{AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, NameAndType, Ref, ReferenceKind, ReturnType};
 use crate::heap::{AsJavaPrimitive, Byte, Int, JavaPrimitive, Object, RawObject};
 use crate::linker::ClassLoader;
 use bitflags::Flags;
@@ -32,7 +32,7 @@ pub enum ThreadError {
 pub struct RawFrame {
     pub(crate) locals_length: usize,
     pub(crate) locals: *mut Operand,
-    pub(crate) method_ref: *const Ref,
+    pub(crate) method: *const Method,
     pub(crate) class: *const Class,
     pub(crate) program_counter: u32,
     pub(crate) stack_index: usize,
@@ -43,7 +43,7 @@ pub struct RawFrame {
 impl RawFrame {
 
     pub const UNINIT: Self = RawFrame {
-        method_ref: std::ptr::null(),
+        method: std::ptr::null(),
         class: std::ptr::null(),
         program_counter: 0,
         locals_length: 0,
@@ -53,12 +53,12 @@ impl RawFrame {
         stack: std::ptr::null_mut(),
     };
 
-    pub fn new(method_identifier: &Ref, class: &Class, locals: Box<[Operand]>, stack: Box<[Operand]>) -> Self {
+    pub fn new(method: &Method, class: &Class, locals: Box<[Operand]>, stack: Box<[Operand]>) -> Self {
         let locals = Box::into_raw(locals);
         let stack = Box::into_raw(stack);
 
         Self {
-            method_ref: method_identifier as *const Ref,
+            method: method as *const Method,
             class: class as *const Class,
             program_counter: 0,
             locals_length: locals.len(),
@@ -72,7 +72,7 @@ impl RawFrame {
     pub fn as_frame<'a>(&'a mut self) -> Frame {
         unsafe {
             Frame {
-                method_ref: &*self.method_ref,
+                method: &*self.method,
                 class: &*self.class,
                 program_counter: &mut self.program_counter,
                 locals: std::slice::from_raw_parts_mut::<'a>(self.locals, self.locals_length),
@@ -118,7 +118,7 @@ impl Operand {
 
 #[repr(C)]
 pub struct Frame<'a> {
-    pub method_ref: &'a Ref,
+    pub method: &'a Method,
     pub class: &'a Class,
     pub program_counter: &'a mut u32,
     pub locals: &'a mut [Operand],
@@ -154,6 +154,7 @@ impl<'a> Frame<'a> {
 
 ///Stack of frames
 #[derive(Debug)]
+#[repr(C)]
 pub struct FrameStack {
     pub frames: Pin<Box<[RawFrame; 1024]>>,
     pub frame_index: isize,
@@ -320,17 +321,19 @@ impl ThreadHandle {
         frame_stack: &mut FrameStack,
         thread: &mut Thread,
     ) -> Operand {
-        let mut raw_frame = frame_stack.pop();
+        panic!("{}", frame_stack as *mut FrameStack as usize);
 
-        loop {
-            match Self::step(raw_frame, frame_stack, thread) {
-                ThreadStepResult::Ok(frame) => raw_frame = frame,
-                ThreadStepResult::Error(error) => panic!("{:?}", error),
-                ThreadStepResult::Return(value) => {
-                    return value.unwrap_or(JValue::Long(0)).as_operand()
-                }
-            }
-        }
+        // let mut raw_frame = frame_stack.pop();
+        //
+        // loop {
+        //     match Self::step(raw_frame, frame_stack, thread) {
+        //         ThreadStepResult::Ok(frame) => raw_frame = frame,
+        //         ThreadStepResult::Error(error) => panic!("{:?}", error),
+        //         ThreadStepResult::Return(value) => {
+        //             return value.unwrap_or(JValue::Long(0)).as_operand()
+        //         }
+        //     }
+        // }
     }
 
     fn init_static(class: &Class, frame_stack: &mut FrameStack, thread: &mut Thread) {
@@ -394,9 +397,8 @@ impl ThreadHandle {
     ) -> ThreadStepResult {
         let mut frame = raw_frame.as_frame();
 
-        //TODO: Super slow to do this at *every* instruction
         let class = frame.class;
-        let method = class.get_method(&frame.method_ref.name_and_type).unwrap();
+        let method = frame.method;
 
         let code = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
             code

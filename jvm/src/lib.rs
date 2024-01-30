@@ -29,10 +29,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use wasm_bindgen::prelude::wasm_bindgen;
-use crate::bytecode::JValue;
+use wasm_bindgen_futures::spawn_local;
 use crate::env::{Compiler, Environment};
-use crate::execution::{ExecutionContext, InterpreterContext, invoke_table_function, MethodHandle};
-use crate::heap::Object;
+use crate::env::wasm::{REFS, RefSlots, WasmEnvironment};
+use crate::execution::{ExecutionContext, InterpreterContext, MethodHandle};
 
 pub mod classfile;
 mod tests;
@@ -44,13 +44,6 @@ pub mod execution;
 pub mod native;
 pub mod thread;
 pub mod env;
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    pub fn log(s: &str);
-
-}
 
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {
@@ -80,7 +73,7 @@ impl JVM {
     pub fn new(stdout: Mutex<Box<dyn Write>>, environment: Box<dyn Environment>) -> Arc<Self> {
         Arc::new(Self {
             stdout,
-            threads: Default::default(),
+            threads: RwLock::new(vec![]),
             heap: Heap::new(),
             environment,
             class_ids: AtomicU32::new(0),
@@ -162,6 +155,8 @@ impl JVM {
     }
 
     fn link_class(&self, loader: &dyn ClassLoader, class: Arc<Class>) {
+        self.environment.link_class(class.clone());
+
         for method in &class.methods {
             let ref_ = Arc::new(Ref {
                 class: class.this_class.clone(),
@@ -172,22 +167,16 @@ impl JVM {
             });
 
             let method_handle = if !method.access_flags.contains(AccessFlags::NATIVE) {
-                MethodHandle {
-                    ptr: ThreadHandle::interpret,
-                    context: ExecutionContext::Interpret(InterpreterContext::new(
-                        ref_.clone(),
-                        class.clone(),
-                    )),
-                    method_ref: ref_.clone(),
-                }
+                unsafe { MethodHandle::new(ThreadHandle::interpret, ExecutionContext::Interpret(InterpreterContext::new(
+                    ref_.clone(),
+                    class.clone(),
+                )), method.clone()) }
             } else {
                 match native::link(&ref_) {
                     None => return,
                     Some(ptr) => {
-                        MethodHandle {
-                            ptr,
-                            context: ExecutionContext::Native,
-                            method_ref: ref_.clone(),
+                        unsafe {
+                            MethodHandle::new(ptr, ExecutionContext::Native, method.clone())
                         }
                     }
                 }
@@ -235,7 +224,7 @@ pub fn routine_resolve_method<'class>(jvm: &JVM, ref_: &Ref, class: &'class Clas
     }
 
     fn step2<'class>(ref_: &Ref, class: &'class Class) -> Option<&'class Method> {
-        let methods: Vec<&Method> = class.methods.iter().filter(|m| m.name == ref_.name_and_type.name).collect();
+        let methods: Vec<&Arc<Method>> = class.methods.iter().filter(|m| m.name == ref_.name_and_type.name).collect();
 
         if methods.len() == 1 && methods[0].is_signature_polymorphic(&class.this_class) {
             //TODO resolve references
@@ -280,6 +269,15 @@ impl ClassLoader for NativeClassLoader {
             "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
             "java/lang/Object" => Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into()),
             "java/lang/String" => Some(include_bytes!("../test_classes/java/lang/String.class")[..].into()),
+            "javax/swing/BorderFactory" => Some(include_bytes!("../test_classes/javax/swing/BorderFactory.class")[..].into()),
+            "javax/swing/JColorChooser" => Some(include_bytes!("../test_classes/javax/swing/JColorChooser.class")[..].into()),
+            "javax/swing/JComponent" => Some(include_bytes!("../test_classes/javax/swing/JComponent.class")[..].into()),
+            "java/awt/Container" => Some(include_bytes!("../test_classes/java/awt/Container.class")[..].into()),
+            "java/awt/Component" => Some(include_bytes!("../test_classes/java/awt/Component.class")[..].into()),
+            "java/awt/image/ImageObserver" => Some(include_bytes!("../test_classes/java/awt/image/ImageObserver.class")[..].into()),
+            "java/awt/MenuContainer" => Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into()),
+            "java/io/Serializable" => Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into()),
+
             _ => panic!("{classpath} not found")
         }
     }
@@ -299,22 +297,29 @@ impl ClassLoader for NativeClassLoader {
     }
 }
 
-
 #[wasm_bindgen]
 pub fn wasm_test() {
     console_error_panic_hook::set_once();
 
-    // let mock = NativeClassLoader {
-    //     classes: Default::default(),
-    // };
-    //
-    // let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
-    // let jvm = JVM::new(
-    //     bootstrapper.clone(),
-    //     Mutex::new(Box::new(stdout())),
-    // );
-    //
-    // let _main = jvm.find_class("Main", bootstrapper.clone());
+    let mock = NativeClassLoader {
+        classes: Default::default(),
+    };
+
+    let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
+
+    let descriptor = js_sys::Object::new();
+
+    js_sys::Reflect::set(&descriptor, &"element".into(), &"anyref".into()).unwrap();
+    js_sys::Reflect::set(&descriptor, &"initial".into(), &"0".into()).unwrap();
+
+    let table = js_sys::WebAssembly::Table::new(&descriptor).unwrap();
+
+    let jvm = JVM::new(
+        Mutex::new(Box::new(stdout())),
+        Box::new(WasmEnvironment::new(table))
+    );
+
+    let _main = jvm.find_class("javax/swing/JColorChooser", bootstrapper.clone());
     //
     // let mut thread = jvm.create_thread(bootstrapper.clone());
     // let result = thread.call("Main", "main", "([Ljava/lang/String;)[Ljava/lang/String;", &[])

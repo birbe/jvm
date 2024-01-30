@@ -57,7 +57,7 @@ pub struct Class {
     pub access_flags: AccessFlags,
     pub interfaces: Vec<Arc<Class>>,
     pub fields: Vec<Field>,
-    pub methods: Vec<Method>,
+    pub methods: Vec<Arc<Method>>,
 
     pub class_loader: Arc<dyn ClassLoader>,
     pub statics: usize,
@@ -146,8 +146,8 @@ impl Class {
             methods: classfile
                 .methods
                 .iter()
-                .map(|method_info| Method::new(method_info, &constant_pool, classfile))
-                .collect::<Option<Vec<Method>>>()?,
+                .map(|method_info| Method::new(method_info, &constant_pool, classfile).map(Arc::new))
+                .collect::<Option<Vec<Arc<Method>>>>()?,
             class_loader,
             statics: static_alloc,
             static_init_state: AtomicU8::new(0),
@@ -169,7 +169,7 @@ impl Class {
         })
     }
 
-    pub fn get_method(&self, name_and_type: &NameAndType) -> Option<&Method> {
+    pub fn get_method(&self, name_and_type: &NameAndType) -> Option<&Arc<Method>> {
         self.methods.iter().find(|method| {
             method.name == name_and_type.name
                 && method.descriptor.string == *name_and_type.descriptor
@@ -183,7 +183,7 @@ impl Class {
         })
     }
 
-    pub fn find_overriding_method(&self, lower_method: &Method) -> Option<&Method> {
+    pub fn find_overriding_method(&self, lower_method: &Method) -> Option<&Arc<Method>> {
         self.methods.iter().find(|higher_method| {
             !higher_method.access_flags.contains(AccessFlags::STATIC)
             && higher_method.name == lower_method.name
@@ -343,6 +343,7 @@ pub struct Method {
     pub name: Arc<String>,
     pub descriptor: MethodDescriptor,
     pub attributes: HashMap<String, Attribute>,
+    identifier: String
 }
 
 impl Method {
@@ -351,17 +352,21 @@ impl Method {
         constant_pool: &ConstantPool,
         _classfile: &ClassFile,
     ) -> Option<Self> {
+        let descriptor_string = (&**constant_pool
+            .constants
+            .get(&method_info.descriptor_index)?
+            .as_string()?);
+
+        let method_name = constant_pool
+            .constants
+            .get(&method_info.name_index)?
+            .as_string()?;
+
         Some(Self {
             access_flags: AccessFlags::from_bits(method_info.access_flags)?,
-            name: constant_pool
-                .constants
-                .get(&method_info.name_index)?
-                .as_string()?
+            name: method_name
                 .clone(),
-            descriptor: (&**constant_pool
-                .constants
-                .get(&method_info.descriptor_index)?
-                .as_string()?)[..]
+            descriptor: descriptor_string[..]
                 .try_into()
                 .ok()?,
             attributes: method_info
@@ -376,6 +381,7 @@ impl Method {
                     Some((descriptor_kind, attribute))
                 })
                 .collect::<Option<HashMap<String, Attribute>>>()?,
+            identifier: format!("{}{}", method_name, descriptor_string),
         })
     }
 
@@ -392,6 +398,10 @@ impl Method {
         classpath == "java/lang/invoke/MethodHandle" || classpath == "java/lang/invoke/VarHandle"
         && matches!(self.descriptor.args.first(), Some(FieldType::Class(classpath)) if classpath == "java/lang/Object")
         && self.access_flags.contains(AccessFlags::VARARGS | AccessFlags::NATIVE)
+    }
+
+    pub fn get_identifier(&self) -> &str {
+        &self.identifier
     }
 
 }
