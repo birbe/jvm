@@ -17,7 +17,7 @@ Things I've worked on so far, include but are not limited to (and in no particul
 - [x] Java bytecode control flow to WASM (using the stackifier algorithm)
 
 Things that are notably missing:
-- [x] A lot instructions
+- [x] A lot of instructions
 - [x] Most of the important instructions like for dynamic dispatch (they're either partially (incorrectly) implemented or entirely unimplemented)
 - [x] Garbage collection (on native platforms)
 
