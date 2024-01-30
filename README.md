@@ -1,6 +1,6 @@
 # Experimental JVM on WASM
 
-This repo is my experiment in making a pure-Rust JVM that supports running on both native platforms
+This repo is my experiment in making a pure-Rust JVM that supports running both on native platforms
 and WebAssembly.
 
 On WebAssembly, it takes advantage of the GC extension to the WASM spec, meaning in theory the Java objects get garbage-collected
