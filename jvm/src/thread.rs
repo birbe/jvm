@@ -1,15 +1,14 @@
-use std::fmt::{Debug, DebugList, Formatter};
+use std::fmt::{Debug, Formatter};
 use crate::bytecode::{Bytecode, JValue};
-use crate::{routine_resolve_field, JVM};
+use crate::{JVM, routine_resolve_field};
 
 use crate::classfile::resolved::{
     AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, NameAndType, Ref,
     ReferenceKind, ReturnType,
 };
-use crate::heap::{AsJavaPrimitive, Byte, Int, JavaPrimitive, Object, RawObject};
+use crate::env::native::heap::{AsJavaPrimitive, Byte, Int, RawObject};
 use crate::linker::ClassLoader;
 use bitflags::Flags;
-use colored::Colorize;
 use parking_lot::Mutex;
 
 use std::ops::{Deref, DerefMut};
@@ -17,6 +16,8 @@ use std::pin::Pin;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use crate::env::Object;
+use crate::env::wasm::dealloc_ref;
 use crate::execution::MethodHandle;
 
 macro_rules! console_log {
@@ -117,12 +118,6 @@ impl Drop for RawFrame {
 pub union Operand {
     pub objectref: *mut (),
     pub data: u64,
-}
-
-impl Operand {
-    pub unsafe fn as_object(&self) -> Object {
-        Object::from_raw(self.objectref as *mut RawObject<()>)
-    }
 }
 
 #[repr(C)]
@@ -299,9 +294,11 @@ impl ThreadHandle {
 
         let jvalue = match (&method.descriptor.return_type, operand) {
             (ReturnType::FieldType(field_type), Some(return_value)) => Some(match field_type {
-                FieldType::Array { .. } => JValue::Reference(unsafe {
-                    Object::from_raw(return_value.objectref as *mut RawObject<()>)
-                }),
+                FieldType::Array { .. } => {
+                    JValue::Reference(unsafe {
+                        self.jvm.environment.object_from_operand(&return_value)
+                    })
+                },
                 FieldType::Byte => JValue::Byte(unsafe { return_value.data } as Byte),
                 FieldType::Char => todo!(),
                 FieldType::Double => {
@@ -315,7 +312,7 @@ impl ThreadHandle {
                 FieldType::Short => JValue::Short(unsafe { return_value.data } as i16),
                 FieldType::Boolean => JValue::Int(unsafe { return_value.data } as i32),
                 FieldType::Class(_) => JValue::Reference(unsafe {
-                    Object::from_raw(return_value.objectref as *mut RawObject<()>)
+                    self.jvm.environment.object_from_operand(&return_value)
                 }),
             }),
             (_, _) => None,
@@ -486,9 +483,9 @@ impl ThreadHandle {
             }
             Bytecode::Invokevirtual(constant_index) => {
                 let [objectref] = frame.pop();
-                let objectref = unsafe { objectref.as_object() };
-                let header = unsafe { objectref.get_header() };
-                let object_class = unsafe { header.type_.get_class() }.unwrap();
+                let objectref = unsafe { thread.jvm.environment.object_from_operand(&objectref) };
+
+                let object_class = thread.jvm.environment.get_object_class(&objectref);
 
                 let method_ref = class
                     .constant_pool
@@ -602,7 +599,7 @@ impl ThreadHandle {
                 let [ptr] = frame.pop();
 
                 return ThreadStepResult::Return(Some(JValue::Reference(unsafe {
-                    Object::from_raw(ptr.objectref as *mut RawObject<()>)
+                    thread.jvm.environment.object_from_operand(&ptr)
                 })));
             }
             Bytecode::Putfield(constant_index) => {
@@ -625,11 +622,9 @@ impl ThreadHandle {
 
                 let [object, value] = frame.pop();
 
-                let object = unsafe { Object::from_raw(object.objectref as *mut RawObject<()>) };
+                let object = unsafe { thread.jvm.environment.object_from_operand(&object) };
 
-                unsafe {
-                    thread.jvm.heap.set_class_field(&object, field, value);
-                }
+                thread.jvm.environment.set_object_field(object, &target_class, field_ref, value);
             }
             Bytecode::Getfield(constant_index) => {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
@@ -686,8 +681,17 @@ impl ThreadHandle {
                 frame.locals[*index as usize] = frame.pop::<1>()[0];
             }
             Bytecode::Iload(index) | Bytecode::Iload_n(index) => {
-                frame.stack[*frame.stack_length] = frame.locals[*index as usize];
-                *frame.stack_length += 1;
+                frame.push([frame.locals[*index as usize]]);
+            }
+            Bytecode::Iadd => {
+                let [a, b] = frame.pop();
+                frame.push([
+                    unsafe {
+                        Operand {
+                            data: ((a.data as i32) + (b.data as i32)) as u64
+                        }
+                    }
+                ]);
             }
             Bytecode::Sipush(short) => {
                 frame.push([Operand {
@@ -726,13 +730,13 @@ impl ThreadHandle {
                         }]);
                     }
                     Constant::String(string) => {
-                        let string_object = thread.jvm.heap.get_string(&string, &thread.jvm);
+                        todo!()
 
-                        Self::init_static(&string_object.class, thread);
-
-                        frame.push([Operand {
-                            objectref: string_object.value.ptr,
-                        }]);
+                        // Self::init_static(&string_object.class, thread);
+                        //
+                        // frame.push([Operand {
+                        //     objectref: string_object.value.ptr,
+                        // }]);
                     }
                     _ => unimplemented!(),
                 }
@@ -746,14 +750,10 @@ impl ThreadHandle {
                     ));
                 }
 
-                let array = unsafe {
-                    Object::from_raw(arrayref.objectref as *mut RawObject<()>)
-                        .cast_array::<Object>()
-                };
+                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let index = unsafe { index.data as i32 };
 
-                unsafe {
-                    (*array).body.body[index.data as usize] = unsafe { value.as_object() };
-                }
+                thread.jvm.environment.set_object_array_element(array, index, value);
             }
             Bytecode::Aaload => {
                 let [arrayref, index] = frame.pop();
@@ -764,15 +764,13 @@ impl ThreadHandle {
                     ));
                 }
 
-                let array = unsafe {
-                    Object::from_raw(arrayref.objectref as *mut RawObject<()>)
-                        .cast_array::<Object>()
-                };
+                let index = unsafe { index.data as i32 };
+
+                let array_object = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let element = thread.jvm.environment.get_array_element(array_object, index);
 
                 unsafe {
-                    frame.push([Operand {
-                        objectref: (*array).body.body[index.data as usize].ptr,
-                    }]);
+                    frame.push([element]);
                 }
             }
             Bytecode::Anewarray(constant_index) => {
@@ -786,18 +784,14 @@ impl ThreadHandle {
                     .jvm
                     .find_class(&classpath, thread.class_loader.clone())
                     .unwrap();
-                let object = unsafe {
-                    Object::from_raw(
-                        thread
-                            .jvm
-                            .heap
-                            .allocate_raw_object_array(&array_class, count),
-                    )
-                };
+
+                let object = thread.jvm.environment.allocate_object_array(&array_class, count);
 
                 frame.push([Operand {
                     objectref: object.ptr,
                 }]);
+
+                std::mem::forget(object);
             }
             Bytecode::Putstatic(constant_index) => {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
@@ -868,11 +862,13 @@ impl ThreadHandle {
                         Self::init_static(&target_class, thread);
                     }
 
-                    let object = thread.jvm.heap.allocate_class(&target_class);
+                    let object = thread.jvm.environment.new_object(&target_class);
 
                     frame.push([Operand {
                         objectref: object.ptr,
                     }]);
+
+                    std::mem::forget(object);
                 } else {
                     panic!()
                 }

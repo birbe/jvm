@@ -1,10 +1,6 @@
 use crate::classfile::resolved::Ref;
 use crate::execution::ABIHandlePtr;
-use crate::heap::{Object, StringObject};
-
-use crate::thread::{FrameStack, Operand, Thread};
-use std::io::Write;
-
+use crate::thread::{Operand, Thread};
 // extern "C" fn println(frame_stack: &mut FrameStack, thread: &mut Thread) -> Operand {
 //     let frame_stack = unsafe { &mut *frame_stack };
 //     let frame = unsafe { &*frame_stack.get_top() };

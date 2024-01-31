@@ -8,34 +8,26 @@
 
 extern crate core;
 
-use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, Method, NameAndType, Ref};
+use crate::classfile::resolved::{AccessFlags, Class, Field, Method, NameAndType, Ref};
 use crate::classfile::ClassFile;
-use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
+use crate::thread::{FrameStack, Thread, ThreadHandle};
 use bitflags::Flags;
 
-use heap::Heap;
 use jvm_types::JParse;
 use linker::ClassLoader;
 use parking_lot::{Mutex, RwLock};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 
-use std::io::{stdout, Cursor, Write};
+use std::io::{Cursor, Write};
 
-use std::pin::Pin;
-
-use crate::env::wasm::{RefSlots, WasmEnvironment, OBJECT_REF_SLOTS};
 use crate::env::{Compiler, Environment};
-use crate::execution::{ExecutionContext, InterpreterContext, MethodHandle};
+use crate::execution::{ExecutionContext, MethodHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use highway::{HighwayHash, HighwayHasher, Key};
-use js_sys::Atomics::load;
 use wasm_bindgen::prelude::wasm_bindgen;
-use wasm_bindgen_futures::spawn_local;
-use crate::bytecode::JValue;
-use crate::heap::Object;
 
 pub mod classfile;
 mod tests;
@@ -43,7 +35,6 @@ mod tests;
 pub mod bytecode;
 pub mod env;
 pub mod execution;
-pub mod heap;
 pub mod linker;
 pub mod native;
 pub mod thread;
@@ -67,7 +58,6 @@ pub struct ClassLoaderStore {
 pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
-    pub heap: Heap,
     pub environment: Box<dyn Environment>,
     class_ids: AtomicU32,
 }
@@ -77,7 +67,6 @@ impl JVM {
         Arc::new(Self {
             stdout,
             threads: RwLock::new(vec![]),
-            heap: Heap::new(),
             environment,
             class_ids: AtomicU32::new(0),
         })
@@ -368,8 +357,15 @@ impl ClassLoader for NativeClassLoader {
     }
 }
 
+macro_rules! console_log {
+    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
+}
+
 #[wasm_bindgen]
 pub fn wasm_test() {
+    use crate::env::wasm::WasmEnvironment;
+    use std::io::stdout;
+
     console_error_panic_hook::set_once();
 
     let mock = NativeClassLoader {
@@ -393,6 +389,9 @@ pub fn wasm_test() {
     let _main = jvm.find_class("Main", bootstrapper.clone());
     //
     let mut thread = jvm.create_thread(bootstrapper.clone());
-    let result = thread.call("Main", "main", "()V", &[])
+
+    let result = thread.call("Main", "main", "()I", &[])
         .unwrap();
+
+    console_log!("{:?}", result);
 }

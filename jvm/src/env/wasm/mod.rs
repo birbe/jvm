@@ -2,7 +2,7 @@ use std::alloc::{alloc, Layout};
 use crate::classfile::resolved::{AccessFlags, Class, ClassId, Method, Ref, ReturnType};
 use crate::env::{Compiler, Environment};
 use crate::execution::{ExecutionContext, MethodHandle};
-use crate::heap::Object;
+use crate::env::Object;
 use crate::linker::ClassLoader;
 use crate::thread::{FrameStack, Operand, RawFrame, Thread};
 use js_sys::WebAssembly;
@@ -222,6 +222,10 @@ impl Environment for WasmEnvironment {
         }
     }
 
+    fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class {
+        todo!()
+    }
+
     fn get_object_field(&self, object: Object, class: &Class, field: &Ref) -> Operand {
         // let accessors = self.accessors.read();
         // let class_accessors = accessors.get(&class.get_id()).unwrap();
@@ -229,6 +233,35 @@ impl Environment for WasmEnvironment {
         //
         // let out = unsafe { (*(accessor as *const fn(u32) -> u64))(object.ptr as u32) };
 
+        todo!()
+    }
+
+    fn set_object_field(&self, object: Object, class: &Class, field: &Ref, value: Operand) {
+        todo!()
+    }
+
+    fn allocate_object_array(&self, class: &Class, size: i32) -> Object {
+        todo!()
+    }
+
+    fn get_array_element(&self, array: Object, index: i32) -> Operand {
+        todo!()
+    }
+
+    fn set_object_array_element(&self, array: Object, index: i32, value: Operand) -> Operand {
+        todo!()
+    }
+
+    fn new_object(&self, class: &Class) -> Object {
+        let ptrs = self.class_function_pointers.read();
+        let class_ptrs = ptrs.get(&class.get_id()).unwrap();
+        let new = class_ptrs.get("new").unwrap();
+
+        let new_func: fn() -> i32 = unsafe { std::mem::transmute(*new) };
+        unsafe { Object::from_raw(new_func() as *mut (), Some(dealloc_ref)) }
+    }
+
+    unsafe fn object_from_operand(&self, operand: &Operand) -> Object {
         todo!()
     }
 }

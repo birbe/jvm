@@ -1,4 +1,4 @@
-use crate::heap::Object;
+use crate::env::Object;
 use crate::thread::Operand;
 use byteorder::{BigEndian, ReadBytesExt};
 use jvm_types::JParse;
