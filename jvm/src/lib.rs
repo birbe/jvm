@@ -27,7 +27,6 @@ use crate::execution::{ExecutionContext, MethodHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use highway::{HighwayHash, HighwayHasher, Key};
-use wasm_bindgen::prelude::wasm_bindgen;
 
 pub mod classfile;
 mod tests;
@@ -36,8 +35,15 @@ pub mod bytecode;
 pub mod env;
 pub mod execution;
 pub mod linker;
-pub mod native;
 pub mod thread;
+
+pub type Byte = i8;
+pub type Short = i16;
+pub type Char = u16;
+pub type Int = i32;
+pub type Long = i64;
+pub type Float = f32;
+pub type Double = f64;
 
 #[derive(Clone, Debug)]
 pub enum ClassLoadError {
@@ -163,17 +169,8 @@ impl JVM {
                 }),
             });
 
-            let method_handle = if !method.access_flags.contains(AccessFlags::NATIVE) {
-                self.environment
-                    .create_method_handle(loader, ref_.clone(), method.clone(), class.clone())
-            } else {
-                match native::link(&ref_) {
-                    None => continue,
-                    Some(ptr) => unsafe {
-                        MethodHandle::new(ptr, ExecutionContext::Native, method.clone(), class.clone())
-                    },
-                }
-            };
+            let method_handle = self.environment
+                    .create_method_handle(loader, ref_.clone(), method.clone(), class.clone());
 
             loader.link_ref(ref_, Arc::new(method_handle));
         }
@@ -355,43 +352,4 @@ impl ClassLoader for NativeClassLoader {
     fn id(&self) -> usize {
         0
     }
-}
-
-macro_rules! console_log {
-    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
-}
-
-#[wasm_bindgen]
-pub fn wasm_test() {
-    use crate::env::wasm::WasmEnvironment;
-    use std::io::stdout;
-
-    console_error_panic_hook::set_once();
-
-    let mock = NativeClassLoader {
-        ..Default::default()
-    };
-
-    let bootstrapper = Arc::new(mock) as Arc<dyn ClassLoader>;
-
-    let descriptor = js_sys::Object::new();
-
-    js_sys::Reflect::set(&descriptor, &"element".into(), &"anyref".into()).unwrap();
-    js_sys::Reflect::set(&descriptor, &"initial".into(), &"0".into()).unwrap();
-
-    let table = js_sys::WebAssembly::Table::new(&descriptor).unwrap();
-
-    let jvm = JVM::new(
-        Mutex::new(Box::new(stdout())),
-        Box::new(WasmEnvironment::new(table)),
-    );
-
-    let _main = jvm.find_class("Main", bootstrapper.clone());
-    //
-    let mut thread = jvm.create_thread(bootstrapper.clone());
-
-    let result = thread.call("Main", "main", "()I", &[])
-        .unwrap();
-
-    console_log!("{:?}", result);
 }

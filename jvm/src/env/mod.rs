@@ -3,13 +3,12 @@ use crate::execution::MethodHandle;
 use crate::linker::ClassLoader;
 use crate::thread::{Operand, Thread};
 use std::sync::Arc;
-use std::alloc::Layout;
-use std::mem::{align_of, size_of};
-use crate::env::native::heap::{NonArrayObject, ObjectHeader, ObjectInternal, RawArray, RawObject};
 
 pub mod aot;
 pub mod interpreter;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod native;
+#[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
 pub trait Environment {
@@ -70,10 +69,10 @@ impl Object {
         drop: None,
     };
 
-    pub unsafe fn from_raw(ptr: *mut (), drop: Option<extern "C" fn(i32)>) -> Self {
+    pub unsafe fn from_raw(ptr: *mut (), drop: Option<extern "C" fn(*mut ())>) -> Self {
         Self {
-            ptr: ptr.to_raw_parts().0,
-            drop: None,
+            ptr,
+            drop,
         }
     }
 

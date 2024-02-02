@@ -1,16 +1,6 @@
-use crate::classfile::resolved::{AccessFlags, Class, Field, FieldType};
-use crate::JVM;
-use bitflags::Flags;
-use parking_lot::RwLock;
-use std::alloc::{alloc, Layout};
-use std::collections::{HashMap, HashSet};
+use crate::classfile::resolved::{Class, FieldType};
 use std::fmt::Debug;
-use std::mem::{align_of, size_of};
-
-use crate::thread::Operand;
 use std::sync::atomic::AtomicU8;
-use std::sync::Arc;
-use wasm_bindgen::intern;
 use crate::env::Object;
 
 pub unsafe trait ObjectInternal {}
@@ -19,8 +9,9 @@ pub unsafe trait NonArrayObject {}
 #[derive(Debug)]
 #[repr(C)]
 pub struct ObjectHeader {
-    pub type_: ObjectType,
+    pub _mmtk_metadata: u8,
     pub synchronized: AtomicU8,
+    pub type_: ObjectType,
 }
 
 #[derive(Debug)]
@@ -80,14 +71,6 @@ impl_primitive!(i32, JavaPrimitive::Int, FieldType::Int);
 impl_primitive!(i64, JavaPrimitive::Long, FieldType::Long);
 impl_primitive!(f32, JavaPrimitive::Float, FieldType::Float);
 impl_primitive!(f64, JavaPrimitive::Double, FieldType::Double);
-
-pub type Byte = i8;
-pub type Short = i16;
-pub type Char = u16;
-pub type Int = i32;
-pub type Long = i64;
-pub type Float = f32;
-pub type Double = f64;
 
 ///Raw representation of an array on the heap. Due to how type-casting works in Java,
 /// this will always be encapsulated by a [RawObject], however if this array is a primitive array

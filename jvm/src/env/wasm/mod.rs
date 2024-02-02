@@ -16,6 +16,10 @@ use crate::env::wasm::native::native_func;
 
 pub static mut OBJECT_REF_SLOTS: MaybeUninit<RefSlots> = MaybeUninit::uninit();
 
+macro_rules! console_log {
+    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
+}
+
 pub mod cfg;
 pub mod compile;
 mod scc;
@@ -23,9 +27,7 @@ pub mod wasm;
 mod stub;
 mod native;
 
-macro_rules! console_log {
-    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
-}
+mod test;
 
 pub struct RefSlots {
     pub available: Vec<i32>,
@@ -58,10 +60,10 @@ pub extern "C" fn alloc_ref() -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn dealloc_ref(index: i32) {
+pub extern "C" fn dealloc_ref(index: *mut ()) {
     let mut refs = unsafe { OBJECT_REF_SLOTS.assume_init_mut() };
 
-    refs.available.push(index);
+    refs.available.push(index as i32);
 }
 
 #[no_mangle]
@@ -72,7 +74,15 @@ pub extern "C" fn malloc(size: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn push_frame(stack: &mut FrameStack, locals_length: i32, class: &Class, method: &Method) -> i32 {
     stack.push(RawFrame::new(method, class, vec![Operand { data: 0 }; locals_length as usize].into_boxed_slice(), vec![Operand { data: 0 }; 256].into_boxed_slice()));
-    unsafe { stack.frames.as_mut_ptr().add(1) as i32 }
+    unsafe { stack.frames.as_mut_ptr().add(stack.frame_index as usize) as i32 }
+}
+
+#[no_mangle]
+// pub extern "C" fn debug(stack: &mut FrameStack) {
+pub extern "C" fn debug(loc: i32, val: i32) {
+    // console_log!("{:?} {:?}", frame_stack.frames[frame_stack.frame_index as usize], operand);
+    // console_log!("{:?}", &stack.frames[..stack.frame_index as usize]);}
+    console_log!("debug loc: {loc}, value: {val}");
 }
 
 #[no_mangle]
@@ -86,11 +96,18 @@ pub struct WasmEnvironment {
 }
 
 impl WasmEnvironment {
-    pub fn new(object_table: WebAssembly::Table) -> Self {
+    pub fn new() -> Self {
+        let descriptor = js_sys::Object::new();
+
+        js_sys::Reflect::set(&descriptor, &"element".into(), &"anyref".into()).unwrap();
+        js_sys::Reflect::set(&descriptor, &"initial".into(), &"1".into()).unwrap();
+
+        let object_table = js_sys::WebAssembly::Table::new(&descriptor).unwrap();
+
         unsafe {
             OBJECT_REF_SLOTS.write(RefSlots {
                 available: vec![],
-                len: 0,
+                len: 1,
                 table: object_table.clone(),
             });
         }
@@ -112,7 +129,7 @@ impl Environment for WasmEnvironment {
         let meta_memory = wasm_bindgen::memory();
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
 
-        for cross_import in ["alloc_ref", "dealloc_ref", "malloc", "free", "interpret", "debug_framestack", "push_frame"] {
+        for cross_import in ["alloc_ref", "dealloc_ref", "malloc", "free", "interpret", "debug_framestack", "push_frame", "debug"] {
             let key: JsValue = cross_import.into();
 
             js_sys::Reflect::set(
@@ -190,9 +207,10 @@ impl Environment for WasmEnvironment {
         let operand = match &method_handle.context {
             ExecutionContext::Interpret(_) => unreachable!(), //Unused on WASM
             ExecutionContext::Compiled => {
-                thread.frame_stack.push(RawFrame::new(&method_handle.method, &method_handle.class, args, Box::new([
-                    Operand { data: 0 }; 512
-                ])));
+                let frame = RawFrame::new(&method_handle.method, &method_handle.class, args, Box::new([
+                    Operand { data: 0 }; 10
+                ]));
+                thread.frame_stack.push(frame);
 
                 let out = unsafe { (method_handle.ptr)(thread) };
 
@@ -211,6 +229,15 @@ impl Environment for WasmEnvironment {
     }
 
     fn create_method_handle(&self, class_loader: &dyn ClassLoader, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
+        if method.access_flags.contains(AccessFlags::NATIVE) {
+            return MethodHandle {
+                ptr: unsafe { std::mem::transmute(0) },
+                context: ExecutionContext::Native,
+                class,
+                method,
+            };
+        }
+
         let cfps = self.class_function_pointers.read();
         let class_pointers = cfps.get(&class.get_id()).unwrap();
 
@@ -258,7 +285,9 @@ impl Environment for WasmEnvironment {
         let new = class_ptrs.get("new").unwrap();
 
         let new_func: fn() -> i32 = unsafe { std::mem::transmute(*new) };
-        unsafe { Object::from_raw(new_func() as *mut (), Some(dealloc_ref)) }
+        let object_id = new_func();
+        console_log!("New ptr: {}", object_id);
+        unsafe { Object::from_raw(object_id as *mut (), Some(dealloc_ref)) }
     }
 
     unsafe fn object_from_operand(&self, operand: &Operand) -> Object {

@@ -1,12 +1,12 @@
+use std::arch::wasm32::unreachable;
 use std::fmt::{Debug, Formatter};
 use crate::bytecode::{Bytecode, JValue};
-use crate::{JVM, routine_resolve_field};
+use crate::{Byte, Int, JVM, routine_resolve_field};
 
 use crate::classfile::resolved::{
     AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, NameAndType, Ref,
     ReferenceKind, ReturnType,
 };
-use crate::env::native::heap::{AsJavaPrimitive, Byte, Int, RawObject};
 use crate::linker::ClassLoader;
 use bitflags::Flags;
 use parking_lot::Mutex;
@@ -17,12 +17,7 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use crate::env::Object;
-use crate::env::wasm::dealloc_ref;
 use crate::execution::MethodHandle;
-
-macro_rules! console_log {
-    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
-}
 
 #[derive(Debug)]
 pub enum RuntimeException {
@@ -115,6 +110,7 @@ impl Drop for RawFrame {
 }
 
 #[derive(Copy, Clone)]
+#[repr(C)]
 pub union Operand {
     pub objectref: *mut (),
     pub data: u64,
@@ -158,15 +154,12 @@ impl<'a> Frame<'a> {
 
 impl<'a> Debug for Frame<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let locals: Vec<u64> = self.locals.iter().map(|op| unsafe { op.data }).collect();
-        let stack: Vec<u64> = self.stack[..*self.stack_length].iter().map(|op| unsafe { op.data }).collect();
-
         f.debug_struct("Frame")
             .field("method", &self.method.get_identifier())
             .field("class", &self.class.this_class)
             .field("program_counter", self.program_counter)
-            .field("locals", &locals)
-            .field("stack", &stack)
+            // .field("locals", &)
+            // .field("stack", &stack)
             .finish()
     }
 }
@@ -280,12 +273,7 @@ impl ThreadHandle {
         method_descriptor: &str,
         args: &[JValue],
     ) -> Result<Option<JValue>, JavaBarrierError> {
-        let ref_ = Ref {
-            class: Arc::new(classpath.into()),
-            name_and_type: Arc::new(NameAndType { name: Arc::new(method_name.into()), descriptor: Arc::new(method_descriptor.into()) }),
-        };
-
-        let method_handle = self.class_loader.get_method_handle(&ref_);
+        let method_handle = self.class_loader.get_method_by_name(classpath, method_name, method_descriptor);
         let method = &*method_handle.method;
 
         let operands: Vec<Operand> = args.iter().map(|arg| arg.as_operand()).collect();
@@ -323,6 +311,16 @@ impl ThreadHandle {
 
     #[no_mangle]
     pub extern "C" fn interpret(thread: &mut Thread) -> Operand {
+        {
+            let mut stdout = thread.jvm.stdout.lock();
+            write!(&mut stdout, "{}",
+                format!(
+                    "Locals addr: {:?}",
+                    thread.frame_stack.frames[thread.frame_stack.frame_index as usize].locals as usize
+                )
+            ).unwrap();
+        }
+
         let mut raw_frame = thread.frame_stack.pop();
 
         loop {
@@ -393,13 +391,19 @@ impl ThreadHandle {
         let bytes_index = instruction.bytes_index;
         let bytecode = &instruction.bytecode;
 
-        console_log!(
-            "{:<25} | {:<10} | {:<50} | {:<10}",
-            format!("{bytecode:?}"),
-            frame.program_counter,
-            method.name,
-            class.this_class
-        );
+        {
+            let mut stdout = thread.jvm.stdout.lock();
+            write!(&mut stdout, "{}",
+                   format!(
+                       "{:<20} | {:<15} | {:<15}",
+                       format!("{:?}", bytecode),
+                       class.this_class,
+                       method.name
+                       // thread.frame_stack.frame_index,
+                       // thread.frame_stack.frames[thread.frame_stack.frame_index as usize]
+                   )
+            ).unwrap();
+        }
 
         match bytecode {
             Bytecode::Invokestatic(constant_index) => {
@@ -468,18 +472,21 @@ impl ThreadHandle {
                 let method_descriptor =
                     MethodDescriptor::try_from(&**method_ref.name_and_type.descriptor).unwrap();
 
-                let args = &frame.stack[*frame.stack_length - method_descriptor.args.len() - 1..];
-                *frame.stack_length -= method_descriptor.args.len() + 1;
+                let args = frame.pop_dynamic(method_descriptor.args.len() + 1);
 
                 if method_descriptor.return_type != ReturnType::Void {
                     panic!()
                 }
 
-                panic!("invokespecial");
-
                 let method_handle = thread.class_loader.get_method_handle(method_ref);
 
                 thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
+            }
+            Bytecode::Pop => {
+                frame.pop::<1>();
+            }
+            Bytecode::Pop2 => {
+                frame.pop::<2>();
             }
             Bytecode::Invokevirtual(constant_index) => {
                 let [objectref] = frame.pop();
@@ -660,9 +667,10 @@ impl ThreadHandle {
                 }]);
             }
             Bytecode::If_icmpge(offset) => {
-                let a = unsafe { frame.stack[*frame.stack_length - 2].data } as i32;
-                let b = unsafe { frame.stack[*frame.stack_length - 1].data } as i32;
-                *frame.stack_length -= 2;
+                let [a, b] = frame.pop::<2>();
+
+                let a = unsafe { a.data } as i32;
+                let b = unsafe { b.data } as i32;
 
                 if a >= b {
                     let target_offset = bytes_index as isize + *offset as isize;
@@ -874,8 +882,8 @@ impl ThreadHandle {
                 }
             }
             Bytecode::Dup => {
-                frame.stack[*frame.stack_length] = frame.stack[*frame.stack_length - 1];
-                *frame.stack_length += 1;
+                let [op] = frame.pop::<1>();
+                frame.push([op, op]);
             }
             Bytecode::Aconst_null => {
                 frame.push([Operand {

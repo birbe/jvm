@@ -7,9 +7,9 @@ use crate::thread::{Operand, Thread};
 
 pub mod heap;
 
-//TODO: use the MMTK
-struct NativeEnvironment {
+struct JVMBinding;
 
+struct NativeEnvironment {
 }
 
 impl Environment for NativeEnvironment {

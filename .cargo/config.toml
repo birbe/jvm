@@ -2,5 +2,5 @@
 build-std = ['std', 'panic_abort']
 
 [build]
+rustflags = '-C target-feature=+bulk-memory,+mutable-globals,+simd128,+reference-types -C link-arg=--growable-table'
 target = "wasm32-unknown-unknown"
-rustflags = '-Ctarget-feature=+atomics,+bulk-memory,+mutable-globals'

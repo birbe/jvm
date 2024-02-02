@@ -725,8 +725,6 @@ fn translate_block(
                     _ => {}
                 };
 
-                todo!()
-
                 // translate_bytecode(
                 //     bytecode,
                 //     idx,
@@ -741,6 +739,8 @@ fn translate_block(
                 //     0,
                 //     *block_index,
                 // );
+
+                todo!()
             }
         }
     }
