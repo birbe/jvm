@@ -37,15 +37,15 @@ impl Environment for NativeEnvironment {
         todo!()
     }
 
-    fn allocate_object_array(&self, class: &Class, size: i32) -> Object {
+    fn new_object_array(&self, class: &Class, size: i32) -> Object {
         todo!()
     }
 
-    fn get_array_element(&self, array: Object, index: i32) -> Operand {
+    fn get_array_element(&self, array: &Object, index: i32) -> Operand {
         todo!()
     }
 
-    fn set_object_array_element(&self, array: Object, index: i32, value: Operand) -> Operand {
+    fn set_object_array_element(&self, array: &Object, index: i32, value: Operand) -> Operand {
         todo!()
     }
 
@@ -56,4 +56,9 @@ impl Environment for NativeEnvironment {
     unsafe fn object_from_operand(&self, operand: &Operand) -> Object {
         todo!()
     }
+
+    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Object {
+        todo!()
+    }
+    
 }

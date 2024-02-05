@@ -8,9 +8,9 @@
 
 extern crate core;
 
-use crate::classfile::resolved::{AccessFlags, Class, Field, Method, NameAndType, Ref};
+use crate::classfile::resolved::{AccessFlags, Class, ClassId, Field, FieldType, Method, NameAndType, Ref};
 use crate::classfile::ClassFile;
-use crate::thread::{FrameStack, Thread, ThreadHandle};
+use crate::thread::{FrameStack, Operand, Thread, ThreadHandle};
 use bitflags::Flags;
 
 use jvm_types::JParse;
@@ -22,11 +22,15 @@ use std::hash::{Hash, Hasher};
 
 use std::io::{Cursor, Write};
 
-use crate::env::{Compiler, Environment};
+use crate::env::{Compiler, Environment, Object};
 use crate::execution::{ExecutionContext, MethodHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use highway::{HighwayHash, HighwayHasher, Key};
+
+macro_rules! console_log {
+    ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
+}
 
 pub mod classfile;
 mod tests;
@@ -65,7 +69,9 @@ pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
     pub environment: Box<dyn Environment>,
+    pub class_objects: RwLock<HashMap<ClassId, Object>>,
     class_ids: AtomicU32,
+    thread_ids: AtomicU32,
 }
 
 impl JVM {
@@ -74,7 +80,9 @@ impl JVM {
             stdout,
             threads: RwLock::new(vec![]),
             environment,
+            class_objects: RwLock::new(HashMap::new()),
             class_ids: AtomicU32::new(0),
+            thread_ids: AtomicU32::new(0),
         })
     }
 
@@ -100,43 +108,79 @@ impl JVM {
         }
     }
 
-    pub fn generate_class(
-        &self,
-        classpath: &str,
-        class_loader: Arc<dyn ClassLoader>,
-    ) -> Result<Arc<Class>, ClassLoadError> {
-        let bytes = class_loader
-            .get_bytes(classpath)
-            .ok_or(ClassLoadError::ClassDefNotFound(classpath.into()))?;
-
+    pub fn make_class_struct(&self, thread: &mut Thread, class_loader: &dyn ClassLoader, bytes: &[u8]) -> Result<Arc<Class>, ClassLoadError> {
         let classfile =
             ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
 
         let class = Arc::new(
             Class::init(
                 &classfile,
-                &self,
-                class_loader.clone(),
+                thread,
+                class_loader,
                 self.class_ids.fetch_add(1, Ordering::Relaxed),
             )
-            .ok_or(ClassLoadError::MalformedClassDef)?,
+                .ok_or(ClassLoadError::MalformedClassDef)?,
         );
 
-        class_loader.register_class(classpath, class.clone());
-
-        self.link_class(&*class_loader, class.clone());
-
         Ok(class)
+    }
+
+    pub fn define_class(&self, thread: &mut Thread, class_loader: &dyn ClassLoader, bytes: &[u8]) -> Result<Option<Object>, ClassLoadError> {
+        let class = self.make_class_struct(thread, class_loader, bytes)?;
+
+        class_loader.register_class(class.clone());
+
+        self.link_class(class_loader, class.clone());
+
+        console_log!("Defining {}", class.this_class);
+
+        match class_loader.get_class("java/lang/Class") {
+            None => {
+                Ok(None)
+            },
+            Some(java_lang_class) => {
+
+                let class_object = self.environment.new_object(&java_lang_class);
+
+                let init = class_loader.get_method_by_name("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;)V");
+                thread.invoke(&init, Box::new([
+                    Operand {
+                        objectref: class_object.ptr
+                    },
+                    Operand {
+                        objectref: class_loader.get_class_loader_object_handle().ptr
+                    },
+                ]));
+
+                let mut objects = self.class_objects.write();
+
+                unsafe {
+                    objects.insert(
+                        class.get_id(),
+                        self.environment.object_from_operand(&Operand {
+                            objectref: class_object.ptr
+                        })
+                    );
+                }
+
+                Ok(Some(class_object))
+            }
+        }
+
     }
 
     pub fn find_class(
         &self,
         classpath: &str,
-        class_loader: Arc<dyn ClassLoader>,
+        class_loader: &dyn ClassLoader,
+        thread: &mut Thread
     ) -> Result<Arc<Class>, ClassLoadError> {
         let get = class_loader.get_class(classpath);
         match get {
-            None => self.generate_class(classpath, class_loader.clone()),
+            None => {
+                class_loader.find_class(thread, classpath);
+                Ok(class_loader.get_class(classpath).unwrap())
+            },
             Some(get) => Ok(get),
         }
     }
@@ -147,6 +191,7 @@ impl JVM {
             class_loader,
             frame_stack: Box::new(FrameStack::new()),
             killed: false,
+            id: self.thread_ids.fetch_add(1, Ordering::Relaxed),
         }));
 
         let mut threads = self.threads.write();
@@ -206,12 +251,13 @@ pub fn routine_resolve_field<'a>(
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum ResolveMethodError {
     IncompatibleClassChangeError,
 }
 
 pub fn routine_resolve_method<'class>(
-    jvm: &JVM,
+    thread: &Thread,
     ref_: &Ref,
     class: &'class Class,
 ) -> Result<&'class Method, ResolveMethodError> {
@@ -227,8 +273,24 @@ pub fn routine_resolve_method<'class>(
             .collect();
 
         if methods.len() == 1 && methods[0].is_signature_polymorphic(&class.this_class) {
-            //TODO resolve references
-            return Some(methods[0]);
+            let resolved_method = methods[0];
+
+            for arg in &resolved_method.descriptor.args {
+                match arg {
+                    FieldType::Array { type_, dimensions } => {
+                        match &**type_ {
+                            FieldType::Class(classpath) => {
+                                todo!()
+                            },
+                            _ => {}
+                        }
+                    }
+                    FieldType::Class(_) => {},
+                    _ => {}
+                }
+            }
+
+            return Some(&*resolved_method);
         }
 
         if let Some(method) = class.get_method(&ref_.name_and_type) {
@@ -246,110 +308,4 @@ pub fn routine_resolve_method<'class>(
     }
 
     todo!()
-}
-
-#[derive(Default)]
-struct NativeClassLoader {
-    pub classes: RwLock<HashMap<String, Arc<Class>>>,
-    pub handles: RwLock<HashMap<u64, Arc<MethodHandle>>>
-}
-
-impl Debug for NativeClassLoader {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NativeClassLoader")
-    }
-}
-
-impl NativeClassLoader {
-    unsafe fn dropper(ptr: *const ()) {
-        Arc::from_raw(ptr as *const NativeClassLoader);
-    }
-}
-
-impl ClassLoader for NativeClassLoader {
-    fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
-        match classpath {
-            "Main" => Some(include_bytes!("../test_classes/Main.class")[..].into()),
-            "java/lang/Object" => {
-                Some(include_bytes!("../test_classes/java/lang/Object.class")[..].into())
-            }
-            "java/lang/String" => {
-                Some(include_bytes!("../test_classes/java/lang/String.class")[..].into())
-            }
-            "javax/swing/BorderFactory" => {
-                Some(include_bytes!("../test_classes/javax/swing/BorderFactory.class")[..].into())
-            }
-            "javax/swing/JColorChooser" => {
-                Some(include_bytes!("../test_classes/javax/swing/JColorChooser.class")[..].into())
-            }
-            "javax/swing/JComponent" => {
-                Some(include_bytes!("../test_classes/javax/swing/JComponent.class")[..].into())
-            }
-            "java/awt/Container" => {
-                Some(include_bytes!("../test_classes/java/awt/Container.class")[..].into())
-            }
-            "java/awt/Component" => {
-                Some(include_bytes!("../test_classes/java/awt/Component.class")[..].into())
-            }
-            "java/awt/image/ImageObserver" => Some(
-                include_bytes!("../test_classes/java/awt/image/ImageObserver.class")[..].into(),
-            ),
-            "java/awt/MenuContainer" => {
-                Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into())
-            }
-            "java/io/Serializable" => {
-                Some(include_bytes!("../test_classes/java/awt/MenuContainer.class")[..].into())
-            }
-
-            _ => panic!("{classpath} not found"),
-        }
-    }
-
-    fn register_class(&self, classpath: &str, class: Arc<Class>) {
-        let mut classes = self.classes.write();
-        classes.insert(classpath.into(), class);
-    }
-
-    fn get_class(&self, classpath: &str) -> Option<Arc<Class>> {
-        let classes = self.classes.read();
-        classes.get(classpath).cloned()
-    }
-
-    fn link_ref(&self, ref_: Arc<Ref>, method_handle: Arc<MethodHandle>) {
-        let mut hasher = HighwayHasher::new(Key([0; 4]));
-        hasher.append(ref_.class.as_bytes());
-        hasher.append(ref_.name_and_type.name.as_bytes());
-        hasher.append(ref_.name_and_type.descriptor.as_bytes());
-        let key = hasher.finish();
-
-        self.handles.write().insert(key, method_handle);
-    }
-
-    fn get_method_handle(&self, ref_: &Ref) -> Arc<MethodHandle> {
-        let handles = self.handles.read();
-
-        let mut hasher = HighwayHasher::new(Key([0; 4]));
-        hasher.append(ref_.class.as_bytes());
-        hasher.append(ref_.name_and_type.name.as_bytes());
-        hasher.append(ref_.name_and_type.descriptor.as_bytes());
-        let key = hasher.finish();
-
-        handles.get(&key).unwrap().clone()
-    }
-
-    fn get_method_by_name(&self, classpath: &str, name: &str, descriptor: &str) -> Arc<MethodHandle> {
-        let handles = self.handles.read();
-
-        let mut hasher = HighwayHasher::new(Key([0; 4]));
-        hasher.append(classpath.as_bytes());
-        hasher.append(name.as_bytes());
-        hasher.append(descriptor.as_bytes());
-        let key = hasher.finish();
-
-        handles.get(&key).unwrap().clone()
-    }
-
-    fn id(&self) -> usize {
-        0
-    }
 }

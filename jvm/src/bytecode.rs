@@ -9,8 +9,8 @@ use std::ops::Deref;
 
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
 pub struct LookupEntry {
-    lookup_match: i32,
-    offset: i32,
+    pub key: i32,
+    pub offset: i32,
 }
 
 #[derive(Debug)]
@@ -194,7 +194,6 @@ pub enum Bytecode {
     Lmul,                                //0x69
     Lneg,                                //0x75
     Lookupswitch(i32, Vec<LookupEntry>), //0xab
-    //TODO: might not be right
     Lor,                     //0x81
     Lrem,                    //0x71
     Lreturn,                 //0xad
@@ -374,14 +373,22 @@ impl Bytecode {
             0x1e..=0x21 => Self::Lload_n(opcode - 0x1e),
             0x69 => Self::Lmul,
             0x75 => Self::Lneg,
-            0xab => Self::Lookupswitch(reader.read_i32::<BigEndian>()?, {
-                let pad = ((4 - ((reader.stream_position().unwrap() as u16) % 4)) % 4) as usize;
-                reader.read(&mut vec![0; pad]).unwrap();
+            0xab => {
+                #[derive(JParse)]
+                struct LookupEntries {
+                    #[prefix = 4]
+                    entries: Vec<LookupEntry>
+                }
 
-                let mut cloned_reader = reader.clone();
+                let position = reader.stream_position().unwrap();
+                let padding = (position.next_multiple_of(2) - position) as usize;
+                reader.read(&mut vec![0; padding])?;
 
-                <Vec<LookupEntry>>::from_bytes(&mut cloned_reader).unwrap()
-            }),
+                let default = reader.read_i32::<BigEndian>()?;
+                let entries = LookupEntries::from_bytes(&mut reader)?.entries;
+
+                Self::Lookupswitch(default, entries)
+            },
             0x81 => Self::Lor,
             0x71 => Self::Lrem,
             0xad => Self::Lreturn,

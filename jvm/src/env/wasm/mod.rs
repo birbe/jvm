@@ -4,17 +4,21 @@ use crate::env::{Compiler, Environment};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::env::Object;
 use crate::linker::ClassLoader;
-use crate::thread::{FrameStack, Operand, RawFrame, Thread};
-use js_sys::WebAssembly;
-use parking_lot::RwLock;
+use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
+use js_sys::{Function, WebAssembly};
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+use once_cell::sync::Lazy;
 use wasm_bindgen::JsValue;
 use wasm_encoder::Encode;
+use crate::env::wasm::compile::generate_helper_wasm;
+use crate::env::wasm::compile::stub::create_stub_module;
 use crate::env::wasm::native::native_func;
 
 pub static mut OBJECT_REF_SLOTS: MaybeUninit<RefSlots> = MaybeUninit::uninit();
+pub static OBJECT_REFS: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! console_log {
     ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
@@ -24,7 +28,6 @@ pub mod cfg;
 pub mod compile;
 mod scc;
 pub mod wasm;
-mod stub;
 mod native;
 
 mod test;
@@ -44,14 +47,18 @@ struct ClassReflector {
 
 #[no_mangle]
 pub extern "C" fn alloc_ref() -> i32 {
-    // let refs_cell = REFS.get().unwrap();
     let mut refs = unsafe { OBJECT_REF_SLOTS.assume_init_mut() };
+
+    assert!(refs.len > 0);
+    assert_ne!(refs.available.as_ptr() as i32, 0);
 
     if refs.available.len() == 0 {
         refs.table.grow(1).unwrap();
 
         let len = refs.len;
         refs.len += 1;
+
+        assert_ne!(len, 0);
 
         len as i32
     } else {
@@ -63,7 +70,9 @@ pub extern "C" fn alloc_ref() -> i32 {
 pub extern "C" fn dealloc_ref(index: *mut ()) {
     let mut refs = unsafe { OBJECT_REF_SLOTS.assume_init_mut() };
 
-    refs.available.push(index as i32);
+    if index as i32 != 0 {
+        refs.available.push(index as i32);
+    }
 }
 
 #[no_mangle]
@@ -78,11 +87,7 @@ pub extern "C" fn push_frame(stack: &mut FrameStack, locals_length: i32, class: 
 }
 
 #[no_mangle]
-// pub extern "C" fn debug(stack: &mut FrameStack) {
 pub extern "C" fn debug(loc: i32, val: i32) {
-    // console_log!("{:?} {:?}", frame_stack.frames[frame_stack.frame_index as usize], operand);
-    // console_log!("{:?}", &stack.frames[..stack.frame_index as usize]);}
-    console_log!("debug loc: {loc}, value: {val}");
 }
 
 #[no_mangle]
@@ -92,7 +97,13 @@ pub extern "C" fn free(ptr: i32, len: i32) {
 
 pub struct WasmEnvironment {
     pub class_function_pointers: RwLock<HashMap<ClassId, HashMap<String, u32>>>,
-    pub object_table: WebAssembly::Table
+    pub object_table: WebAssembly::Table,
+    fn_get_object_class: unsafe fn(i32) -> i32,
+    fn_new_object_array: unsafe fn(i32, i32) -> i32,
+    fn_set_object_array_elem: unsafe fn(i32, i32, i32),
+    fn_new_array: unsafe fn(i32, i32) -> i32,
+
+    fn_set_int_array_elem: unsafe fn(i32, i32, i32)
 }
 
 impl WasmEnvironment {
@@ -103,6 +114,7 @@ impl WasmEnvironment {
         js_sys::Reflect::set(&descriptor, &"initial".into(), &"1".into()).unwrap();
 
         let object_table = js_sys::WebAssembly::Table::new(&descriptor).unwrap();
+        let meta_exports = wasm_bindgen::exports();
 
         unsafe {
             OBJECT_REF_SLOTS.write(RefSlots {
@@ -112,16 +124,64 @@ impl WasmEnvironment {
             });
         }
 
+        let helper_module = generate_helper_wasm();
+        let wasm_bytes = helper_module.finish();
+        let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
+
+        let module = WebAssembly::Module::new(&uint8array).unwrap();
+
+        let imports = js_sys::Object::new();
+        let jvm_import_object = js_sys::Object::new();
+
+        js_sys::Reflect::set(&imports, &"jvm".into(), &jvm_import_object).unwrap();
+        js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &object_table).unwrap();
+        js_sys::Reflect::set(&jvm_import_object, &"alloc_ref".into(), &js_sys::Reflect::get(&meta_exports, &"alloc_ref".into()).unwrap()).unwrap();
+
+        let instance = WebAssembly::Instance::new(&module, &imports).unwrap();
+
+        let exports = js_sys::Reflect::get(&instance, &"exports".into()).unwrap();
+        let obj_class_func = js_sys::Reflect::get(&exports, &"obj_class".into()).unwrap();
+        let new_object_array_func = js_sys::Reflect::get(&exports, &"new_object_array".into()).unwrap();
+        let set_object_array_elem = js_sys::Reflect::get(&exports, &"set_object_array_element".into()).unwrap();
+        let new_array = js_sys::Reflect::get(&exports, &"new_array".into()).unwrap();
+        let ia_store = js_sys::Reflect::get(&exports, &"int_array_store".into()).unwrap();
+
+        let get_object_class = Function::from(obj_class_func);
+        let new_object_array = Function::from(new_object_array_func);
+        let set_object_array = Function::from(set_object_array_elem);
+        let new_array = Function::from(new_array);
+        let ia_store = Function::from(ia_store);
+        
+        let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
+        let get_object_class_indirect_index = func_table.grow(5).unwrap();
+        
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index, &get_object_class).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 1, &new_object_array).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 2, &set_object_array).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 3, &new_array).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 4, &ia_store).unwrap();
+        
         Self {
             class_function_pointers: RwLock::new(HashMap::new()),
-            object_table
+            object_table,
+            fn_get_object_class: unsafe { std::mem::transmute(get_object_class_indirect_index) },
+            fn_new_object_array: unsafe { std::mem::transmute(get_object_class_indirect_index + 1) },
+            fn_set_object_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 2) },
+            fn_new_array: unsafe { std::mem::transmute(get_object_class_indirect_index + 3) },
+
+            fn_set_int_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 4) },
         }
     }
 }
 
 impl Environment for WasmEnvironment {
     fn link_class(&self, class: Arc<Class>) {
-        let stub = stub::create_stub_module(&class);
+        console_log!(
+            "Loading class {}",
+            class.this_class
+        );
+
+        let stub = create_stub_module(&class);
 
         let jvm_import_object = js_sys::Object::new();
 
@@ -148,11 +208,6 @@ impl Environment for WasmEnvironment {
         js_sys::Reflect::set(&imports, &"jvm".into(), &jvm_import_object).unwrap();
 
         let wasm_bytes = stub.wasm.finish();
-
-        console_log!(
-            "Loading class {}",
-            class.this_class
-        );
 
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
@@ -249,34 +304,92 @@ impl Environment for WasmEnvironment {
         }
     }
 
+    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Object {
+        let jvm = thread.jvm.clone();
+        let string_class = jvm.find_class("java/lang/String", class_loader ,thread).unwrap();
+
+        let string_object = self.new_object(&string_class);
+        string_object
+    }
+
     fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class {
+        unsafe { std::mem::transmute((self.fn_get_object_class)(object.ptr as i32)) }
+    }
+
+    unsafe fn get_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str) -> Operand {
+        let object_class = self.get_object_class(&object);
+
+        let ptrs = self.class_function_pointers.read();
+        let class_ptrs = ptrs.get(&object_class.get_id()).unwrap();
+        let get = class_ptrs.get(&format!("{}_get_{}", class.this_class, field_name)).unwrap();
+
+        match &field_descriptor[0..1] {
+            "L" => {
+                let get: unsafe fn(i32) -> i32 = unsafe { std::mem::transmute(*get) };
+                let field_value = unsafe { get(object.ptr as i32) };
+                Operand {
+                    objectref: field_value as *mut ()
+                }
+            },
+            "I" => {
+                let get: unsafe fn(i32) -> i32 = unsafe { std::mem::transmute(*get) };
+                let field_value = unsafe { get(object.ptr as i32) };
+                Operand {
+                    data: field_value as u64
+                }
+            },
+            _ => unimplemented!("field type getter {}", field_name)
+        }
+    }
+
+    unsafe fn set_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str, value: Operand) {
+        let object_class = self.get_object_class(&object);
+
+        let ptrs = self.class_function_pointers.read();
+        let class_ptrs = ptrs.get(&object_class.get_id()).unwrap();
+
+        let set = class_ptrs.get(&format!("{}_set_{}", class.this_class, field_name)).unwrap();
+
+        match &field_descriptor[0..1] {
+            "L" | "[" => {
+                let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
+                unsafe { set(object.ptr as i32, unsafe { value.objectref as i32 }) };
+            },
+            "I" => {
+                let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
+                unsafe { set(object.ptr as i32, unsafe { value.data as i32 }) };
+            },
+            _ => unimplemented!("field type setter {} {}", &field_descriptor[0..1], field_name)
+        }
+    }
+
+    fn new_object_array(&self, class: &Class, size: i32) -> Object {
+        unsafe { Object::from_raw((self.fn_new_object_array)(size, class as *const Class as i32) as *mut (), None) }
+    }
+
+    fn new_array(&self, type_: i32, size: i32) -> Object {
+        unsafe { Object::from_raw((self.fn_new_array)(type_, size) as *mut (), None) }
+    }
+
+    fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand) {
+        match array_type {
+            10 => {
+                unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data as i32); }
+            },
+            4 | 5 | 6 | 7 | 8 | 9 | 11 => unimplemented!(),
+            _ => unreachable!("Invalid array type")
+        }
+    }
+
+
+    fn get_array_element(&self, array: &Object, index: i32) -> Operand {
         todo!()
     }
 
-    fn get_object_field(&self, object: Object, class: &Class, field: &Ref) -> Operand {
-        // let accessors = self.accessors.read();
-        // let class_accessors = accessors.get(&class.get_id()).unwrap();
-        // let accessor = *class_accessors.get(field).unwrap();
-        //
-        // let out = unsafe { (*(accessor as *const fn(u32) -> u64))(object.ptr as u32) };
-
-        todo!()
-    }
-
-    fn set_object_field(&self, object: Object, class: &Class, field: &Ref, value: Operand) {
-        todo!()
-    }
-
-    fn allocate_object_array(&self, class: &Class, size: i32) -> Object {
-        todo!()
-    }
-
-    fn get_array_element(&self, array: Object, index: i32) -> Operand {
-        todo!()
-    }
-
-    fn set_object_array_element(&self, array: Object, index: i32, value: Operand) -> Operand {
-        todo!()
+    fn set_object_array_element(&self, array: &Object, index: i32, value: Operand) {
+        unsafe {
+            (self.fn_set_object_array_elem)(array.ptr as i32, index, value.objectref as i32)
+        }
     }
 
     fn new_object(&self, class: &Class) -> Object {
@@ -286,11 +399,14 @@ impl Environment for WasmEnvironment {
 
         let new_func: fn() -> i32 = unsafe { std::mem::transmute(*new) };
         let object_id = new_func();
-        console_log!("New ptr: {}", object_id);
+
         unsafe { Object::from_raw(object_id as *mut (), Some(dealloc_ref)) }
     }
 
     unsafe fn object_from_operand(&self, operand: &Operand) -> Object {
-        todo!()
+        Object {
+            ptr: unsafe { operand.objectref },
+            drop: None,
+        }
     }
 }

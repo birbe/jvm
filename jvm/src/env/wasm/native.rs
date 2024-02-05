@@ -4,7 +4,9 @@ use crate::thread::Operand;
 pub fn native_func(method_handle: &MethodHandle) -> Operand {
 
     match (&method_handle.class.this_class[..], &method_handle.method.name[..], &method_handle.method.descriptor.string[..]) {
-        ("java/lang/Object", "registerNatives", "()V") => {
+        ("java/lang/Object", "registerNatives", "()V")
+        | ("java/lang/System", "registerNatives", "()V")
+        | ("java/security/AccessController", "doPrivileged", _ )=> {
             Operand {
                 data: 0
             }

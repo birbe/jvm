@@ -11,7 +11,7 @@ use bitflags::{bitflags, Flags};
 use std::alloc::{alloc, Layout};
 
 use crate::linker::ClassLoader;
-use crate::thread::Operand;
+use crate::thread::{Operand, Thread};
 use crate::JVM;
 use discrim::FromDiscriminant;
 use jvm_types::JParse;
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::mem::size_of;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU32, AtomicU8};
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
 
@@ -60,9 +60,8 @@ pub struct Class {
     pub fields: Vec<Field>,
     pub methods: Vec<Arc<Method>>,
 
-    pub class_loader: Arc<dyn ClassLoader>,
     pub statics: usize,
-    pub static_init_state: AtomicU8,
+    pub static_init_state: AtomicU32,
     pub attributes: Vec<Attribute>,
 
     pub heap_size: usize,
@@ -72,8 +71,8 @@ pub struct Class {
 impl Class {
     pub fn init(
         classfile: &ClassFile,
-        jvm: &JVM,
-        class_loader: Arc<dyn ClassLoader>,
+        thread: &mut Thread,
+        class_loader: &dyn ClassLoader,
         internal_id: ClassId,
     ) -> Option<Self> {
         let constant_pool =
@@ -81,11 +80,14 @@ impl Class {
 
         let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
 
+        let jvm = thread.jvm.clone();
+
         let super_class = if &*this_class != "java/lang/Object" {
             Some(
                 jvm.find_class(
                     &resolve_string(&classfile.constant_pool, classfile.super_class).unwrap(),
-                    class_loader.clone(),
+                    class_loader,
+                    thread
                 )
                 .unwrap(),
             )
@@ -99,7 +101,7 @@ impl Class {
             .map(|classinfo| {
                 let interface_classpath =
                     resolve_string(&classfile.constant_pool, classinfo.name_index).unwrap();
-                jvm.find_class(&interface_classpath, class_loader.clone())
+                jvm.find_class(&interface_classpath, class_loader, thread)
                     .unwrap()
             })
             .collect();
@@ -166,9 +168,8 @@ impl Class {
                     Method::new(method_info, &constant_pool, classfile).map(Arc::new)
                 })
                 .collect::<Option<Vec<Arc<Method>>>>()?,
-            class_loader,
             statics: static_alloc,
-            static_init_state: AtomicU8::new(0),
+            static_init_state: AtomicU32::new(0),
             attributes: classfile
                 .attributes
                 .iter()
@@ -200,14 +201,28 @@ impl Class {
         })
     }
 
-    pub fn find_overriding_method(&self, lower_method: &Method) -> Option<&Arc<Method>> {
-        self.methods.iter().find(|higher_method| {
-            !higher_method.access_flags.contains(AccessFlags::STATIC)
-                && higher_method.name == lower_method.name
-                && higher_method.descriptor == lower_method.descriptor
-                && (lower_method.access_flags.contains(AccessFlags::PUBLIC)
-                    || lower_method.access_flags.contains(AccessFlags::PROTECTED)
-                    || todo!())
+    fn does_method_override(&self, ma: &Method, ca: &Class, mc: &Method) -> bool {
+        let otherwise = (ma.access_flags & (AccessFlags::PUBLIC | AccessFlags::PROTECTED | AccessFlags::PRIVATE)).is_empty()
+            && {
+            let ca_last_slash = ca.this_class.rfind("/").unwrap_or(0);
+            let this_last_slash = self.this_class.rfind("/").unwrap_or(0);
+
+            let is_in_same_package = &ca.this_class[..ca_last_slash] == &self.this_class[..this_last_slash];
+
+            is_in_same_package || todo!()
+        };
+
+        !mc.access_flags.contains(AccessFlags::STATIC)
+            && mc.name == ma.name
+            && mc.descriptor == ma.descriptor
+            && (ma.access_flags.contains(AccessFlags::PUBLIC)
+            || ma.access_flags.contains(AccessFlags::PROTECTED)
+            || otherwise )
+    }
+
+    pub fn find_overriding_method(&self, ma: &Method, ca: &Class) -> Option<&Arc<Method>> {
+        self.methods.iter().find(|mc| {
+            self.does_method_override(ma, ca, &mc)
         })
     }
 
@@ -397,8 +412,10 @@ impl Method {
         })
     }
 
-    pub fn is_init(&self, classpath: &str, class_loader: Arc<dyn ClassLoader>, jvm: &JVM) -> bool {
-        !jvm.find_class(classpath, class_loader)
+    pub fn is_init(&self, classpath: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> bool {
+        let jvm = thread.jvm.clone();
+
+        !jvm.find_class(classpath, class_loader, thread)
             .unwrap()
             .access_flags
             .contains(AccessFlags::INTERFACE)
@@ -786,6 +803,7 @@ impl Constant {
             _ => None,
         }
     }
+
 }
 
 #[derive(Clone, Debug, PartialEq)]

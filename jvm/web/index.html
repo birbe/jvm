@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+    <meta charset="utf-8" />
+    <title>hello-wasm example</title>
+</head>
+<body>
+<script src='jvm.js'></script>
+<script type="module">
+
+    const { main_thread_begin, listen } = wasm_bindgen;
+
+    async function run() {
+        await wasm_bindgen('jvm_bg.wasm');
+
+        let [module, memory] = main_thread_begin();
+
+        console.log(memory);
+
+        let worker = new Worker("worker.js?");
+        worker.postMessage([module, memory]);
+
+        while(true) {
+            await listen();
+        }
+    }
+
+    run().then(()=>{});
+</script>
+</body>
+</html>

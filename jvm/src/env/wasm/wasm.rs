@@ -3,7 +3,6 @@ use crate::classfile::resolved::attribute::Code;
 use crate::classfile::resolved::{
     attribute, AccessFlags, Attribute, Class, Constant, Method, Ref, ReturnType,
 };
-use crate::env::aot::analyze_class;
 use crate::env::wasm::cfg::{
     create_scopes, find_loops, identify_scopes, label_nodes, Block, LabeledNode, ScopeMetrics,
 };
@@ -23,25 +22,6 @@ pub const POINTER_TYPE: ValType = ValType::I32;
 pub struct CompiledClass {
     pub module: Module,
     pub link: HashMap<Arc<Ref>, u32>,
-}
-
-pub fn create_module(
-    entry_class: Arc<Class>,
-    class_loader: Arc<dyn ClassLoader>,
-    jvm: &JVM,
-) -> CompiledClass {
-    let mut module = Module::new();
-
-    let mut function_section = FunctionSection::new();
-    let mut type_section = TypeSection::new();
-    let mut code_section = CodeSection::new();
-    let mut table = TableSection::new();
-
-    let mut classes = HashSet::new();
-
-    analyze_class(entry_class.clone(), &class_loader, jvm, &mut classes);
-
-    todo!()
 }
 
 fn get_method_params(method: &Method) -> (Vec<ValType>, Vec<ValType>) {
@@ -449,63 +429,14 @@ fn translate_bytecode(
             let constant = class.constant_pool.constants.get(constant_pool).unwrap();
             match constant {
                 Constant::MethodRef(method) => {
-                    if method.class != class.this_class {
-                        let idx = external_references[method];
-                        function.instruction(&Instruction::I32Const(idx as i32));
-                        function.instruction(&Instruction::CallIndirect {
-                            ty: type_section.len(),
-                            table: 0,
-                        });
-
-                        let other_class = jvm
-                            .find_class(&method.class, class.class_loader.clone())
-                            .unwrap();
-                        let other_method = other_class.get_method(&method.name_and_type).unwrap();
-
-                        let types = get_method_params(other_method);
-                        type_section.function(types.0, types.1);
-                    } else {
-                        let idx = *method_func_idx_map
-                            .get(&method.name_and_type.name[..])
-                            .unwrap() as u32;
-
-                        function.instruction(&Instruction::Call(idx));
-                    }
+                    todo!()
                 }
                 Constant::InterfaceMethodRef(_) => todo!(),
                 _ => unreachable!(),
             }
         }
         Bytecode::Invokespecial(constant_pool) => {
-            let constant = class.constant_pool.constants.get(constant_pool).unwrap();
-            let method_ref = match constant {
-                Constant::MethodRef(method) | Constant::InterfaceMethodRef(method) => method,
-                _ => unreachable!(),
-            };
-
-            let idx = external_references[method_ref];
-            function.instruction(&Instruction::I32Const(idx as i32));
-            function.instruction(&Instruction::CallIndirect {
-                ty: type_section.len(),
-                table: 0,
-            });
-
-            let other_class = jvm
-                .find_class(&method_ref.class, class.class_loader.clone())
-                .unwrap();
-            let other_method = other_class.get_method(&method_ref.name_and_type).unwrap();
-
-            let types = get_method_params(other_method);
-            type_section.function(types.0, types.1);
-
-            // let named_class = class.class_loader.find_class(&*method_ref.class, jvm).unwrap();
-            // let method = class.get_method(&method_ref.name_and_type).unwrap();
-            //
-            // let c = if !method.is_instance_initialization(&*class.this_class, &*class.class_loader, &jvm) && !named_class.access_flags.contains(AccessFlags::INTERFACE) && JVM::is_subclass(class, &named_class) && named_class.access_flags.contains(AccessFlags::SUPER) {
-            //     class.super_class.as_ref().unwrap()
-            // } else {
-            //     &named_class
-            // };
+            todo!()
         }
         Bytecode::Return
         | Bytecode::Ireturn
