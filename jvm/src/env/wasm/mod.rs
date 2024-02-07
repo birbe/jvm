@@ -101,6 +101,7 @@ pub struct WasmEnvironment {
     fn_get_object_class: unsafe fn(i32) -> i32,
     fn_new_object_array: unsafe fn(i32, i32) -> i32,
     fn_set_object_array_elem: unsafe fn(i32, i32, i32),
+    fn_array_length: unsafe fn(i32) -> i32,
     fn_new_array: unsafe fn(i32, i32) -> i32,
 
     fn_set_int_array_elem: unsafe fn(i32, i32, i32),
@@ -148,15 +149,18 @@ impl WasmEnvironment {
         let ia_store = js_sys::Reflect::get(&exports, &"int_array_store".into()).unwrap();
         let ca_store = js_sys::Reflect::get(&exports, &"char_array_store".into()).unwrap();
 
+        let array_length = js_sys::Reflect::get(&exports, &"get_array_length".into()).unwrap();
+
         let get_object_class = Function::from(obj_class_func);
         let new_object_array = Function::from(new_object_array_func);
         let set_object_array = Function::from(set_object_array_elem);
         let new_array = Function::from(new_array);
         let ia_store = Function::from(ia_store);
         let ca_store = Function::from(ca_store);
+        let array_length = Function::from(array_length);
         
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
-        let get_object_class_indirect_index = func_table.grow(6).unwrap();
+        let get_object_class_indirect_index = func_table.grow(7).unwrap();
         
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index, &get_object_class).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 1, &new_object_array).unwrap();
@@ -164,6 +168,7 @@ impl WasmEnvironment {
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 3, &new_array).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 4, &ia_store).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 5, &ca_store).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 6, &array_length).unwrap();
         
         Self {
             class_function_pointers: RwLock::new(HashMap::new()),
@@ -172,6 +177,7 @@ impl WasmEnvironment {
             fn_new_object_array: unsafe { std::mem::transmute(get_object_class_indirect_index + 1) },
             fn_set_object_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 2) },
             fn_new_array: unsafe { std::mem::transmute(get_object_class_indirect_index + 3) },
+            fn_array_length: unsafe { std::mem::transmute(get_object_class_indirect_index + 6) },
 
             fn_set_int_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 4) },
             fn_set_char_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 5) },
@@ -374,6 +380,10 @@ impl Environment for WasmEnvironment {
 
     fn new_array(&self, type_: i32, size: i32) -> Object {
         unsafe { Object::from_raw((self.fn_new_array)(type_, size) as *mut (), None) }
+    }
+
+    fn get_array_length(&self, array: &Object) -> i32 {
+        unsafe { (self.fn_array_length)(array.ptr as i32) }
     }
 
     fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand) {

@@ -183,6 +183,23 @@ pub fn generate_helper_wasm() -> Module {
     }
 
     {
+        funcs.function(object_class_signature);
+
+        let mut func = Function::new([]);
+
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::TableGet(0));
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
+        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
+        func.instruction(&Instruction::RefCastNullable(HeapType::Array));
+        func.instruction(&Instruction::ArrayLen);
+        func.instruction(&Instruction::End);
+        code.function(&func);
+
+        exports.export("get_array_length", ExportKind::Func, 5);
+    }
+    
+    {
         array_types.iter().enumerate().for_each(|(index, (type_index, name, val_type))| {
             funcs.function(types.len());
             types.function(vec![ValType::I32, ValType::I32, *val_type], []);
@@ -202,10 +219,11 @@ pub fn generate_helper_wasm() -> Module {
 
             code.function(&func);
 
-            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 5);
+            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 6);
         });
 
     }
+
 
     module.section(&types);
     module.section(&imports);

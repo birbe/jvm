@@ -1042,6 +1042,16 @@ impl ThreadHandle {
 
                 frame.push([objectref]);
             }
+            Bytecode::Arraylength => {
+                let [objectref] = frame.pop();
+                let object = unsafe { jvm.environment.object_from_operand(&objectref) };
+
+                frame.push([
+                    Operand {
+                        data: jvm.environment.get_array_length(&object) as u64
+                    }
+                ]);
+            }
             Bytecode::Anewarray(constant_index) => {
                 let [count] = frame.pop();
                 let count = unsafe { count.data as i32 };

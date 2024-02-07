@@ -15,7 +15,7 @@ impl MethodSignature {
         match field_type {
             FieldType::Array { .. } => ValType::Ref(RefType {
                 nullable: true,
-                heap_type: HeapType::Array,
+                heap_type: HeapType::Any,
             }),
             FieldType::Byte
             | FieldType::Char
@@ -80,7 +80,7 @@ fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Fiel
                 FieldType::Array { .. } => wasm_encoder::FieldType {
                     element_type: StorageType::Val(ValType::Ref(RefType {
                         nullable: true,
-                        heap_type: HeapType::Array,
+                        heap_type: HeapType::Any,
                     })),
                     mutable: true,
                 },
@@ -323,9 +323,9 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 if is_object {
                     function.instruction(&Instruction::TableGet(0));
 
-                    if matches!(field.descriptor, FieldType::Array { .. }) {
-                        function.instruction(&Instruction::RefCastNullable(HeapType::Array));
-                    }
+                    // if matches!(field.descriptor, FieldType::Array { .. }) {
+                    //     function.instruction(&Instruction::RefCastNullable(HeapType::Array));
+                    // }
                 }
 
                 //Set the field
@@ -567,9 +567,9 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                     //Free the index
                     func.instruction(&Instruction::Call(dealloc_ref));
 
-                    if matches!(field_type, FieldType::Array { .. }) {
+                    /*if matches!(field_type, FieldType::Array { .. }) {
                         func.instruction(&Instruction::RefCastNullable(HeapType::Array));
-                    }
+                    }*/
                 }
                 //Int
                 _ => {
@@ -667,9 +667,9 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                     func.instruction(&Instruction::LocalTee(i32_local));
                     func.instruction(&Instruction::TableGet(0));
 
-                    if matches!(arg, FieldType::Array { .. }) {
-                        func.instruction(&Instruction::RefCastNullable(HeapType::Array));
-                    }
+                    // if matches!(arg, FieldType::Array { .. }) {
+                    //     func.instruction(&Instruction::RefCastNullable(HeapType::Array));
+                    // }
 
                     if *is_this {
                         func.instruction(&Instruction::RefCastNonNull(HeapType::Any));
@@ -792,7 +792,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
         for (_, field) in recursive_fields {
             match field.descriptor {
-                FieldType::Array { .. } => function.instruction(&Instruction::RefNull(HeapType::Array)),
+                FieldType::Array { .. } => function.instruction(&Instruction::RefNull(HeapType::Any)),
                 FieldType::Byte => function.instruction(&Instruction::I32Const(0)),
                 FieldType::Char => function.instruction(&Instruction::I32Const(0)),
                 FieldType::Double => function.instruction(&Instruction::F64Const(0.0)),

@@ -40,6 +40,8 @@ pub trait Environment {
 
     fn new_array(&self, type_: i32, size: i32) -> Object;
 
+    fn get_array_length(&self, array: &Object) -> i32;
+
     fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand);
 
     fn get_array_element(&self, array: &Object, index: i32) -> Operand;
