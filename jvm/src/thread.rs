@@ -700,13 +700,65 @@ impl ThreadHandle {
                     data: *value as u64,
                 }]);
             }
+            Bytecode::Fconst_n(index) => {
+                frame.push([Operand {
+                    data: u32::from_ne_bytes(match index {
+                        0 => 0.0f32,
+                        1 => 1.0f32,
+                        2 => 2.0f32,
+                        _ => unreachable!()
+                    }.to_be_bytes()) as u64,
+                }]);
+            }
+            Bytecode::Fcmpg | Bytecode::Fcmpl => {
+                let [a, b] = frame.pop();
+
+                let a = unsafe { f32::from_ne_bytes((a.data as u32).to_ne_bytes()) };
+                let b = unsafe { f32::from_ne_bytes((b.data as u32).to_ne_bytes()) };
+
+                let nan_out = if matches!(bytecode, Bytecode::Fcmpg) { 1 } else { -1i32 as u64 };
+
+                frame.push([Operand {
+                    data: if a > b { 1 } else if a == b { 0 } else if a < b { -1i32 as u64 } else { nan_out }
+                }]);
+            }
             Bytecode::If_icmpge(offset) => {
-                let [a, b] = frame.pop::<2>();
+                let [a, b] = frame.pop();
 
                 let a = unsafe { a.data } as i32;
                 let b = unsafe { b.data } as i32;
 
                 if a >= b {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
+            Bytecode::Ifge(offset) => {
+                let [value] = frame.pop();
+
+                let value = unsafe { value.data } as i32;
+
+                if value >= 0 {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
+            Bytecode::Ifle(offset) => {
+                let [value] = frame.pop();
+
+                let value = unsafe { value.data } as i32;
+
+                if value <= 0 {
                     let target_offset = bytes_index as isize + *offset as isize;
                     let idx = code
                         .instructions
@@ -749,7 +801,7 @@ impl ThreadHandle {
             | Bytecode::Lstore_n(index) => {
                 frame.locals[*index as usize] = frame.pop::<1>()[0];
             }
-            Bytecode::Lload(index) | Bytecode::Lload_n(index) | Bytecode::Iload(index) | Bytecode::Iload_n(index) => {
+            Bytecode::Lload(index) | Bytecode::Lload_n(index) | Bytecode::Iload(index) | Bytecode::Iload_n(index) | Bytecode::Fload_n(index) | Bytecode::Fload(index) => {
                 frame.push([frame.locals[*index as usize]]);
             }
             Bytecode::I2l => {
@@ -911,6 +963,20 @@ impl ThreadHandle {
                 let index = unsafe { index.data as i32 };
 
                 thread.jvm.environment.set_array_element(10, &array, index, value);
+            }
+            Bytecode::Castore => {
+                let [arrayref, index, value] = frame.pop();
+
+                if unsafe { arrayref.objectref }.is_null() {
+                    return ThreadStepResult::Error(ThreadError::RuntimeException(
+                        RuntimeException::NullPointer,
+                    ));
+                }
+
+                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let index = unsafe { index.data as i32 };
+
+                thread.jvm.environment.set_array_element(5, &array, index, value);
             }
             Bytecode::Aastore => {
                 let [arrayref, index, value] = frame.pop();

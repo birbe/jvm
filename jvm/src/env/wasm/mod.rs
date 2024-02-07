@@ -103,7 +103,8 @@ pub struct WasmEnvironment {
     fn_set_object_array_elem: unsafe fn(i32, i32, i32),
     fn_new_array: unsafe fn(i32, i32) -> i32,
 
-    fn_set_int_array_elem: unsafe fn(i32, i32, i32)
+    fn_set_int_array_elem: unsafe fn(i32, i32, i32),
+    fn_set_char_array_elem: unsafe fn(i32, i32, i32)
 }
 
 impl WasmEnvironment {
@@ -145,21 +146,24 @@ impl WasmEnvironment {
         let set_object_array_elem = js_sys::Reflect::get(&exports, &"set_object_array_element".into()).unwrap();
         let new_array = js_sys::Reflect::get(&exports, &"new_array".into()).unwrap();
         let ia_store = js_sys::Reflect::get(&exports, &"int_array_store".into()).unwrap();
+        let ca_store = js_sys::Reflect::get(&exports, &"char_array_store".into()).unwrap();
 
         let get_object_class = Function::from(obj_class_func);
         let new_object_array = Function::from(new_object_array_func);
         let set_object_array = Function::from(set_object_array_elem);
         let new_array = Function::from(new_array);
         let ia_store = Function::from(ia_store);
+        let ca_store = Function::from(ca_store);
         
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
-        let get_object_class_indirect_index = func_table.grow(5).unwrap();
+        let get_object_class_indirect_index = func_table.grow(6).unwrap();
         
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index, &get_object_class).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 1, &new_object_array).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 2, &set_object_array).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 3, &new_array).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 4, &ia_store).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 5, &ca_store).unwrap();
         
         Self {
             class_function_pointers: RwLock::new(HashMap::new()),
@@ -170,6 +174,7 @@ impl WasmEnvironment {
             fn_new_array: unsafe { std::mem::transmute(get_object_class_indirect_index + 3) },
 
             fn_set_int_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 4) },
+            fn_set_char_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 5) },
         }
     }
 }
@@ -272,7 +277,7 @@ impl Environment for WasmEnvironment {
                 out
             }
             ExecutionContext::Native => {
-                native_func(&method_handle)
+                native_func(&method_handle, thread)
             }
         };
 
@@ -373,9 +378,8 @@ impl Environment for WasmEnvironment {
 
     fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand) {
         match array_type {
-            10 => {
-                unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data as i32); }
-            },
+            5 => unsafe { (self.fn_set_char_array_elem)(array.ptr as i32, index, value.data as i32); }
+            10 => unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data as i32); },
             4 | 5 | 6 | 7 | 8 | 9 | 11 => unimplemented!(),
             _ => unreachable!("Invalid array type")
         }

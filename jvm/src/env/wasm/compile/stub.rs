@@ -830,23 +830,23 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     let bytes = module.clone().finish();
 
-    let wat = wasmprinter::print_bytes(&bytes).unwrap();
-
-    match wasmparser::Validator::new_with_features(WasmFeatures {
-        gc: true,
-        function_references: true,
-        bulk_memory: true,
-        ..Default::default()
-    })
-    .validate_all(&bytes)
-    {
-        Ok(_) => {}
-        Err(error) => {
-            let wat = wasmprinter::print_bytes(&bytes).unwrap();
-
-            console_log!("{wat}");
-        }
-    }
+    // let wat = wasmprinter::print_bytes(&bytes).unwrap();
+    //
+    // match wasmparser::Validator::new_with_features(WasmFeatures {
+    //     gc: true,
+    //     function_references: true,
+    //     bulk_memory: true,
+    //     ..Default::default()
+    // })
+    // .validate_all(&bytes)
+    // {
+    //     Ok(_) => {}
+    //     Err(error) => {
+    //         let wat = wasmprinter::print_bytes(&bytes).unwrap();
+    //
+    //         console_log!("{wat}");
+    //     }
+    // }
 
     StubModule {
         wasm: module,
