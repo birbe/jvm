@@ -17,19 +17,46 @@ pub fn generate_helper_wasm() -> Module {
     let mut funcs = FunctionSection::new();
     let mut exports = ExportSection::new();
 
-    types.struct_([
-        FieldType {
-            element_type: StorageType::Val(ValType::Ref(RefType { nullable: false, heap_type: HeapType::Any })),
-            mutable: false,
-        },
-        FieldType {
-            element_type: StorageType::Val(ValType::I32),
-            mutable: false,
-        },
-    ]);
+    types.rec(
+        [SubType {
+            is_final: false,
+            supertype_idx: None,
+            composite_type: CompositeType::Struct(StructType {
+                fields: Box::new([
+                    FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    }
+                ]),
+            }),
+        }]
+    );
+
+    types.rec(
+        [SubType {
+            is_final: false,
+            supertype_idx: Some(0),
+            composite_type: CompositeType::Struct(StructType {
+                fields: Box::new([
+                    FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    },
+                    FieldType {
+                        element_type: StorageType::Val(ValType::Ref(RefType {
+                            nullable: true,
+                            heap_type: HeapType::Array,
+                        })),
+                        mutable: true,
+                    },
+                ]),
+            }),
+        }]
+    );
 
     //Excluding object arrays
-    let storage_type_start = types.len() + 1;
+    let storage_type_start = types.len();
+    let primitive_array_type_start = types.len() + 1;
 
     for storage_type in [StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct})), StorageType::I8, StorageType::I16, StorageType::Val(ValType::I32), StorageType::Val(ValType::I64), StorageType::Val(ValType::F32), StorageType::Val(ValType::F64)] {
         types.array(&storage_type, true);
@@ -61,7 +88,7 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 1 });
+        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
         func.instruction(&Instruction::End);
         code.function(&func);
 
@@ -76,9 +103,9 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::Call(0));
         func.instruction(&Instruction::LocalTee(2));
         func.instruction(&Instruction::LocalGet(0));
-        func.instruction(&Instruction::ArrayNewDefault(1));
         func.instruction(&Instruction::LocalGet(1));
-        func.instruction(&Instruction::StructNew(0));
+        func.instruction(&Instruction::ArrayNewDefault(storage_type_start));
+        func.instruction(&Instruction::StructNew(1));
         func.instruction(&Instruction::TableSet(0));
         func.instruction(&Instruction::LocalGet(2));
 
@@ -91,40 +118,22 @@ pub fn generate_helper_wasm() -> Module {
     {
         funcs.function(aastore_signature);
 
-        let mut func = Function::new([(1, ValType::Ref(RefType {
-            nullable: true,
-            heap_type: HeapType::Struct,
-        }))]);
+        let mut func = Function::new([]);
 
         //arrayref, index, value
 
-        //get the value
-
-            func.instruction(&Instruction::Block(BlockType::Empty));
-
-                func.instruction(&Instruction::Block(BlockType::Empty));
-                    func.instruction(&Instruction::LocalGet(2));
-                    func.instruction(&Instruction::BrIf(1));
-                func.instruction(&Instruction::End);
-
-                func.instruction(&Instruction::LocalGet(2));
-                func.instruction(&Instruction::TableGet(0));
-                func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-                func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
-                func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-                func.instruction(&Instruction::LocalSet(3));
-
-            func.instruction(&Instruction::End);
-
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
-        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+        func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 1 });
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(storage_type_start)));
 
         func.instruction(&Instruction::LocalGet(1));
-        func.instruction(&Instruction::LocalGet(3));
-        func.instruction(&Instruction::ArraySet(1));
+
+        func.instruction(&Instruction::LocalGet(2));
+        func.instruction(&Instruction::TableGet(0));
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
+        func.instruction(&Instruction::ArraySet(storage_type_start));
 
         func.instruction(&Instruction::End);
         code.function(&func);
@@ -164,10 +173,13 @@ pub fn generate_helper_wasm() -> Module {
         array_types.iter().enumerate().for_each(|(index, (type_index, name, ..))| {
             func.instruction(&Instruction::Call(0));
             func.instruction(&Instruction::LocalTee(2));
-            func.instruction(&Instruction::LocalGet(1));
-            func.instruction(&Instruction::ArrayNewDefault(type_index + storage_type_start));
+
             func.instruction(&Instruction::I32Const(0));
-            func.instruction(&Instruction::StructNew(0));
+
+            func.instruction(&Instruction::LocalGet(1));
+            func.instruction(&Instruction::ArrayNewDefault(type_index + primitive_array_type_start));
+            func.instruction(&Instruction::StructNew(1));
+
             func.instruction(&Instruction::TableSet(0));
 
             func.instruction(&Instruction::LocalGet(2));
@@ -189,8 +201,8 @@ pub fn generate_helper_wasm() -> Module {
 
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
-        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+        func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 1 });
         func.instruction(&Instruction::RefCastNullable(HeapType::Array));
         func.instruction(&Instruction::ArrayLen);
         func.instruction(&Instruction::End);
@@ -198,7 +210,7 @@ pub fn generate_helper_wasm() -> Module {
 
         exports.export("get_array_length", ExportKind::Func, 5);
     }
-    
+
     {
         array_types.iter().enumerate().for_each(|(index, (type_index, name, val_type))| {
             funcs.function(types.len());
@@ -208,12 +220,12 @@ pub fn generate_helper_wasm() -> Module {
 
             func.instruction(&Instruction::LocalGet(0));
             func.instruction(&Instruction::TableGet(0));
-            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-            func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
-            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(type_index + storage_type_start)));
+            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+            func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 1 });
+            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(type_index + primitive_array_type_start)));
             func.instruction(&Instruction::LocalGet(1));
             func.instruction(&Instruction::LocalGet(2));
-            func.instruction(&Instruction::ArraySet(type_index + storage_type_start));
+            func.instruction(&Instruction::ArraySet(type_index + primitive_array_type_start));
 
             func.instruction(&Instruction::End);
 

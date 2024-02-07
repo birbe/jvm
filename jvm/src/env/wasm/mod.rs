@@ -127,7 +127,11 @@ impl WasmEnvironment {
         }
 
         let helper_module = generate_helper_wasm();
+
         let wasm_bytes = helper_module.finish();
+
+        let wat = wasmprinter::print_bytes(&wasm_bytes).unwrap();
+
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
         let module = WebAssembly::Module::new(&uint8array).unwrap();
@@ -328,11 +332,9 @@ impl Environment for WasmEnvironment {
     }
 
     unsafe fn get_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str) -> Operand {
-        let object_class = self.get_object_class(&object);
-
         let ptrs = self.class_function_pointers.read();
-        let class_ptrs = ptrs.get(&object_class.get_id()).unwrap();
-        let get = class_ptrs.get(&format!("{}_get_{}", class.this_class, field_name)).unwrap();
+        let class_ptrs = ptrs.get(&class.get_id()).unwrap();
+        let get = class_ptrs.get(&format!("get_{}", field_name)).unwrap();
 
         match &field_descriptor[0..1] {
             "L" => {
@@ -354,12 +356,10 @@ impl Environment for WasmEnvironment {
     }
 
     unsafe fn set_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str, value: Operand) {
-        let object_class = self.get_object_class(&object);
-
         let ptrs = self.class_function_pointers.read();
-        let class_ptrs = ptrs.get(&object_class.get_id()).unwrap();
+        let class_ptrs = ptrs.get(&class.get_id()).unwrap();
 
-        let set = class_ptrs.get(&format!("{}_set_{}", class.this_class, field_name)).unwrap();
+        let set = class_ptrs.get(&format!("set_{}", field_name)).unwrap();
 
         match &field_descriptor[0..1] {
             "L" | "[" => {

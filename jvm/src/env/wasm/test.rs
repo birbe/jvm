@@ -238,6 +238,6 @@ pub fn wasm_test() {
 
     let main = jvm.find_class("Main", &*native_bootstrapper, &mut *thread).unwrap();
     //
-    let out = thread.call("Main", "main", "()J", &[]);
+    let out = thread.call("Main", "main", "()I", &[]);
     console_log!("{out:?}");
 }

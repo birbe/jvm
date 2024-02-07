@@ -404,20 +404,20 @@ impl ThreadHandle {
         let locals: Vec<u32> = frame.locals.iter().map(|local| unsafe { local.objectref as u32 }).collect();
         let stack: Vec<u32> = (&frame.stack[..*frame.stack_length]).iter().map(|local| unsafe { local.objectref as u32 }).collect();
 
-        if &*class.this_class != "java/lang/Class" {
-            let mut stdout = thread.jvm.stdout.lock();
-            write!(&mut stdout, "{}",
-                   format!(
-                       "{:<20} | {:<30} | {:<15} | {:<6} | {:?} | {:?}",
-                       format!("{:?}", bytecode),
-                       class.this_class,
-                       method.name,
-                       pc,
-                       locals,
-                       stack
-                   )
-            ).unwrap();
-        }
+        // if &*class.this_class != "java/lang/Class" {
+        //     let mut stdout = thread.jvm.stdout.lock();
+        //     write!(&mut stdout, "{}",
+        //            format!(
+        //                "{:<20} | {:<30} | {:<15} | {:<6} | {:?} | {:?}",
+        //                format!("{:?}", bytecode),
+        //                class.this_class,
+        //                method.name,
+        //                pc,
+        //                locals,
+        //                stack
+        //            )
+        //     ).unwrap();
+        // }
 
         let jvm = thread.jvm.clone();
         let class_loader = thread.class_loader.clone();
@@ -664,7 +664,7 @@ impl ThreadHandle {
                 let object = unsafe { thread.jvm.environment.object_from_operand(&object) };
 
                 unsafe {
-                    thread.jvm.environment.set_object_field(&object, &target_class, &field_ref.name_and_type.name, &field_ref.name_and_type.descriptor, value);
+                    thread.jvm.environment.set_object_field(&object, &field_class, &field.name, &field_ref.name_and_type.descriptor, value);
                 }
             }
             Bytecode::Getfield(constant_index) => {
@@ -677,11 +677,11 @@ impl ThreadHandle {
                     .find_class(classpath, &*class_loader, thread)
                     .unwrap();
 
-                let (field, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+                let (_, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
-                // if field_class.this_class != class.this_class {
-                //     Self::init_static(&field_class, frame, thread);
-                // }
+                if field_class.this_class != class.this_class {
+                    Self::init_static(&field_class, thread);
+                }
 
                 let [ptr] = frame.pop();
 

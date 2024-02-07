@@ -123,13 +123,14 @@ fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Fiel
         })
         .collect::<Vec<_>>();
 
+    field_types.insert(0, wasm_encoder::FieldType {
+        element_type: StorageType::Val(ValType::I32),
+        mutable: true,
+    });
+
     SubType {
         is_final: false,
-        supertype_idx: if index > 0 {
-            Some(index - 1)
-        } else {
-            None
-        },
+        supertype_idx: Some(index),
         composite_type: CompositeType::Struct(StructType {
             fields: field_types.into_boxed_slice(),
         }),
@@ -143,7 +144,21 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     let mut exports = ExportSection::new();
 
     let mut recursive_fields = vec![];
-    let mut sub_types = vec![];
+
+    types.rec([
+        SubType {
+            is_final: false,
+            supertype_idx: None,
+            composite_type: CompositeType::Struct(StructType {
+                fields: Box::new([
+                    wasm_encoder::FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    }
+                ]),
+            }),
+        }
+    ]);
 
     let parents = class.parents();
 
@@ -157,8 +172,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 .collect::<Vec<(&Class, &Field)>>()
         );
 
-        sub_types.push(
-            sub_type_from_class(index as u32, recursive_fields.iter().map(|(_, field)| *field))
+        types.rec(
+            [sub_type_from_class(index as u32, recursive_fields.iter().map(|(_, field)| *field))]
         );
     }
 
@@ -171,27 +186,11 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             .collect::<Vec<(&Class, &Field)>>()
     );
 
-    sub_types.push(
-        sub_type_from_class(class.parents().len() as u32, recursive_fields.iter().map(|(_, field)| *field))
+    let struct_type_index = types.len();
+
+    types.rec(
+        [sub_type_from_class(class.parents().len() as u32, recursive_fields.iter().map(|(_, field)| *field))]
     );
-
-    types.rec(sub_types);
-
-    let struct_type_index = class.parents().len() as u32;
-
-    let desync: u32 = struct_type_index;
-
-    let reflector = types.len() + desync;
-    types.struct_([
-        wasm_encoder::FieldType {
-            element_type: StorageType::Val(ValType::Ref(RefType { nullable: false, heap_type: HeapType::Any })),
-            mutable: false,
-        },
-        wasm_encoder::FieldType {
-            element_type: StorageType::Val(ValType::I32),
-            mutable: false,
-        },
-    ]);
 
     let mut imports = ImportSection::new();
 
@@ -219,20 +218,20 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         }),
     );
 
-    let i32_out = types.len() + desync;
+    let i32_out = types.len();
     types.function([], [ValType::I32]);
-    let i32_in = types.len() + desync;
+    let i32_in = types.len();
     types.function([ValType::I32], []);
-    let malloc_type = types.len() + desync;
+    let malloc_type = types.len();
     types.function([ValType::I32], [ValType::I32]);
-    let free_type = types.len() + desync;
+    let free_type = types.len();
     //Size, ptr
     types.function([ValType::I32, ValType::I32], []);
-    let interpret_func_type = types.len() + desync;
+    let interpret_func_type = types.len();
     types.function([ValType::I32], [ValType::I64]);
-    let push_frame_type = types.len() + desync;
+    let push_frame_type = types.len();
     types.function([ValType::I32; 4], [ValType::I32]);
-    let debug_type = types.len() + desync;
+    let debug_type = types.len();
     types.function([ValType::I32; 2], []);
 
     let alloc_ref = 0;
@@ -272,11 +271,11 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     let mut accessors = vec![];
 
-    for (index, (field_class, field)) in recursive_fields.iter()
+    for (index, field) in class.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
         .enumerate()
     {
         for is_setter in [true, false] {
-            let func_type_index = types.len() + desync;
+            let func_type_index = types.len();
 
             let field_type = match field.descriptor {
                 FieldType::Double => ValType::F64,
@@ -306,13 +305,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
                 //Push the reference index onto the stack
                 function.instruction(&Instruction::LocalGet(0));
-                //Get the reflector instance
                 function.instruction(&Instruction::TableGet(0));
-                //Cast the (ref null) to a (ref null $reflector)
-                function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(reflector)));
-                //Get the struct in the reflector
-                function.instruction(&Instruction::StructGet { struct_type_index: reflector, field_index: 0 });
-                //Cast to this class's struct type
                 function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
                     struct_type_index,
                 )));
@@ -331,7 +324,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 //Set the field
                 function.instruction(&Instruction::StructSet {
                     struct_type_index,
-                    field_index: index as u32,
+                    field_index: index as u32 + 1,
                 });
             } else {
                 types.function([ValType::I32], [field_type]);
@@ -342,14 +335,12 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
                 function.instruction(&Instruction::LocalGet(0));
                 function.instruction(&Instruction::TableGet(0));
-                function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(reflector)));
-                function.instruction(&Instruction::StructGet { struct_type_index: reflector, field_index: 0 });
                 function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
                     struct_type_index,
                 )));
                 function.instruction(&Instruction::StructGet {
                     struct_type_index,
-                    field_index: index as u32,
+                    field_index: index as u32 + 1,
                 });
 
                 if is_object {
@@ -375,7 +366,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             function.instruction(&Instruction::End);
 
             let accessor_name =
-                format!("{}_{}_{}", field_class.this_class, if is_setter { "set" } else { "get" }, &field.name);
+                format!("{}_{}", if is_setter { "set" } else { "get" }, &field.name);
 
             exports.export(
                 &accessor_name,
@@ -585,7 +576,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         func.instruction(&Instruction::End);
 
         let func_index = funcs.len() + func_imports_len;
-        let type_index = types.len() + desync;
+        let type_index = types.len();
 
         method_types.push(type_index);
 
@@ -775,20 +766,22 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             funcs.len() + func_imports_len,
         );
 
-        funcs.function(types.len() + desync);
+        funcs.function(types.len());
         types.function([ValType::I32], [ValType::I64]);
         code.function(&func);
     }
 
     {
         exports.export("new", ExportKind::Func, funcs.len() + func_imports_len);
-        funcs.function(types.len() + desync);
+        funcs.function(types.len());
         types.function([], [ValType::I32]);
 
         let mut function = Function::new([(1, ValType::I32)]);
 
         function.instruction(&Instruction::Call(alloc_ref));
         function.instruction(&Instruction::LocalTee(0));
+
+        function.instruction(&Instruction::I32Const(class as *const Class as i32));
 
         for (_, field) in recursive_fields {
             match field.descriptor {
@@ -805,8 +798,6 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             };
         }
         function.instruction(&Instruction::StructNew(struct_type_index));
-        function.instruction(&Instruction::I32Const(class as *const Class as i32));
-        function.instruction(&Instruction::StructNew(reflector));
 
         function.instruction(&Instruction::RefCastNullable(HeapType::Any));
         function.instruction(&Instruction::TableSet(0));
@@ -830,23 +821,23 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     let bytes = module.clone().finish();
 
-    // let wat = wasmprinter::print_bytes(&bytes).unwrap();
-    //
-    // match wasmparser::Validator::new_with_features(WasmFeatures {
-    //     gc: true,
-    //     function_references: true,
-    //     bulk_memory: true,
-    //     ..Default::default()
-    // })
-    // .validate_all(&bytes)
-    // {
-    //     Ok(_) => {}
-    //     Err(error) => {
-    //         let wat = wasmprinter::print_bytes(&bytes).unwrap();
-    //
-    //         console_log!("{wat}");
-    //     }
-    // }
+    let wat = wasmprinter::print_bytes(&bytes).unwrap();
+
+    match wasmparser::Validator::new_with_features(WasmFeatures {
+        gc: true,
+        function_references: true,
+        bulk_memory: true,
+        ..Default::default()
+    })
+    .validate_all(&bytes)
+    {
+        Ok(_) => {}
+        Err(error) => {
+            let wat = wasmprinter::print_bytes(&bytes).unwrap();
+
+            console_log!("{wat}");
+        }
+    }
 
     StubModule {
         wasm: module,
