@@ -177,6 +177,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         );
     }
 
+    let this_class_field_offset = recursive_fields.len() as u32;
+
     recursive_fields.extend(
         class
             .fields
@@ -272,7 +274,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     let mut accessors = vec![];
 
     for (index, field) in class.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
-        .enumerate()
+        .enumerate().map(|(index, field)| (index as u32 + this_class_field_offset + 1, field))
     {
         for is_setter in [true, false] {
             let func_type_index = types.len();
@@ -324,7 +326,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 //Set the field
                 function.instruction(&Instruction::StructSet {
                     struct_type_index,
-                    field_index: index as u32 + 1,
+                    field_index: index,
                 });
             } else {
                 types.function([ValType::I32], [field_type]);
@@ -340,7 +342,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 )));
                 function.instruction(&Instruction::StructGet {
                     struct_type_index,
-                    field_index: index as u32 + 1,
+                    field_index: index,
                 });
 
                 if is_object {

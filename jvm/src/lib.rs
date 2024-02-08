@@ -142,26 +142,26 @@ impl JVM {
 
                 let class_object = self.environment.new_object(&java_lang_class);
 
-                // let init = class_loader.get_method_by_name("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;)V");
-                // thread.invoke(&init, Box::new([
-                //     Operand {
-                //         objectref: class_object.ptr
-                //     },
-                //     Operand {
-                //         objectref: class_loader.get_class_loader_object_handle().ptr
-                //     },
-                // ]));
-                //
-                // let mut objects = self.class_objects.write();
-                //
-                // unsafe {
-                //     objects.insert(
-                //         class.get_id(),
-                //         self.environment.object_from_operand(&Operand {
-                //             objectref: class_object.ptr
-                //         })
-                //     );
-                // }
+                let init = class_loader.get_method_by_name("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;)V");
+                thread.invoke(&init, Box::new([
+                    Operand {
+                        objectref: class_object.ptr
+                    },
+                    Operand {
+                        objectref: class_loader.get_class_loader_object_handle().ptr
+                    },
+                ]));
+
+                let mut objects = self.class_objects.write();
+
+                unsafe {
+                    objects.insert(
+                        class.get_id(),
+                        self.environment.object_from_operand(&Operand {
+                            objectref: class_object.ptr
+                        })
+                    );
+                }
 
                 Ok(Some(class_object))
             }
