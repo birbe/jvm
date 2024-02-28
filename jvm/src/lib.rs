@@ -27,6 +27,8 @@ use crate::execution::{ExecutionContext, MethodHandle};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use highway::{HighwayHash, HighwayHasher, Key};
+use js_sys::Atomics::load;
+use crate::linker::{BootstrapLoader, ClassLoaderThreadedContext};
 
 macro_rules! console_log {
     ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
@@ -61,26 +63,87 @@ pub enum RuntimeError {
     ClassLoadError(ClassLoadError),
 }
 
-pub struct ClassLoaderStore {
-    pub loader: Arc<dyn ClassLoader>,
+pub struct ClassInstance {
+    pub class: Arc<Class>,
+    pub class_object: Object
+}
+
+pub trait ClassContext {
+
+    fn get_class(&self, classpath: &str) -> Result<Arc<Class>, ClassLoadError>;
+
+    fn id(&self) -> u32;
+
 }
 
 pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
     pub environment: Box<dyn Environment>,
-    pub class_objects: RwLock<HashMap<ClassId, Object>>,
+    pub loaded_classes: RwLock<HashMap<u64, ClassInstance>>,
+    pub method_handles: RwLock<HashMap<u64, Arc<MethodHandle>>>,
+    pub bootstrap_classloader: Arc<dyn BootstrapLoader>,
+    pub system_classloader: ClassLoader,
     class_ids: AtomicU32,
     thread_ids: AtomicU32,
 }
 
+impl ClassContext for JVM {
+    fn get_class(&self, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+
+        let mut loaded_classes = self.loaded_classes.write();
+
+        let mut hasher = HighwayHasher::default();
+        hasher.write_all(classpath.as_bytes()).unwrap();
+        hasher.write_u8(0);
+
+        let hash_key = hasher.finish();
+
+        if loaded_classes.contains_key(&hash_key) {
+            return Ok(loaded_classes.get(&hash_key).unwrap().class.clone());
+        } else {
+            let classfile = self.bootstrap_classloader.get_classfile(classpath).unwrap();
+            let class = self.generate_class(&classfile, self)?;
+
+            loaded_classes.insert(hash_key, ClassInstance {
+                class: class.clone(),
+                class_object: Object::NULL,
+            });
+
+            drop(loaded_classes);
+
+            let class_class = self.get_class("java/lang/Class")?;
+            let class_object = self.environment.new_object(&class_class);
+
+            let mut loaded_classes = self.loaded_classes.write();
+            let generated_class = loaded_classes.get_mut(&hash_key).unwrap();
+            generated_class.class_object = class_object;
+
+            Ok(class)
+        }
+
+    }
+
+    fn id(&self) -> u32 {
+        0
+    }
+
+}
+
 impl JVM {
-    pub fn new(stdout: Mutex<Box<dyn Write>>, environment: Box<dyn Environment>) -> Arc<Self> {
+    pub fn new(stdout: Mutex<Box<dyn Write>>, environment: Box<dyn Environment>, bootstrap_classloader: Arc<dyn BootstrapLoader>) -> Arc<Self> {
         Arc::new(Self {
             stdout,
             threads: RwLock::new(vec![]),
             environment,
-            class_objects: RwLock::new(HashMap::new()),
+            loaded_classes: RwLock::new(HashMap::new()),
+            method_handles: RwLock::new(HashMap::new()),
+            bootstrap_classloader,
+            system_classloader: ClassLoader {
+                instance: Object::NULL,
+                loader_classpath: "sun/misc/Loader".into(),
+                id: 1,
+            },
             class_ids: AtomicU32::new(0),
             thread_ids: AtomicU32::new(0),
         })
@@ -108,15 +171,11 @@ impl JVM {
         }
     }
 
-    pub fn make_class_struct(&self, thread: &mut Thread, class_loader: &dyn ClassLoader, bytes: &[u8]) -> Result<Arc<Class>, ClassLoadError> {
-        let classfile =
-            ClassFile::from_bytes(Cursor::new(bytes)).map_err(|_| ClassLoadError::ParserError)?;
-
+    pub fn generate_class(&self, class_file: &ClassFile, context: &dyn ClassContext) -> Result<Arc<Class>, ClassLoadError> {
         let class = Arc::new(
             Class::init(
-                &classfile,
-                thread,
-                class_loader,
+                &class_file,
+                context,
                 self.class_ids.fetch_add(1, Ordering::Relaxed),
             )
                 .ok_or(ClassLoadError::MalformedClassDef)?,
@@ -125,67 +184,98 @@ impl JVM {
         Ok(class)
     }
 
-    pub fn define_class(&self, thread: &mut Thread, class_loader: &dyn ClassLoader, bytes: &[u8]) -> Result<Option<Object>, ClassLoadError> {
-        let class = self.make_class_struct(thread, class_loader, bytes)?;
+    pub fn define_class(&self, bytes: &[u8], thread: &mut Thread) -> Result<(), ClassLoadError> {
+        let class_file = ClassFile::from_bytes(Cursor::new(bytes)).map_err(|err| {
+            ClassLoadError::MalformedClassDef
+        })?;
 
-        class_loader.register_class(class.clone());
+        let loader = thread.class_loader.clone();
 
-        self.link_class(class_loader, class.clone());
+        let context = ClassLoaderThreadedContext {
+            loader: &loader,
+            context: thread,
+        };
 
-        console_log!("Defining {}", class.this_class);
+        let class = self.generate_class(&class_file, &context)?;
+        let java_lang_class = self.get_class("java/lang/Class")?;
 
-        match class_loader.get_class("java/lang/Class") {
-            None => {
-                Ok(None)
-            },
-            Some(java_lang_class) => {
+        let mut hasher = HighwayHasher::default();
+        hasher.write_all(class.this_class.as_bytes()).unwrap();
+        hasher.write_u32(thread.class_loader.id);
+        let hash_key = hasher.finish();
 
-                let class_object = self.environment.new_object(&java_lang_class);
+        let class_object = self.environment.new_object(&java_lang_class);
+        let handle = self.get_method("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;)V", 0);
 
-                let init = class_loader.get_method_by_name("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;)V");
-                thread.invoke(&init, Box::new([
-                    Operand {
-                        objectref: class_object.ptr
-                    },
-                    Operand {
-                        objectref: class_loader.get_class_loader_object_handle().ptr
-                    },
-                ]));
+        thread.invoke(&handle, Box::new([
+            Operand {
+                objectref: thread.class_loader.instance.ptr
+            }
+        ]));
 
-                let mut objects = self.class_objects.write();
+        let instance = ClassInstance {
+            class,
+            class_object,
+        };
 
-                unsafe {
-                    objects.insert(
-                        class.get_id(),
-                        self.environment.object_from_operand(&Operand {
-                            objectref: class_object.ptr
-                        })
-                    );
+        let mut loaded_classes = self.loaded_classes.write();
+        loaded_classes.insert(hash_key, instance);
+
+        Ok(())
+    }
+
+    pub fn get_method(&self, classpath: &str, method_name: &str, method_descriptor: &str, class_loader: u32) -> Arc<MethodHandle> {
+        let mut hasher = HighwayHasher::default();
+        hasher.write_all(classpath.as_bytes()).unwrap();
+        hasher.write_all(method_name.as_bytes()).unwrap();
+        hasher.write_all(method_descriptor.as_bytes()).unwrap();
+        hasher.write_u32(class_loader);
+        let key = hasher.finish();
+
+        let handles = self.method_handles.read();
+        handles.get(&key).unwrap().clone()
+    }
+
+    pub fn retrieve_class(
+        &self,
+        classpath: &str,
+        class_loader: &ClassLoader,
+        thread: &mut Thread
+    ) -> Result<Arc<Class>, ClassLoadError> {
+        let loaded_classes = self.loaded_classes.read();
+
+        let mut hasher = HighwayHasher::default();
+        hasher.write_all(classpath.as_bytes()).unwrap();
+        hasher.write_u32(thread.class_loader.id);
+        let hash_key = hasher.finish();
+
+        if self.bootstrap_classloader.has_class(classpath) {
+            return self.get_class(classpath);
+        } else if !loaded_classes.contains_key(&hash_key) {
+            drop(loaded_classes);
+            match self.system_classloader.find_class(thread, classpath) {
+                None => {
+                    thread.class_loader.find_class(thread, classpath);
+
+                    let loaded_classes = self.loaded_classes.read();
+
+                    let mut hasher = HighwayHasher::default();
+                    hasher.write_all(classpath.as_bytes()).unwrap();
+                    hasher.write_u32(self.system_classloader.id);
+                    let hash_key = hasher.finish();
+
+                    return Ok(loaded_classes.get(&hash_key).unwrap().class.clone())
                 }
-
-                Ok(Some(class_object))
+                Some(_) => {
+                    return self.retrieve_class(classpath, thread);
+                }
             }
         }
 
+        Ok(loaded_classes.get(&hash_key).unwrap().class.clone())
     }
 
-    pub fn find_class(
-        &self,
-        classpath: &str,
-        class_loader: &dyn ClassLoader,
-        thread: &mut Thread
-    ) -> Result<Arc<Class>, ClassLoadError> {
-        let get = class_loader.get_class(classpath);
-        match get {
-            None => {
-                class_loader.find_class(thread, classpath);
-                Ok(class_loader.get_class(classpath).unwrap())
-            },
-            Some(get) => Ok(get),
-        }
-    }
-
-    pub fn create_thread(self: &Arc<JVM>, class_loader: Arc<dyn ClassLoader>) -> ThreadHandle {
+    pub fn create_thread(self: &Arc<JVM>, class_loader: Arc<ClassLoader>) -> ThreadHandle {
         let thread = Arc::new(Mutex::new(Thread {
             jvm: self.clone(),
             class_loader,
@@ -202,8 +292,10 @@ impl JVM {
         unsafe { ThreadHandle::new(thread.data_ptr(), thread) }
     }
 
-    fn link_class(&self, loader: &dyn ClassLoader, class: Arc<Class>) {
+    fn link_class(&self, class: Arc<Class>, loader: Option<&ClassLoader>) {
         self.environment.link_class(class.clone());
+
+        let mut methods = self.method_handles.write();
 
         for method in &class.methods {
             let ref_ = Arc::new(Ref {
@@ -217,7 +309,13 @@ impl JVM {
             let method_handle = self.environment
                     .create_method_handle(loader, ref_.clone(), method.clone(), class.clone());
 
-            loader.link_ref(ref_, Arc::new(method_handle));
+            let mut key = HighwayHasher::default();
+            key.write_all(class.this_class.as_bytes()).unwrap();
+            key.write_all(method.name.as_bytes()).unwrap();
+            key.write_all(method.descriptor.string.as_bytes()).unwrap();
+            key.write_u32(loader.map(|loader| loader.id).unwrap_or(0));
+
+            methods.insert(key.finish(), Arc::new(method_handle));
         }
     }
 }

@@ -45,6 +45,7 @@ pub struct MethodHandle {
     pub(crate) context: ExecutionContext,
     pub(crate) class: Arc<Class>,
     pub(crate) method: Arc<Method>,
+    pub(crate) class_loader: u32
 }
 
 impl Debug for MethodHandle {
@@ -54,12 +55,13 @@ impl Debug for MethodHandle {
 }
 
 impl MethodHandle {
-    pub unsafe fn new(ptr: ABIHandlePtr, context: ExecutionContext, method: Arc<Method>, class: Arc<Class>) -> Self {
+    pub unsafe fn new(ptr: ABIHandlePtr, context: ExecutionContext, method: Arc<Method>, class: Arc<Class>, class_loader: u32) -> Self {
         Self {
             ptr,
             context,
             class,
             method,
+            class_loader,
         }
     }
 }

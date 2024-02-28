@@ -12,7 +12,7 @@ use std::alloc::{alloc, Layout};
 
 use crate::linker::ClassLoader;
 use crate::thread::{Operand, Thread};
-use crate::JVM;
+use crate::{ClassContext, JVM};
 use discrim::FromDiscriminant;
 use jvm_types::JParse;
 use std::collections::HashMap;
@@ -65,14 +65,14 @@ pub struct Class {
     pub attributes: Vec<Attribute>,
 
     pub heap_size: usize,
+    pub class_loader: u32,
     internal_id: ClassId,
 }
 
 impl Class {
     pub fn init(
         classfile: &ClassFile,
-        thread: &mut Thread,
-        class_loader: &dyn ClassLoader,
+        class_context: &dyn ClassContext,
         internal_id: ClassId,
     ) -> Option<Self> {
         let constant_pool =
@@ -80,16 +80,11 @@ impl Class {
 
         let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
 
-        let jvm = thread.jvm.clone();
-
         let super_class = if &*this_class != "java/lang/Object" {
             Some(
-                jvm.find_class(
-                    &resolve_string(&classfile.constant_pool, classfile.super_class).unwrap(),
-                    class_loader,
-                    thread
-                )
-                .unwrap(),
+                class_context.get_class(
+                    &resolve_string(&classfile.constant_pool, classfile.super_class).unwrap()
+                ).unwrap()
             )
         } else {
             None
@@ -101,8 +96,9 @@ impl Class {
             .map(|classinfo| {
                 let interface_classpath =
                     resolve_string(&classfile.constant_pool, classinfo.name_index).unwrap();
-                jvm.find_class(&interface_classpath, class_loader, thread)
-                    .unwrap()
+                class_context.get_class(
+                    &interface_classpath
+                ).unwrap()
             })
             .collect();
 
@@ -184,6 +180,7 @@ impl Class {
                 .collect::<Option<Vec<Attribute>>>()?,
             constant_pool,
             heap_size,
+            class_loader: class_context.id(),
             internal_id
         })
     }
@@ -412,10 +409,10 @@ impl Method {
         })
     }
 
-    pub fn is_init(&self, classpath: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> bool {
+    pub fn is_init(&self, classpath: &str, thread: &mut Thread) -> bool {
         let jvm = thread.jvm.clone();
 
-        !jvm.find_class(classpath, class_loader, thread)
+        !jvm.retrieve_class(classpath, thread)
             .unwrap()
             .access_flags
             .contains(AccessFlags::INTERFACE)

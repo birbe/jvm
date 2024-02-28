@@ -13,6 +13,7 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use wasm_bindgen::JsValue;
 use wasm_encoder::Encode;
+use crate::ClassContext;
 use crate::env::wasm::compile::generate_helper_wasm;
 use crate::env::wasm::compile::stub::create_stub_module;
 use crate::env::wasm::native::native_func;
@@ -191,11 +192,6 @@ impl WasmEnvironment {
 
 impl Environment for WasmEnvironment {
     fn link_class(&self, class: Arc<Class>) {
-        console_log!(
-            "Loading class {}",
-            class.this_class
-        );
-
         let stub = create_stub_module(&class);
 
         let jvm_import_object = js_sys::Object::new();
@@ -298,7 +294,7 @@ impl Environment for WasmEnvironment {
         }
     }
 
-    fn create_method_handle(&self, class_loader: &dyn ClassLoader, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
+    fn create_method_handle(&self, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
         if method.access_flags.contains(AccessFlags::NATIVE) {
             return MethodHandle {
                 ptr: unsafe { std::mem::transmute(0) },
@@ -316,12 +312,13 @@ impl Environment for WasmEnvironment {
             context: ExecutionContext::Compiled,
             class,
             method,
+            class_loader: 0,
         }
     }
 
-    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Object {
+    fn new_string(&self, contents: &str, thread: &mut Thread) -> Object {
         let jvm = thread.jvm.clone();
-        let string_class = jvm.find_class("java/lang/String", class_loader ,thread).unwrap();
+        let string_class = jvm.get_class("java/lang/String").unwrap();
 
         let string_object = self.new_object(&string_class);
         string_object

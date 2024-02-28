@@ -22,13 +22,13 @@ pub trait Environment {
 
     fn create_method_handle(
         &self,
-        class_loader: &dyn ClassLoader,
+        class_loader: Option<&ClassLoader>,
         ref_: Arc<Ref>,
         method: Arc<Method>,
         class: Arc<Class>,
     ) -> MethodHandle;
 
-    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Object;
+    fn new_string(&self, contents: &str, thread: &mut Thread) -> Object;
 
     fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class;
 

@@ -222,7 +222,7 @@ pub enum ThreadStepResult {
 pub struct Thread {
     pub frame_stack: Box<FrameStack>,
     pub jvm: Arc<JVM>,
-    pub class_loader: Arc<dyn ClassLoader>,
+    pub class_loader: Arc<ClassLoader>,
     pub id: u32,
     pub killed: bool,
 }
@@ -432,7 +432,7 @@ impl ThreadHandle {
                     .as_ref()
                     .unwrap();
 
-                let class = jvm.find_class(&ref_.class, &*class_loader, thread).unwrap();
+                let class = jvm.retrieve_class(&ref_.class, &*class_loader, thread).unwrap();
 
                 if frame.class.get_id() != class.get_id() {
                     Self::init_static(&class, thread);
@@ -462,7 +462,7 @@ impl ThreadHandle {
 
                 let classpath = &method_ref.class;
                 let target_class = jvm
-                    .find_class(classpath, &*class_loader, thread)
+                    .retrieve_class(classpath, thread)
                     .unwrap();
 
                 let method = target_class.get_method(&method_ref.name_and_type).unwrap();
@@ -523,7 +523,7 @@ impl ThreadHandle {
                 let classpath = &**method_ref.class;
 
                 let method_ref_class = jvm
-                    .find_class(classpath, &*class_loader, thread)
+                    .retrieve_class(classpath, thread)
                     .unwrap();
 
                 let resolved_method = routine_resolve_method(&thread, &method_ref, &method_ref_class).unwrap();
@@ -650,7 +650,7 @@ impl ThreadHandle {
 
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .find_class(classpath, &*class_loader, thread)
+                    .retrieve_class(classpath, thread)
                     .unwrap();
 
                 let (field, field_class) =
@@ -674,7 +674,7 @@ impl ThreadHandle {
 
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .find_class(classpath, &*class_loader, thread)
+                    .retrieve_class(classpath, thread)
                     .unwrap();
 
                 let (_, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
@@ -920,7 +920,7 @@ impl ThreadHandle {
                         }]);
                     }
                     Constant::String(string) => {
-                        let string_class = jvm.find_class("java/lang/String", &*class_loader, thread).unwrap();
+                        let string_class = jvm.retrieve_class("java/lang/String", &*class_loader, thread).unwrap();
 
                         if &*class.this_class != "java/lang/String" {
                             Self::init_static(&string_class, thread);
@@ -937,8 +937,7 @@ impl ThreadHandle {
                     Constant::Class {
                         path, depth
                     } => {
-                        let class = class_loader.get_class(path).unwrap();
-                        let objects = jvm.class_objects.read();
+
                         let object = objects.get(&class.get_id()).unwrap();
 
                         frame.push([
@@ -1059,7 +1058,7 @@ impl ThreadHandle {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
                 if let Constant::Class { path, .. } = constant {
                     let array_class = jvm
-                        .find_class(&path, &*class_loader, thread)
+                        .retrieve_class(&path, thread)
                         .unwrap();
 
                     let object = thread.jvm.environment.new_object_array(&array_class, count);
@@ -1080,7 +1079,7 @@ impl ThreadHandle {
 
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .find_class(classpath, &*class_loader, thread)
+                    .retrieve_class(classpath, thread)
                     .unwrap();
 
                 let (_field, field_class) =
@@ -1109,7 +1108,7 @@ impl ThreadHandle {
                 let field_ref = constant.as_ref().unwrap();
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .find_class(classpath, &*class_loader, thread)
+                    .retrieve_class(classpath, thread)
                     .unwrap();
 
                 if target_class.this_class != class.this_class {
@@ -1133,7 +1132,7 @@ impl ThreadHandle {
                 if let Constant::Class { path, .. } = constant {
 
                     let target_class = jvm
-                        .find_class(path, &*class_loader, thread)
+                        .retrieve_class(classpath, thread)
                         .unwrap();
 
                     if target_class.this_class != class.this_class {
@@ -1157,7 +1156,7 @@ impl ThreadHandle {
                 if let Constant::Class { path, .. } = constant {
 
                     let target_class = jvm
-                        .find_class(path, &*class_loader, thread)
+                        .retrieve_class(path, thread)
                         .unwrap();
 
                     if target_class.this_class != class.this_class {
