@@ -2,7 +2,7 @@ use std::sync::Arc;
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::env::{Environment, Object};
 use crate::execution::MethodHandle;
-use crate::linker::ClassLoader;
+use crate::linker::ClassLoaderObject;
 use crate::thread::{Operand, Thread};
 
 pub mod heap;
@@ -21,7 +21,7 @@ impl Environment for NativeEnvironment {
         todo!()
     }
 
-    fn create_method_handle(&self, class_loader: &dyn ClassLoader, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
+    fn create_method_handle(&self, class_loader: &dyn ClassLoaderObject, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
         todo!()
     }
 
@@ -57,7 +57,7 @@ impl Environment for NativeEnvironment {
         todo!()
     }
 
-    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Object {
+    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoaderObject, thread: &mut Thread) -> Object {
         todo!()
     }
     

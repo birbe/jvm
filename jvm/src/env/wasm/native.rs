@@ -15,7 +15,7 @@ pub fn native_func(method_handle: &MethodHandle, thread: &mut Thread) -> Operand
             }
         },
         ("java/lang/System", "registerNatives", "()V") => {
-            let method_handle = thread.class_loader.get_method_by_name("java/lang/System", "initializeSystemClass", "()V");
+            let method_handle = thread.jvm.get_method("java/lang/System", "initializeSystemClass", "()V", 0);
 
             thread.invoke(&method_handle, Box::new([]));
 

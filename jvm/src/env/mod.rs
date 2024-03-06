@@ -1,6 +1,6 @@
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::execution::MethodHandle;
-use crate::linker::ClassLoader;
+use crate::linker::{ClassLoader, ClassLoaderObject};
 use crate::thread::{Operand, Thread};
 use std::sync::Arc;
 
@@ -22,10 +22,10 @@ pub trait Environment {
 
     fn create_method_handle(
         &self,
-        class_loader: Option<&ClassLoader>,
         ref_: Arc<Ref>,
         method: Arc<Method>,
         class: Arc<Class>,
+        class_loader: &dyn ClassLoader
     ) -> MethodHandle;
 
     fn new_string(&self, contents: &str, thread: &mut Thread) -> Object;

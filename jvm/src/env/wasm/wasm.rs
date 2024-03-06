@@ -6,15 +6,17 @@ use crate::classfile::resolved::{
 use crate::env::wasm::cfg::{
     create_scopes, find_loops, identify_scopes, label_nodes, Block, LabeledNode, ScopeMetrics,
 };
-use crate::linker::ClassLoader;
+use crate::linker::ClassLoaderObject;
 use crate::JVM;
 use bitflags::Flags;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::task::Context;
 use wasm_encoder::{
     BlockType, CodeSection, Function, FunctionSection, Instruction, Module, TableSection,
     TypeSection, ValType,
 };
+use crate::classfile::resolved;
 
 pub const POINTER_SIZE: i32 = 4;
 pub const POINTER_TYPE: ValType = ValType::I32;
@@ -54,7 +56,7 @@ pub fn compile_method(
 ) {
     let (params, results) = get_method_params(method);
 
-    let (code, mut locals): (&Code, Vec<_>) =
+    let (code, locals): (&Code, Vec<_>) =
         if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
             (
                 code,
@@ -65,10 +67,6 @@ pub fn compile_method(
         } else {
             unreachable!()
         };
-
-    let helper_start = locals.len() as u32;
-    locals.push(((locals.len() as u32), (ValType::I32)));
-    locals.push(((locals.len() as u32), (ValType::I32)));
 
     let byte_index_to_instruction_index: HashMap<u32, u32> = code
         .instructions
@@ -97,18 +95,24 @@ pub fn compile_method(
         loop_out,
     );
 
-    let mut function = Function::new(locals);
-
     let mut block_index = 0;
 
+    let mut wasm_instructions = vec![];
+    
+    let mut ctx = BytecodeContext {
+        locals_start: locals.len() as u32,
+        locals,
+        byte_to_idx_map: &byte_index_to_instruction_index,
+        wasm_instrs: &mut wasm_instructions,
+        scope_metrics: &metrics,
+    };
+
     translate_block(
+        &mut ctx,
+
         &block,
-        &mut function,
         &code.instructions,
         &labeled,
-        helper_start,
-        &metrics,
-        &byte_index_to_instruction_index,
         &scc_s,
         type_section,
         true,
@@ -119,13 +123,14 @@ pub fn compile_method(
         &mut block_index,
     );
 
-    function.instruction(&Instruction::End);
+    todo!()
 
-    function_section.function(type_section.len());
-
-    type_section.function(params, results);
-
-    code_section.function(&function);
+    // wasm_instructions.push(Instruction::End);
+    //
+    // function_section.function(type_section.len());
+    //
+    // type_section.function(params, results);
+    // code_section.function(&function);
 }
 
 fn get_jump_offset(
@@ -208,216 +213,225 @@ struct CompilerState {
     hot_function_table: u32,
 }
 
-struct ContextState {
-    temp_local1: u32,
-    temp_local2: u32,
+struct BytecodeContext<'a> {
+    locals: Vec<(u32, ValType)>,
+    locals_start: u32,
+    byte_to_idx_map: &'a HashMap<u32, u32>,
+    wasm_instrs: &'a mut Vec<Instruction<'a>>,
+    scope_metrics: &'a ScopeMetrics,
 }
 
-fn translate_bytecode(
-    compiler_state: &CompilerState,
-    context_state: &ContextState,
+impl<'a> BytecodeContext<'a> {
 
-    bytecode: &Bytecode,
-    idx: usize,
-    byte_index: u32,
-    function: &mut Function,
-    scope_metrics: &ScopeMetrics,
-    byte_to_idx_map: &HashMap<u32, u32>,
-    type_section: &mut TypeSection,
-    method_func_idx_map: &HashMap<&str, usize>,
+    fn get_helpers<const N: usize>(&mut self, types: [ValType; N]) -> [u32; N] {
+        let mut offset = 0;
+
+        types.map(|type_| {
+            match self.locals.iter().filter(|(_, valtype)| *valtype == type_).skip(offset).next() {
+                None => {
+                    let index = self.locals_start + self.locals.len() as u32;
+
+                    self.locals.push(
+                        (index, type_)
+                    );
+
+                    index
+                }
+                Some((index, _)) => {
+                    offset += 1;
+
+                    *index
+                }
+            }
+        })
+    }
+
+}
+
+fn translate_instruction(
+    ctx: &mut BytecodeContext,
+    instruction: &attribute::Instruction,
     class: &Class,
-    jvm: &JVM,
-    external_references: &HashMap<Arc<Ref>, u32>,
     scope_offset: u32,
     block_idx: u32,
 ) {
-    match bytecode {
+
+    match &instruction.bytecode {
         Bytecode::Invokespecial(index) => {
             let method_constant = class.constant_pool.constants.get(index).unwrap();
             let method_ref = method_constant.as_ref().unwrap();
 
-            // let ty = *compiler_state.descriptor_to_wasm_type_id.get(&method_ref.name_and_type.descriptor).unwrap();
 
-            // function.instruction(&Instruction::Call(compiler_state.routines.invoke_special_routine));
-            //
-            // function.instruction(&Instruction::LocalTee(context_state.temp_local1));
-            // function.instruction(&Instruction::LocalGet(context_state.temp_local1));
-            //
-            // function.instruction(&Instruction::GlobalGet(compiler_state.globals.jvm_ptr));
-            // // function.instruction(&Instruction::StructGet {});
-            // function.instruction(&Instruction::Call(compiler_state.routines.invoke_special_routine));
-            // function.instruction(&Instruction::CallIndirect {
-            //     ty,
-            //     table: compiler_state.hot_function_table,
-            // });
 
             todo!()
         }
         Bytecode::Pop => {
-            function.instruction(&Instruction::Drop);
+            ctx.wasm_instrs.push(Instruction::Drop);
         }
         Bytecode::Iload(index)
         | Bytecode::Iload_n(index)
         | Bytecode::Aload(index)
         | Bytecode::Aload_n(index) => {
-            function.instruction(&Instruction::LocalGet(*index as u32));
+            ctx.wasm_instrs.push(Instruction::LocalGet(*index as u32));
         }
         Bytecode::Iconst_n_m1(val) => {
-            function.instruction(&Instruction::I32Const(*val as i32));
+            ctx.wasm_instrs.push(Instruction::I32Const(*val as i32));
         }
         Bytecode::Ifnull(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::BrOnNull(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::BrOnNull(jump + scope_offset));
         }
         Bytecode::Goto(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::Br(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::Br(jump + scope_offset));
         }
         Bytecode::If_icmpne(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32Ne);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32Ne);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::If_icmple(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32LeS);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32LeS);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::If_icmpgt(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32GtS);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32GtS);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::If_icmpge(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32GeS);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32GeS);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::Ifeq(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32Eqz);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32Eqz);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::Ifne(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I32Ne);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32Const(0));
+            ctx.wasm_instrs.push(Instruction::I32Ne);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::Irem => {
-            function.instruction(&Instruction::I32RemS);
+            ctx.wasm_instrs.push(Instruction::I32RemS);
         }
         Bytecode::Ifge(offset) => {
-            let target = (byte_index as isize + *offset as isize) as usize;
-            let target_idx = *byte_to_idx_map.get(&(target as u32)).unwrap();
+            let target = (instruction.bytes_index as isize + *offset as isize) as usize;
+            let target_idx = *ctx.byte_to_idx_map.get(&(target as u32)).unwrap();
 
-            if target_idx as usize == idx + 1 {
+            if target_idx == instruction.bytecode_index + 1 {
                 return;
             }
 
-            let jump = get_jump_offset(scope_metrics, idx, target_idx as usize, block_idx);
+            let jump = get_jump_offset(&ctx.scope_metrics, instruction.bytes_index as usize, target_idx as usize, block_idx);
 
-            function.instruction(&Instruction::I32Const(0));
-            function.instruction(&Instruction::I32GeS);
-            function.instruction(&Instruction::BrIf(jump + scope_offset));
+            ctx.wasm_instrs.push(Instruction::I32Const(0));
+            ctx.wasm_instrs.push(Instruction::I32GeS);
+            ctx.wasm_instrs.push(Instruction::BrIf(jump + scope_offset));
         }
         Bytecode::Ineg => {
-            function.instruction(&Instruction::I32Const(i32::MAX));
-            function.instruction(&Instruction::I32Xor);
-            function.instruction(&Instruction::I32Const(1));
-            function.instruction(&Instruction::I32Add);
+            ctx.wasm_instrs.push(Instruction::I32Const(i32::MAX));
+            ctx.wasm_instrs.push(Instruction::I32Xor);
+            ctx.wasm_instrs.push(Instruction::I32Const(1));
+            ctx.wasm_instrs.push(Instruction::I32Add);
         }
         Bytecode::Iadd => {
-            function.instruction(&Instruction::I32Add);
+            ctx.wasm_instrs.push(Instruction::I32Add);
         }
         Bytecode::Isub => {
-            function.instruction(&Instruction::I32Sub);
+            ctx.wasm_instrs.push(Instruction::I32Sub);
         }
         Bytecode::Putstatic(_constant_pool) => {
-            //todo
+            todo!()
         }
         Bytecode::Sipush(value) => {
-            function.instruction(&Instruction::I32Const(*value as i32));
+            ctx.wasm_instrs.push(Instruction::I32Const(*value as i32));
         }
         Bytecode::Bipush(value) => {
-            function.instruction(&Instruction::I32Const(*value as i32));
+            ctx.wasm_instrs.push(Instruction::I32Const(*value as i32));
         }
         Bytecode::Istore(index) | Bytecode::Istore_n(index) => {
-            function.instruction(&Instruction::LocalSet(*index as u32));
+            ctx.wasm_instrs.push(Instruction::LocalSet(*index as u32));
         }
         Bytecode::Iinc(index, inc) => {
-            function
-                .instruction(&Instruction::LocalGet(*index as u32))
-                .instruction(&Instruction::I32Const(*inc as i32))
-                .instruction(&Instruction::I32Add)
-                .instruction(&Instruction::LocalSet(*index as u32));
+            ctx.wasm_instrs
+                .extend([
+                    Instruction::LocalGet(*index as u32),
+                    Instruction::I32Const(*inc as i32),
+                    Instruction::I32Add,
+                    Instruction::LocalSet(*index as u32)
+                ]);
         }
         Bytecode::Imul => {
-            function.instruction(&Instruction::I32Mul);
+            ctx.wasm_instrs.push(Instruction::I32Mul);
         }
         Bytecode::Invokevirtual(index) => {
             let constant = class.constant_pool.constants.get(index).unwrap();
@@ -444,12 +458,12 @@ fn translate_bytecode(
         | Bytecode::Dreturn
         | Bytecode::Freturn
         | Bytecode::Lreturn => {
-            function.instruction(&Instruction::Return);
+            ctx.wasm_instrs.push(Instruction::Return);
         }
         Bytecode::New(index) => {
             // function.instruction(Instruction::I31);
         }
-        bytecode => unimplemented!("Bytecode not implemented {:?} @ {}", bytecode, idx),
+        bytecode => unimplemented!("Bytecode not implemented {:?} @ {}", bytecode, instruction.bytecode_index),
     }
 }
 
@@ -488,13 +502,12 @@ fn get_block_type_signature(
 }
 
 fn translate_block(
+    ctx: &mut BytecodeContext,
+
     block: &Block,
-    function: &mut Function,
+
     instructions: &[attribute::Instruction],
     labeled: &[LabeledNode],
-    helper_start: u32,
-    scope_metrics: &ScopeMetrics,
-    byte_to_idx_map: &HashMap<u32, u32>,
     scc_s: &HashMap<usize, Vec<usize>>,
     type_section: &mut TypeSection,
     skip: bool,
@@ -506,17 +519,14 @@ fn translate_block(
 ) {
     match block {
         Block::Loop(blocks) => {
-            function.instruction(&Instruction::Loop(BlockType::Empty));
+            ctx.wasm_instrs.push(Instruction::Loop(BlockType::Empty));
 
             for block in blocks {
                 translate_block(
+                    ctx,
                     block,
-                    function,
                     instructions,
                     labeled,
-                    helper_start,
-                    scope_metrics,
-                    byte_to_idx_map,
                     scc_s,
                     type_section,
                     false,
@@ -528,7 +538,7 @@ fn translate_block(
                 );
             }
 
-            function.instruction(&Instruction::End);
+            ctx.wasm_instrs.push(Instruction::End);
 
             *block_index += 1;
         }
@@ -539,9 +549,9 @@ fn translate_block(
 
             if !skip {
                 if types.len() > 0 {
-                    function.instruction(&Instruction::Block(BlockType::FunctionType(type_index)));
+                    ctx.wasm_instrs.push(Instruction::Block(BlockType::FunctionType(type_index)));
                 } else {
-                    function.instruction(&Instruction::Block(BlockType::Empty));
+                    ctx.wasm_instrs.push(Instruction::Block(BlockType::Empty));
                 }
 
                 *block_index += 1;
@@ -551,13 +561,10 @@ fn translate_block(
 
             for block in blocks {
                 translate_block(
+                    ctx,
                     block,
-                    function,
                     instructions,
                     labeled,
-                    helper_start,
-                    scope_metrics,
-                    byte_to_idx_map,
                     scc_s,
                     type_section,
                     false,
@@ -570,7 +577,7 @@ fn translate_block(
             }
 
             if !skip {
-                function.instruction(&Instruction::End);
+                ctx.wasm_instrs.push(Instruction::End);
             }
         }
         Block::Nodes(nodes) => {
@@ -586,23 +593,23 @@ fn translate_block(
                         let header_idx = scc_s[&component.scc][0];
 
                         let branch_scope =
-                            get_jump_offset(scope_metrics, component.idx, header_idx, *block_index);
+                            get_jump_offset(ctx.scope_metrics, component.idx, header_idx, *block_index);
 
                         match bytecode {
                             Bytecode::Goto(_) => {
-                                function.instruction(&Instruction::Br(branch_scope));
+                                ctx.wasm_instrs.push(Instruction::Br(branch_scope));
                             }
                             Bytecode::If_icmpne(_) => {
-                                function.instruction(&Instruction::I32Ne);
-                                function.instruction(&Instruction::BrIf(branch_scope));
+                                ctx.wasm_instrs.push(Instruction::I32Ne);
+                                ctx.wasm_instrs.push(Instruction::BrIf(branch_scope));
                             }
                             Bytecode::If_icmpeq(_) => {
-                                function.instruction(&Instruction::I32Eq);
-                                function.instruction(&Instruction::BrIf(branch_scope));
+                                ctx.wasm_instrs.push(Instruction::I32Eq);
+                                ctx.wasm_instrs.push(Instruction::BrIf(branch_scope));
                             }
                             Bytecode::If_icmple(_) => {
-                                function.instruction(&Instruction::I32LeS);
-                                function.instruction(&Instruction::BrIf(branch_scope));
+                                ctx.wasm_instrs.push(Instruction::I32LeS);
+                                ctx.wasm_instrs.push(Instruction::BrIf(branch_scope));
                             }
                             x => unimplemented!("Special control scheme {:?} unimplemented", x),
                         }
@@ -623,52 +630,50 @@ fn translate_block(
                         };
 
                         let branch_scope =
-                            get_jump_offset(scope_metrics, node.idx, header_idx, *block_index);
+                            get_jump_offset(ctx.scope_metrics, node.idx, header_idx, *block_index);
 
-                        function.instruction(&Instruction::I32Const(
+                        ctx.wasm_instrs.push(Instruction::I32Const(
                             header.iter().position(|i| i == target).unwrap() as i32 + 1,
                         ));
-                        function.instruction(&Instruction::LocalSet(helper_start));
-                        function.instruction(&Instruction::Br(branch_scope));
+                        todo!();
+                        // ctx.wasm_instrs.push(Instruction::LocalSet(ctx.get));
+                        // ctx.wasm_instrs.push(Instruction::Br(branch_scope));
 
                         continue;
                     }
                     LabeledNode::LoopController { node, targets } => {
-                        function.instruction(&Instruction::Block(BlockType::Empty));
-                        function.instruction(&Instruction::LocalGet(helper_start));
-                        function.instruction(&Instruction::LocalTee(helper_start + 1));
-                        function.instruction(&Instruction::I32Const(0));
-                        function.instruction(&Instruction::LocalSet(helper_start));
+                        let [helper_1, helper_2] = ctx.get_helpers([ValType::I32; 2]);
+
+                        ctx.wasm_instrs.push(Instruction::Block(BlockType::Empty));
+                        ctx.wasm_instrs.push(Instruction::LocalGet(helper_1));
+                        ctx.wasm_instrs.push(Instruction::LocalTee(helper_2));
+                        ctx.wasm_instrs.push(Instruction::I32Const(0));
+                        ctx.wasm_instrs.push(Instruction::LocalSet(helper_1));
 
                         let mut targets: Vec<u32> = targets
                             .iter()
                             .map(|target| {
-                                get_jump_offset(scope_metrics, node.idx, *target, *block_index)
+                                get_jump_offset(ctx.scope_metrics, node.idx, *target, *block_index)
                                     + 1 as u32
                             })
                             .collect();
                         targets.insert(0, 0);
 
-                        function.instruction(&Instruction::BrTable(targets.into(), 0));
-                        function.instruction(&Instruction::End);
+                        ctx.wasm_instrs.push(Instruction::BrTable(targets.into(), 0));
+                        ctx.wasm_instrs.push(Instruction::End);
                     }
 
                     _ => {}
                 };
 
-                // translate_bytecode(
-                //     bytecode,
+                // translate_instruction(
+                //     ctx,
+                //     ,
                 //     idx,
-                //     function,
-                //     scope_metrics,
-                //     byte_to_idx_map,
-                //     type_section,
-                //     method_func_idx_map,
+                //     byte_index,
                 //     class,
-                //     jvm,
-                //     external_references,
                 //     0,
-                //     *block_index,
+                //     *block_index
                 // );
 
                 todo!()

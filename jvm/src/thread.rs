@@ -7,7 +7,7 @@ use crate::classfile::resolved::{
     AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, NameAndType, Ref,
     ReferenceKind, ReturnType,
 };
-use crate::linker::ClassLoader;
+use crate::linker::{ClassLoader, ClassLoaderObject};
 use bitflags::Flags;
 use parking_lot::Mutex;
 
@@ -222,7 +222,7 @@ pub enum ThreadStepResult {
 pub struct Thread {
     pub frame_stack: Box<FrameStack>,
     pub jvm: Arc<JVM>,
-    pub class_loader: Arc<ClassLoader>,
+    pub class_loader: Arc<dyn ClassLoader>,
     pub id: u32,
     pub killed: bool,
 }
@@ -285,7 +285,7 @@ impl ThreadHandle {
         method_descriptor: &str,
         args: &[JValue],
     ) -> Result<Option<JValue>, JavaBarrierError> {
-        let method_handle = self.class_loader.get_method_by_name(classpath, method_name, method_descriptor);
+        let method_handle = self.jvm.get_method(classpath, method_name, method_descriptor, self.get_id());
         let method = &*method_handle.method;
 
         let operands: Vec<Operand> = args.iter().map(|arg| arg.as_operand()).collect();
@@ -365,7 +365,7 @@ impl ThreadHandle {
             Ok(_) => {
                 console_log!("Initializing {}", class.this_class);
 
-                let method_handle = thread.class_loader.get_method_by_name(&class.this_class, "<clinit>", "()V");
+                let method_handle = thread.jvm.get_method(&class.this_class, "<clinit>", "()V", thread.class_loader.get_id());
 
                 thread.invoke(&method_handle, Box::new([]));
 
@@ -438,7 +438,8 @@ impl ThreadHandle {
                     Self::init_static(&class, thread);
                 }
 
-                let method_handle = thread.class_loader.get_method_handle(ref_);
+                let method_handle = jvm.get_method(&class.this_class, &ref_.name_and_type.name, &ref_.name_and_type.descriptor, class_loader.get_id());
+
                 let method_descriptor = &method_handle.method.descriptor;
 
                 let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..];
@@ -452,7 +453,7 @@ impl ThreadHandle {
                 }
             }
             Bytecode::Invokespecial(constant_index) => {
-                let method_ref = class
+                let ref_ = class
                     .constant_pool
                     .constants
                     .get(constant_index)
@@ -460,15 +461,15 @@ impl ThreadHandle {
                     .as_ref()
                     .unwrap();
 
-                let classpath = &method_ref.class;
+                let classpath = &ref_.class;
                 let target_class = jvm
-                    .retrieve_class(classpath, thread)
+                    .retrieve_class(classpath, &*class_loader, thread)
                     .unwrap();
 
-                let method = target_class.get_method(&method_ref.name_and_type).unwrap();
+                let method = target_class.get_method(&ref_.name_and_type).unwrap();
 
                 let c = if {
-                    !method.is_init(classpath, &*class_loader, thread)
+                    !method.is_init(classpath, thread)
                         && !target_class.access_flags.contains(AccessFlags::INTERFACE)
                         && JVM::is_subclass(&class, &target_class)
                         && target_class.access_flags.contains(AccessFlags::SUPER)
@@ -480,7 +481,7 @@ impl ThreadHandle {
 
                 Self::init_static(c, thread);
 
-                let method = match c.get_method(&method_ref.name_and_type) {
+                let method = match c.get_method(&ref_.name_and_type) {
                     None => todo!(),
                     Some(method) => method,
                 };
@@ -492,7 +493,7 @@ impl ThreadHandle {
                 }
 
                 let method_descriptor =
-                    MethodDescriptor::try_from(&**method_ref.name_and_type.descriptor).unwrap();
+                    MethodDescriptor::try_from(&**ref_.name_and_type.descriptor).unwrap();
 
                 let args = frame.pop_dynamic(method_descriptor.args.len() + 1);
 
@@ -500,7 +501,7 @@ impl ThreadHandle {
                     panic!()
                 }
 
-                let method_handle = thread.class_loader.get_method_handle(method_ref);
+                let method_handle = jvm.get_method(&class.this_class, &ref_.name_and_type.name, &ref_.name_and_type.descriptor, class_loader.get_id());
 
                 thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
             }
@@ -523,7 +524,7 @@ impl ThreadHandle {
                 let classpath = &**method_ref.class;
 
                 let method_ref_class = jvm
-                    .retrieve_class(classpath, thread)
+                    .retrieve_class(classpath, &*class_loader, thread)
                     .unwrap();
 
                 let resolved_method = routine_resolve_method(&thread, &method_ref, &method_ref_class).unwrap();
@@ -544,10 +545,11 @@ impl ThreadHandle {
                             todo!()
                         }
 
-                        let method_handle = thread.class_loader.get_method_by_name(
+                        let method_handle = jvm.get_method(
                             &object_class.this_class,
                             &resolved_method.name,
-                            &resolved_method.descriptor.string
+                            &resolved_method.descriptor.string,
+                            class_loader.get_id()
                         );
 
                         let out = thread.invoke(&method_handle, nargs.into_boxed_slice());
@@ -560,11 +562,14 @@ impl ThreadHandle {
                             parent.find_overriding_method(resolved_method, &method_ref_class).map(|method| (parent, method))
                         }).expect("Maximally specific resolution not yet implemented");
 
-                        let method_handle = thread.class_loader.get_method_by_name(
+                        let method_handle = thread.jvm.get_method(
                             &resolved_class.this_class,
                             &resolved_method.name,
-                            &resolved_method.descriptor.string
+                            &resolved_method.descriptor.string,
+                            class_loader.get_id()
                         );
+
+                        let method_handle = jvm.get_method(&resolved_class.this_class, &resolved_method.name, &resolved_method.descriptor.string, class_loader.get_id());
 
                         let out = thread.invoke(&method_handle, nargs.into_boxed_slice());
 
@@ -650,7 +655,7 @@ impl ThreadHandle {
 
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .retrieve_class(classpath, thread)
+                    .retrieve_class(classpath, &*class_loader, thread)
                     .unwrap();
 
                 let (field, field_class) =
@@ -674,7 +679,7 @@ impl ThreadHandle {
 
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .retrieve_class(classpath, thread)
+                    .retrieve_class(classpath, &*class_loader, thread)
                     .unwrap();
 
                 let (_, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
@@ -879,7 +884,7 @@ impl ThreadHandle {
                         }]);
                     }
                     Constant::String(string) => {
-                        let string = jvm.environment.new_string(&string, &*class_loader, thread);
+                        let string = jvm.environment.new_string(&string, thread);
 
                         frame.push([
                             Operand {
@@ -890,15 +895,16 @@ impl ThreadHandle {
                     Constant::Class {
                         path, depth
                     } => {
-                        let class = class_loader.get_class(path).unwrap();
-                        let objects = jvm.class_objects.read();
-                        let object = objects.get(&class.get_id()).unwrap();
-
-                        frame.push([
-                            Operand {
-                                objectref: object.ptr
-                            }
-                        ]);
+                        unimplemented!()
+                        // let class = class_loader.get_class(path).unwrap();
+                        // let objects = jvm.
+                        // let object = objects.get(&class.get_id()).unwrap();
+                        //
+                        // frame.push([
+                        //     Operand {
+                        //         objectref: object.ptr
+                        //     }
+                        // ]);
                     }
                     _ => unimplemented!("Ldc {constant:?} unimplemented"),
                 }
@@ -937,14 +943,14 @@ impl ThreadHandle {
                     Constant::Class {
                         path, depth
                     } => {
+                        todo!()
+                        // let object = objects.get(&class.get_id()).unwrap();
 
-                        let object = objects.get(&class.get_id()).unwrap();
-
-                        frame.push([
-                            Operand {
-                                objectref: object.ptr
-                            }
-                        ]);
+                        // frame.push([
+                        //     Operand {
+                        //         objectref: object.ptr
+                        //     }
+                        // ]);
                     }
                     _ => unimplemented!("Ldc_w {constant:?} unimplemented"),
                 }
@@ -1058,7 +1064,7 @@ impl ThreadHandle {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
                 if let Constant::Class { path, .. } = constant {
                     let array_class = jvm
-                        .retrieve_class(&path, thread)
+                        .retrieve_class(&path, &*class_loader, thread)
                         .unwrap();
 
                     let object = thread.jvm.environment.new_object_array(&array_class, count);
@@ -1079,7 +1085,7 @@ impl ThreadHandle {
 
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .retrieve_class(classpath, thread)
+                    .retrieve_class(classpath, &*class_loader, thread)
                     .unwrap();
 
                 let (_field, field_class) =
@@ -1108,7 +1114,7 @@ impl ThreadHandle {
                 let field_ref = constant.as_ref().unwrap();
                 let classpath = &field_ref.class;
                 let target_class = jvm
-                    .retrieve_class(classpath, thread)
+                    .retrieve_class(classpath, &*class_loader, thread)
                     .unwrap();
 
                 if target_class.this_class != class.this_class {
@@ -1132,7 +1138,7 @@ impl ThreadHandle {
                 if let Constant::Class { path, .. } = constant {
 
                     let target_class = jvm
-                        .retrieve_class(classpath, thread)
+                        .retrieve_class(path, &*class_loader, thread)
                         .unwrap();
 
                     if target_class.this_class != class.this_class {
@@ -1156,7 +1162,7 @@ impl ThreadHandle {
                 if let Constant::Class { path, .. } = constant {
 
                     let target_class = jvm
-                        .retrieve_class(path, thread)
+                        .retrieve_class(path, &*class_loader, thread)
                         .unwrap();
 
                     if target_class.this_class != class.this_class {

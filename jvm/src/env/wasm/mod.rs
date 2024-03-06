@@ -3,7 +3,7 @@ use crate::classfile::resolved::{AccessFlags, Class, ClassId, Method, Ref, Retur
 use crate::env::{Compiler, Environment};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::env::Object;
-use crate::linker::ClassLoader;
+use crate::linker::{ClassLoader, ClassLoaderObject};
 use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use js_sys::{Function, WebAssembly};
 use parking_lot::{Mutex, RwLock};
@@ -294,13 +294,14 @@ impl Environment for WasmEnvironment {
         }
     }
 
-    fn create_method_handle(&self, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
+    fn create_method_handle(&self, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>, class_loader: &dyn ClassLoader) -> MethodHandle {
         if method.access_flags.contains(AccessFlags::NATIVE) {
             return MethodHandle {
                 ptr: unsafe { std::mem::transmute(0) },
                 context: ExecutionContext::Native,
                 class,
                 method,
+                class_loader: class_loader.get_id(),
             };
         }
 

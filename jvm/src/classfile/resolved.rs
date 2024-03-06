@@ -10,7 +10,7 @@ use crate::classfile::{
 use bitflags::{bitflags, Flags};
 use std::alloc::{alloc, Layout};
 
-use crate::linker::ClassLoader;
+use crate::linker::ClassLoaderObject;
 use crate::thread::{Operand, Thread};
 use crate::{ClassContext, JVM};
 use discrim::FromDiscriminant;
@@ -411,8 +411,9 @@ impl Method {
 
     pub fn is_init(&self, classpath: &str, thread: &mut Thread) -> bool {
         let jvm = thread.jvm.clone();
+        let class_loader = thread.class_loader.clone();
 
-        !jvm.retrieve_class(classpath, thread)
+        !jvm.retrieve_class(classpath, &*class_loader, thread)
             .unwrap()
             .access_flags
             .contains(AccessFlags::INTERFACE)

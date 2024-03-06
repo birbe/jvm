@@ -9,7 +9,7 @@ use async_channel::{Receiver, Sender, TrySendError};
 use highway::{HighwayHasher, Key};
 use parking_lot::{Mutex, RwLock};
 use wasm_bindgen::prelude::wasm_bindgen;
-use crate::linker::{BootstrapLoader, ClassLoader};
+use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
 use crate::{JVM};
 use crate::classfile::resolved::{Class, Ref};
 use crate::execution::MethodHandle;
@@ -68,6 +68,22 @@ impl NativeClassLoader {
 
 }
 
+impl ClassLoader for NativeClassLoader {
+
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Object> {
+        todo!()
+    }
+
+    fn get_class_loader_object_handle(&self) -> &Object {
+        &self.instance
+    }
+
+    fn get_id(&self) -> u32 {
+        0
+    }
+
+}
+
 impl BootstrapLoader for NativeClassLoader {
 
     fn get_classfile(&self, classpath: &str) -> Option<ClassFile> {
@@ -76,7 +92,7 @@ impl BootstrapLoader for NativeClassLoader {
     }
 
     fn has_class(&self, classpath: &str) -> bool {
-        true
+        classpath.starts_with("java/")
     }
 
 }

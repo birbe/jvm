@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use crate::classfile::resolved::{Class, Ref};
 
@@ -5,7 +6,6 @@ use std::fmt::{Debug, Formatter};
 use std::hash::Hasher;
 use std::sync::Arc;
 use highway::{HighwayHasher, Key};
-use js_sys::Atomics::load;
 use parking_lot::{Mutex, RwLock};
 use crate::env::Object;
 use crate::execution::MethodHandle;
@@ -14,7 +14,7 @@ use highway::HighwayHash;
 use crate::{ClassContext, ClassLoadError};
 use crate::classfile::ClassFile;
 
-pub trait BootstrapLoader: Send + Debug {
+pub trait BootstrapLoader: Send + Debug + ClassLoader {
 
     fn get_classfile(&self, classpath: &str) -> Option<ClassFile>;
 
@@ -23,38 +23,52 @@ pub trait BootstrapLoader: Send + Debug {
 }
 
 pub struct ClassLoaderThreadedContext<'a> {
-    pub loader: &'a ClassLoader,
-    pub context: &'a mut Thread
+    pub loader: &'a dyn ClassLoader,
+    pub context: RefCell<&'a mut Thread>
 }
 
-impl ClassContext for ClassLoaderThreadedContext {
+impl<'a> ClassContext for ClassLoaderThreadedContext<'a> {
     fn get_class(&self, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
-        self.context.jvm.retrieve_class(classpath, self.context)
+        let mut context = self.context.borrow_mut();
+        let jvm = context.jvm.clone();
+
+        jvm.retrieve_class(classpath, self.loader, *context)
     }
 
     fn id(&self) -> u32 {
-        self.loader.id
+        self.loader.get_id()
     }
 }
 
 #[derive(Debug)]
-pub struct ClassLoader {
+pub struct ClassLoaderObject {
     pub instance: Object,
     pub loader_classpath: String,
+    pub find_class: Arc<MethodHandle>,
     pub id: u32
 }
 
-unsafe impl Send for ClassLoader {}
+unsafe impl Send for ClassLoaderObject {}
 
-impl ClassLoader {
+pub trait ClassLoader {
+
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Object>;
+
+    fn get_class_loader_object_handle(&self) -> &Object;
+
+    fn get_id(&self) -> u32;
+
+}
+
+impl ClassLoaderObject {
     pub fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Object> {
-        let method_handle = thread.class_loader.get_method_by_name(&self.loader_classpath, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;");
-        let classpath_string: Object = thread.jvm.environment.new_string(classpath, thread);
+        let jvm = thread.jvm.clone();
+        let classpath_string: Object = jvm.environment.new_string(classpath, thread);
 
         let jvm = thread.jvm.clone();
 
         unsafe {
-            Some(jvm.environment.object_from_operand(&thread.invoke(&method_handle, Box::new([Operand {
+            Some(jvm.environment.object_from_operand(&thread.invoke(&self.find_class, Box::new([Operand {
                 objectref: classpath_string.ptr
             }])).unwrap()))
         }
