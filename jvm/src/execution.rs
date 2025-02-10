@@ -5,7 +5,7 @@ use std::fmt::{Debug, Formatter};
 
 use std::sync::Arc;
 
-pub type ABIHandlePtr = unsafe extern "C" fn(thread: &mut Thread) -> Operand;
+pub type ABIHandlePtr = Option<unsafe extern "C" fn(thread: &mut Thread) -> Operand>;
 
 pub struct InterpreterContext {
     //RawFrame contains a pointer to the Ref and the Class, these keep the pointers alive

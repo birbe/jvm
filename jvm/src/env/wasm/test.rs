@@ -10,7 +10,7 @@ use highway::{HighwayHasher, Key};
 use parking_lot::{Mutex, RwLock};
 use wasm_bindgen::prelude::wasm_bindgen;
 use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
-use crate::{JVM};
+use crate::{ClassContext, ClassInstance, ClassLoadError, JVM};
 use crate::classfile::resolved::{Class, Ref};
 use crate::execution::MethodHandle;
 use highway::HighwayHash;
@@ -31,11 +31,7 @@ static CHANNEL: Lazy<(Sender<String>, Mutex<Receiver<String>>)> = Lazy::new(|| {
 });
 static CLASSES: Lazy<ArcSwap<HashMap<String, Arc<Vec<u8>>>>> = Lazy::new(|| ArcSwap::new(Arc::new(HashMap::new())));
 
-struct NativeClassLoader {
-    pub classes: RwLock<HashMap<String, Arc<Class>>>,
-    pub handles: RwLock<HashMap<u64, Arc<MethodHandle>>>,
-    instance: Object
-}
+struct NativeClassLoader {}
 
 unsafe impl Send for NativeClassLoader {}
 
@@ -68,34 +64,87 @@ impl NativeClassLoader {
 
 }
 
-impl ClassLoader for NativeClassLoader {
-
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Object> {
-        todo!()
-    }
-
-    fn get_class_loader_object_handle(&self) -> &Object {
-        &self.instance
-    }
-
-    fn get_id(&self) -> u32 {
-        0
-    }
-
-}
-
 impl BootstrapLoader for NativeClassLoader {
-
     fn get_classfile(&self, classpath: &str) -> Option<ClassFile> {
-        let bytes = self.get_bytes(classpath)?;
-        ClassFile::from_bytes(Cursor::new(bytes)).ok()
+        ClassFile::from_bytes(Cursor::new(self.get_bytes(classpath)?)).ok()
     }
 
     fn has_class(&self, classpath: &str) -> bool {
         classpath.starts_with("java/")
     }
 
+    fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+        let classfile = self.get_classfile(classpath).unwrap();
+
+        thread.jvm.clone().generate_class(&classfile, self, thread)
+    }
 }
+
+const THE_NULL: &Object = &Object::NULL;
+
+impl ClassLoader for NativeClassLoader {
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>> {
+        let mut hasher = HighwayHasher::default();
+        hasher.write_all(classpath.as_bytes()).unwrap();
+        hasher.write_u32(0);
+        let id = hasher.finish();
+
+        let loaded_classes = thread.jvm.loaded_classes.read();
+
+        match loaded_classes.get(&id) {
+            None => {}
+            Some(class) => {
+                return Some(class.clone())
+            }
+        };
+
+        drop(loaded_classes);
+
+        let classfile = self.get_classfile(classpath).unwrap();
+        let jvm = thread.jvm.clone();
+        let class = jvm.generate_class(&classfile, self, thread).ok()?;
+        jvm.generate_class_object(class.clone(), self, thread).unwrap();
+
+        Some(class)
+    }
+
+    fn get_class_loader_object_handle(&self) -> &Object {
+        THE_NULL
+    }
+
+    fn get_id(&self) -> u32 {
+        0
+    }
+}
+
+// impl ClassContext for &NativeClassLoader {
+//
+//     fn get_class(&self, jvm: &JVM, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+//         let mut hasher = HighwayHasher::default();
+//         hasher.write_all(classpath.as_bytes()).unwrap();
+//         hasher.write_u32(0);
+//         let id = hasher.finish();
+//
+//         let loaded_classes = jvm.loaded_classes.read();
+//
+//         match loaded_classes.get(&id) {
+//             None => {}
+//             Some(class) => return Ok(class.class.clone())
+//         };
+//
+//         drop(loaded_classes);
+//
+//         let classfile = self.get_classfile(classpath).unwrap();
+//         let class = jvm.generate_class(&classfile, self)?;
+//         jvm.generate_class_object(class.clone(), );
+//
+//         Ok(class)
+//     }
+//
+//     fn id(&self) -> u32 {
+//         0
+//     }
+// }
 
 
 struct StdoutWrapper;
@@ -162,17 +211,21 @@ pub fn wasm_test() {
 
     console_error_panic_hook::set_once();
 
-    let bootstrapper = NativeClassLoader {
-        classes: RwLock::new(HashMap::new()),
-        handles: RwLock::new(HashMap::new()),
-        instance: unsafe { Object::NULL }
-    };
+    let bootstrapper = NativeClassLoader {};
 
     let native_bootstrapper = Arc::new(bootstrapper);
 
     let jvm = JVM::new(
         Mutex::new(Box::new(StdoutWrapper)),
         Box::new(WasmEnvironment::new()),
-        native_bootstrapper
+        native_bootstrapper.clone()
     );
+
+    let mut main_thread = jvm.create_thread(native_bootstrapper.clone());
+
+    let class = native_bootstrapper.find_class(&mut main_thread, "Main").unwrap();
+    let handle = jvm.get_method("Main", "main", "()I", 0);
+
+    let operand = main_thread.invoke(&handle, Box::new([]));
+    console_log!("{:?}", unsafe { operand.unwrap().data });
 }

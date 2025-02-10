@@ -193,6 +193,15 @@ impl<'jvm> FrameStack {
 
     pub fn push(&mut self, frame: RawFrame) {
         self.frame_index += 1;
+
+        if self.frame_index as usize >= self.frames.len() {
+            for frame in &self.frames[..] {
+                console_log!("{} {}", unsafe { &(*frame.class).this_class }, unsafe {
+                    &(*frame.method).name
+                });
+            }
+        }
+
         self.frames[self.frame_index as usize] = frame;
     }
 
@@ -404,20 +413,20 @@ impl ThreadHandle {
         let locals: Vec<u32> = frame.locals.iter().map(|local| unsafe { local.objectref as u32 }).collect();
         let stack: Vec<u32> = (&frame.stack[..*frame.stack_length]).iter().map(|local| unsafe { local.objectref as u32 }).collect();
 
-        // if &*class.this_class != "java/lang/Class" {
-        //     let mut stdout = thread.jvm.stdout.lock();
-        //     write!(&mut stdout, "{}",
-        //            format!(
-        //                "{:<20} | {:<30} | {:<15} | {:<6} | {:?} | {:?}",
-        //                format!("{:?}", bytecode),
-        //                class.this_class,
-        //                method.name,
-        //                pc,
-        //                locals,
-        //                stack
-        //            )
-        //     ).unwrap();
-        // }
+        if &*class.this_class != "java/lang/Class" {
+            let mut stdout = thread.jvm.stdout.lock();
+            write!(&mut stdout, "{}",
+                   format!(
+                       "{:<20} | {:<30} | {:<15} | {:<6} | {:?} | {:?}",
+                       format!("{:?}", bytecode),
+                       class.this_class,
+                       method.name,
+                       pc,
+                       locals,
+                       stack
+                   )
+            ).unwrap();
+        }
 
         let jvm = thread.jvm.clone();
         let class_loader = thread.class_loader.clone();
@@ -468,6 +477,8 @@ impl ThreadHandle {
 
                 let method = target_class.get_method(&ref_.name_and_type).unwrap();
 
+                console_log!("{} {}", target_class.this_class, method.name);
+
                 let c = if {
                     !method.is_init(classpath, thread)
                         && !target_class.access_flags.contains(AccessFlags::INTERFACE)
@@ -501,7 +512,7 @@ impl ThreadHandle {
                     panic!()
                 }
 
-                let method_handle = jvm.get_method(&class.this_class, &ref_.name_and_type.name, &ref_.name_and_type.descriptor, class_loader.get_id());
+                let method_handle = jvm.get_method(&c.this_class, &ref_.name_and_type.name, &ref_.name_and_type.descriptor, class_loader.get_id());
 
                 thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
             }
@@ -895,16 +906,16 @@ impl ThreadHandle {
                     Constant::Class {
                         path, depth
                     } => {
-                        unimplemented!()
-                        // let class = class_loader.get_class(path).unwrap();
-                        // let objects = jvm.
-                        // let object = objects.get(&class.get_id()).unwrap();
-                        //
-                        // frame.push([
-                        //     Operand {
-                        //         objectref: object.ptr
-                        //     }
-                        // ]);
+                        console_log!("{path}");
+
+                        let class = class_loader.find_class(thread, path).unwrap();
+                        let object = class.class_instance.get().unwrap();
+
+                        frame.push([
+                            Operand {
+                                objectref: object.ptr
+                            }
+                        ]);
                     }
                     _ => unimplemented!("Ldc {constant:?} unimplemented"),
                 }

@@ -278,7 +278,7 @@ impl Environment for WasmEnvironment {
                 ]));
                 thread.frame_stack.push(frame);
 
-                let out = unsafe { (method_handle.ptr)(thread) };
+                let out = unsafe { method_handle.ptr.unwrap()(thread) };
 
                 out
             }
@@ -319,7 +319,7 @@ impl Environment for WasmEnvironment {
 
     fn new_string(&self, contents: &str, thread: &mut Thread) -> Object {
         let jvm = thread.jvm.clone();
-        let string_class = jvm.get_class("java/lang/String").unwrap();
+        let string_class = jvm.bootstrap_classloader.find_class(thread,"java/lang/String").unwrap();
 
         let string_object = self.new_object(&string_class);
         string_object

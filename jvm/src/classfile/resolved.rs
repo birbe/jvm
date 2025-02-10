@@ -10,7 +10,7 @@ use crate::classfile::{
 use bitflags::{bitflags, Flags};
 use std::alloc::{alloc, Layout};
 
-use crate::linker::ClassLoaderObject;
+use crate::linker::{ClassLoader, ClassLoaderObject};
 use crate::thread::{Operand, Thread};
 use crate::{ClassContext, JVM};
 use discrim::FromDiscriminant;
@@ -22,6 +22,7 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, AtomicU8};
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
+use crate::env::Object;
 
 bitflags! {
 
@@ -66,13 +67,15 @@ pub struct Class {
 
     pub heap_size: usize,
     pub class_loader: u32,
+    pub class_instance: OnceCell<Object>,
     internal_id: ClassId,
 }
 
 impl Class {
     pub fn init(
         classfile: &ClassFile,
-        class_context: &dyn ClassContext,
+        thread: &mut Thread,
+        class_loader: &dyn ClassLoader,
         internal_id: ClassId,
     ) -> Option<Self> {
         let constant_pool =
@@ -82,9 +85,10 @@ impl Class {
 
         let super_class = if &*this_class != "java/lang/Object" {
             Some(
-                class_context.get_class(
+                class_loader.find_class(
+                    thread,
                     &resolve_string(&classfile.constant_pool, classfile.super_class).unwrap()
-                ).unwrap()
+                ).unwrap().clone()
             )
         } else {
             None
@@ -96,9 +100,10 @@ impl Class {
             .map(|classinfo| {
                 let interface_classpath =
                     resolve_string(&classfile.constant_pool, classinfo.name_index).unwrap();
-                class_context.get_class(
+                class_loader.find_class(
+                    thread,
                     &interface_classpath
-                ).unwrap()
+                ).unwrap().clone()
             })
             .collect();
 
@@ -180,7 +185,8 @@ impl Class {
                 .collect::<Option<Vec<Attribute>>>()?,
             constant_pool,
             heap_size,
-            class_loader: class_context.id(),
+            class_loader: class_loader.get_id(),
+            class_instance: OnceCell::new(),
             internal_id
         })
     }

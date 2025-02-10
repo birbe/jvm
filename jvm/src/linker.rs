@@ -11,14 +11,19 @@ use crate::env::Object;
 use crate::execution::MethodHandle;
 use crate::thread::{Operand, Thread};
 use highway::HighwayHash;
-use crate::{ClassContext, ClassLoadError};
+use crate::{ClassContext, ClassInstance, ClassLoadError, JVM};
 use crate::classfile::ClassFile;
 
-pub trait BootstrapLoader: Send + Debug + ClassLoader {
+pub trait BootstrapLoader: ClassLoader {
 
     fn get_classfile(&self, classpath: &str) -> Option<ClassFile>;
 
     fn has_class(&self, classpath: &str) -> bool;
+
+    ///This method checks the JVM method area to see if the class has been defined already;
+    /// if not, then it will retrieve the bytes defining the classfile through some implementation-dependent manner
+    /// and call JVM::generate_class. This method will not generate a corresponding Class<?> instance
+    fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError>;
 
 }
 
@@ -27,18 +32,18 @@ pub struct ClassLoaderThreadedContext<'a> {
     pub context: RefCell<&'a mut Thread>
 }
 
-impl<'a> ClassContext for ClassLoaderThreadedContext<'a> {
-    fn get_class(&self, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
-        let mut context = self.context.borrow_mut();
-        let jvm = context.jvm.clone();
-
-        jvm.retrieve_class(classpath, self.loader, *context)
-    }
-
-    fn id(&self) -> u32 {
-        self.loader.get_id()
-    }
-}
+// impl<'a> ClassContext for ClassLoaderThreadedContext<'a> {
+//     fn get_class(&self, _: &JVM, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+//         let mut context = self.context.borrow_mut();
+//         let jvm = context.jvm.clone();
+//
+//         jvm.retrieve_class(classpath, self.loader, *context)
+//     }
+//
+//     fn id(&self) -> u32 {
+//         self.loader.get_id()
+//     }
+// }
 
 #[derive(Debug)]
 pub struct ClassLoaderObject {
@@ -52,7 +57,7 @@ unsafe impl Send for ClassLoaderObject {}
 
 pub trait ClassLoader {
 
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Object>;
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>>;
 
     fn get_class_loader_object_handle(&self) -> &Object;
 
