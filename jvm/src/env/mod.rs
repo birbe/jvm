@@ -30,6 +30,8 @@ pub trait Environment {
 
     fn new_string(&self, contents: &str, thread: &mut Thread) -> Object;
 
+    fn get_string(&self, object: &Object) -> String;
+
     fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class;
 
     unsafe fn get_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str) -> Operand;
@@ -38,15 +40,19 @@ pub trait Environment {
 
     fn new_object_array(&self, class: &Class, size: i32) -> Object;
 
+    fn is_null(&self, object: &Object) -> bool;
+    
     fn new_array(&self, type_: i32, size: i32) -> Object;
 
     fn get_array_length(&self, array: &Object) -> i32;
 
-    fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand);
+    unsafe fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand);
 
-    fn get_array_element(&self, array: &Object, index: i32) -> Operand;
+    unsafe fn get_array_element(&self, array_type: u8, array: &Object, index: i32) -> Operand;
 
-    fn set_object_array_element(&self, array: &Object, index: i32, value: Operand);
+    unsafe fn set_object_array_element(&self, array: &Object, index: i32, value: Operand);
+
+    unsafe fn get_object_array_element(&self, array: &Object, index: i32) -> Object;
 
     fn new_object(&self, class: &Class) -> Object;
 
@@ -76,6 +82,16 @@ impl Object {
         drop: None,
     };
 
+    pub fn consume(self) -> Operand {
+        let ptr = self.ptr;
+        
+        std::mem::forget(self);
+        
+        Operand {
+            objectref: ptr
+        }
+    }
+    
     pub unsafe fn from_raw(ptr: *mut (), drop: Option<extern "C" fn(*mut ())>) -> Self {
         Self {
             ptr,

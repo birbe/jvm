@@ -346,14 +346,9 @@ fn recurse_get_earliest_index(block: usize, blocks: &[Range<usize>]) -> usize {
         .iter()
         .enumerate()
         .filter(|(_idx, other_range)| {
-            if other_range.end <= range.end
+            other_range.end <= range.end
                 && other_range.end >= range.start
                 && !range.contains(&other_range.start)
-            {
-                true
-            } else {
-                false
-            }
         })
         .collect();
 

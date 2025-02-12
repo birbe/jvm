@@ -1,10 +1,8 @@
 #![feature(slice_ptr_get)]
-#![feature(slice_ptr_len)]
 #![feature(ptr_metadata)]
-#![feature(pointer_byte_offsets)]
 #![feature(alloc_layout_extra)]
-#![feature(const_alloc_layout)]
 #![feature(if_let_guard)]
+#![feature(asm_experimental_arch)]
 
 extern crate core;
 
@@ -89,7 +87,7 @@ pub struct JVM {
 
 impl JVM {
     pub fn new(stdout: Mutex<Box<dyn Write>>, environment: Box<dyn Environment>, bootstrap_classloader: Arc<dyn BootstrapLoader>) -> Arc<Self> {
-        Arc::new(Self {
+        let jvm = Arc::new(Self {
             stdout,
             threads: RwLock::new(vec![]),
             environment,
@@ -98,9 +96,22 @@ impl JVM {
             bootstrap_classloader,
             class_ids: AtomicU32::new(0),
             thread_ids: AtomicU32::new(0),
-        })
+        });
+        
+        let mut temp_thread = jvm.create_thread(jvm.bootstrap_classloader.clone());
+        jvm.bootstrap_classloader.find_class(&mut temp_thread, "java/lang/Class").unwrap();
+        
+        let classes = jvm.loaded_classes.read();
+        
+        for (_, class) in classes.iter() {
+            jvm.generate_class_object(class.clone(), &*jvm.bootstrap_classloader, &mut temp_thread).unwrap();
+        } 
+        
+        drop(classes);
+        
+        jvm
     }
-
+    
     ///This is not an instanceof check. This returns if the provided child class is specifically *below* the parent class in the inheritance tree.
     pub fn is_subclass(child: &Class, parent: &Class) -> bool {
         if &*child.this_class == "java/lang/Object" {
@@ -123,17 +134,19 @@ impl JVM {
         }
     }
 
-    pub fn generate_class(&self, class_file: &ClassFile, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Result<Arc<Class>, ClassLoadError> {
+    pub fn generate_class(&self, class_file: &ClassFile, class_loader: Arc<dyn ClassLoader>, thread: &mut Thread) -> Result<Arc<Class>, ClassLoadError> {
         let class = Arc::new(
             Class::init(
                 &class_file,
                 thread,
-                class_loader,
+                class_loader.clone(),
                 self.class_ids.fetch_add(1, Ordering::Relaxed),
             )
                 .ok_or(ClassLoadError::MalformedClassDef)?,
         );
-
+        
+        console_log!("Generated {}", class.this_class);
+        
         let mut loaded_classes = self.loaded_classes.write();
 
         let mut hasher = HighwayHasher::default();
@@ -141,15 +154,28 @@ impl JVM {
         hasher.write_u32(class_loader.get_id());
         let hash_key = hasher.finish();
 
-        loaded_classes.insert(hash_key, class.clone());
+        if let Some(_) = loaded_classes.insert(hash_key, class.clone()) {
+            panic!("Duplicate class loaded for {}", class.this_class);
+        }
 
-        self.link_class(class.clone(), class_loader);
+        self.link_class(class.clone(), &*class_loader);
 
         Ok(class)
+    }
+    
+    pub fn is_class_linked(&self, classpath: &str, loader: u32) -> Option<Arc<Class>> {
+        let mut hasher = HighwayHasher::default();
+        hasher.write_all(classpath.as_bytes()).unwrap();
+        hasher.write_u32(loader);
+        let hash_key = hasher.finish();
+        
+        self.loaded_classes.read().get(&hash_key).cloned()
     }
 
     ///This method creates an instance of java.lang.Class<?> for a given Class
     pub fn generate_class_object(&self, class: Arc<Class>, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Result<(), ClassLoadError> {
+        if self.is_class_linked("java/lang/Class", 0).is_none() { return Ok(()); }
+        
         let java_lang_class = self.bootstrap_classloader.get_class(thread, "java/lang/Class")?;
 
         let mut hasher = HighwayHasher::default();

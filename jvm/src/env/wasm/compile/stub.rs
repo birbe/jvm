@@ -652,6 +652,11 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             match arg {
                 FieldType::Class(_) | FieldType::Array { .. } => {
                     func.instruction(&Instruction::LocalGet(operand_local));
+
+                    func.instruction(&Instruction::LocalGet(operand_local));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::Call(debug));
+                    
                     func.instruction(&Instruction::I32Load(MemArg {
                         offset: (index * 8) as u64,
                         align: 2,
@@ -783,6 +788,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         function.instruction(&Instruction::Call(alloc_ref));
         function.instruction(&Instruction::LocalTee(0));
 
+        console_log!("class ptr {}", class as *const Class as i32);
         function.instruction(&Instruction::I32Const(class as *const Class as i32));
 
         for (_, field) in recursive_fields {

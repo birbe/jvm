@@ -64,7 +64,7 @@ impl NativeClassLoader {
 
 }
 
-impl BootstrapLoader for NativeClassLoader {
+impl BootstrapLoader for Arc<NativeClassLoader> {
     fn get_classfile(&self, classpath: &str) -> Option<ClassFile> {
         ClassFile::from_bytes(Cursor::new(self.get_bytes(classpath)?)).ok()
     }
@@ -76,34 +76,26 @@ impl BootstrapLoader for NativeClassLoader {
     fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
         let classfile = self.get_classfile(classpath).unwrap();
 
-        thread.jvm.clone().generate_class(&classfile, self, thread)
+        match thread.jvm.is_class_linked(classpath, self.get_id()) {
+            None => thread.jvm.clone().generate_class(&classfile, Arc::new(self.clone()), thread),
+            Some(class) => Ok(class)
+        }
     }
 }
 
 const THE_NULL: &Object = &Object::NULL;
 
-impl ClassLoader for NativeClassLoader {
+impl ClassLoader for Arc<NativeClassLoader> {
     fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>> {
-        let mut hasher = HighwayHasher::default();
-        hasher.write_all(classpath.as_bytes()).unwrap();
-        hasher.write_u32(0);
-        let id = hasher.finish();
-
-        let loaded_classes = thread.jvm.loaded_classes.read();
-
-        match loaded_classes.get(&id) {
-            None => {}
-            Some(class) => {
-                return Some(class.clone())
-            }
-        };
-
-        drop(loaded_classes);
+        if let Some(class) = thread.jvm.is_class_linked(classpath, self.get_id()) {
+            return Some(class);
+        }
 
         let classfile = self.get_classfile(classpath).unwrap();
         let jvm = thread.jvm.clone();
-        let class = jvm.generate_class(&classfile, self, thread).ok()?;
-        jvm.generate_class_object(class.clone(), self, thread).unwrap();
+        let class = jvm.generate_class(&classfile, Arc::new(self.clone()), thread).ok()?;
+
+        if classpath != "java/lang/Class" { jvm.generate_class_object(class.clone(), self, thread).unwrap() };
 
         Some(class)
     }
@@ -213,7 +205,7 @@ pub fn wasm_test() {
 
     let bootstrapper = NativeClassLoader {};
 
-    let native_bootstrapper = Arc::new(bootstrapper);
+    let native_bootstrapper = Arc::new(Arc::new(bootstrapper));
 
     let jvm = JVM::new(
         Mutex::new(Box::new(StdoutWrapper)),
@@ -223,7 +215,17 @@ pub fn wasm_test() {
 
     let mut main_thread = jvm.create_thread(native_bootstrapper.clone());
 
-    let class = native_bootstrapper.find_class(&mut main_thread, "Main").unwrap();
+    // let wasm_classloader_class = native_bootstrapper.find_class(&mut main_thread, "WASMClassLoader").unwrap();
+    // let wasm_classloader = jvm.environment.new_object(&wasm_classloader_class);
+    //
+    // let mut main_thread = jvm.create_thread(Arc::new(Arc::new(ClassLoaderObject {
+    //     instance: wasm_classloader,
+    //     loader_classpath: "WASMClassLoader".into(),
+    //     find_class: jvm.get_method("WASMClassLoader", "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", 0),
+    //     id: 1,
+    // })));
+
+    let class = main_thread.class_loader.clone().find_class(&mut main_thread, "Main").unwrap();
     let handle = jvm.get_method("Main", "main", "()I", 0);
 
     let operand = main_thread.invoke(&handle, Box::new([]));

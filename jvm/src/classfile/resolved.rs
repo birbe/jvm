@@ -51,8 +51,9 @@ bitflags! {
 
 pub type ClassId = u32;
 
-#[derive(Debug)]
+#[repr(C)]
 pub struct Class {
+    indicator: u128,
     pub constant_pool: ConstantPool,
     pub this_class: Arc<String>,
     pub super_class: Option<Arc<Class>>,
@@ -61,28 +62,38 @@ pub struct Class {
     pub fields: Vec<Field>,
     pub methods: Vec<Arc<Method>>,
 
-    pub statics: usize,
+    pub statics: *mut [Operand],
     pub static_init_state: AtomicU32,
     pub attributes: Vec<Attribute>,
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub heap_size: usize,
-    pub class_loader: u32,
+    pub class_loader: Arc<dyn ClassLoader>,
     pub class_instance: OnceCell<Object>,
     internal_id: ClassId,
 }
+
+impl Drop for Class {
+    fn drop(&mut self) {
+        panic!("Dropping class {} loaded by {}", self.this_class, self.class_loader.get_id());
+    }
+}
+
+unsafe impl Sync for Class {}
+unsafe impl Send for Class {}
 
 impl Class {
     pub fn init(
         classfile: &ClassFile,
         thread: &mut Thread,
-        class_loader: &dyn ClassLoader,
+        class_loader: Arc<dyn ClassLoader>,
         internal_id: ClassId,
     ) -> Option<Self> {
         let constant_pool =
             ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
 
         let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
-
+        
         let super_class = if &*this_class != "java/lang/Object" {
             Some(
                 class_loader.find_class(
@@ -107,6 +118,7 @@ impl Class {
             })
             .collect();
 
+        #[cfg(not(target_arch = "wasm32"))]
         let super_heap_size = match &super_class {
             None => 0,
             Some(super_class) => super_class.heap_size,
@@ -118,10 +130,17 @@ impl Class {
             .fields
             .iter()
             .map(|field_info| {
+                #[cfg(not(target_arch = "wasm32"))]
                 let field = Field::new(
                     field_info,
                     &constant_pool,
                     super_heap_size + index * size_of::<Operand>(),
+                );
+
+                #[cfg(target_arch = "wasm32")]
+                let field = Field::new(
+                    field_info,
+                    &constant_pool
                 );
 
                 if !AccessFlags::from_bits(field_info.access_flags)
@@ -135,28 +154,17 @@ impl Class {
             })
             .collect::<Option<Vec<Field>>>()?;
 
-        let static_fields: Vec<&Field> = fields
+        let static_fields = fields
             .iter()
             .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
-            .collect();
+            .count();
 
+        #[cfg(not(target_arch = "wasm32"))]
         let heap_size =
             super_heap_size + (fields.len() - static_fields.len()) * size_of::<Operand>();
 
-        let static_alloc = unsafe {
-            if static_fields.len() > 0 {
-                let layout = Layout::from_size_align(
-                    static_fields.len() * size_of::<Operand>(),
-                    size_of::<Operand>(),
-                )
-                .unwrap();
-                alloc(layout) as usize
-            } else {
-                0
-            }
-        };
-
         Some(Self {
+            indicator: 0b10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010,
             super_class,
             this_class,
             access_flags: AccessFlags::from_bits(classfile.access_flags)?,
@@ -169,7 +177,7 @@ impl Class {
                     Method::new(method_info, &constant_pool, classfile).map(Arc::new)
                 })
                 .collect::<Option<Vec<Arc<Method>>>>()?,
-            statics: static_alloc,
+            statics: Box::into_raw(vec![Operand { data: 0 }; static_fields].into_boxed_slice()),
             static_init_state: AtomicU32::new(0),
             attributes: classfile
                 .attributes
@@ -184,8 +192,9 @@ impl Class {
                 })
                 .collect::<Option<Vec<Attribute>>>()?,
             constant_pool,
+            #[cfg(not(target_arch = "wasm32"))]
             heap_size,
-            class_loader: class_loader.get_id(),
+            class_loader,
             class_instance: OnceCell::new(),
             internal_id
         })
@@ -916,6 +925,7 @@ pub struct Field {
     pub descriptor: FieldType,
     pub descriptor_string: String,
     pub attributes: HashMap<String, Attribute>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub heap_offset: usize,
 }
 
@@ -923,6 +933,7 @@ impl Field {
     fn new(
         field_info: &FieldInfo,
         constant_pool: &ConstantPool,
+        #[cfg(not(target_arch = "wasm32"))]
         heap_offset: usize,
     ) -> Option<Self> {
         Some(Self {
@@ -956,6 +967,7 @@ impl Field {
                     Some((descriptor_kind, attribute))
                 })
                 .collect::<Option<HashMap<String, Attribute>>>()?,
+            #[cfg(not(target_arch = "wasm32"))]
             heap_offset,
         })
     }

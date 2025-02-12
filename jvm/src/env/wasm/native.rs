@@ -27,8 +27,35 @@ pub fn native_func(method_handle: &MethodHandle, thread: &mut Thread) -> Operand
             Operand {
                 data: 0
             }
+        },
+        ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
+            // let mut frame = unsafe { &mut *thread.frame_stack.get_top() };
+            // let frame = frame.as_frame();
+
+            Operand {
+                data: 0
+            }
         }
-        _ => unimplemented!("{} {:?}", method_handle.class.this_class, method_handle.method)
+        ("WASMClassLoader", "fetch", "(Ljava/lang/String;)[B") => {
+            let byte_array = jvm.environment.new_array(8, 0);
+
+            Operand {
+                objectref: byte_array.ptr
+            }
+        }
+        ("java/lang/ClassLoader", "registerNatives", "()V") => {
+            Operand {
+                data: 0
+            }
+        }
+        // ("java/lang/System", "initProperties")
+        _ => {
+            // unimplemented!("{} {:?}", method_handle.class.this_class, method_handle.method)
+            console_log!("warning: {} {} unimplemented, returning null", method_handle.class.this_class, method_handle.method.name);
+            Operand {
+                data: 0
+            }
+        }
     }
 
 }

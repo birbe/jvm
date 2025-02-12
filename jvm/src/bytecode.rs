@@ -340,7 +340,13 @@ impl Bytecode {
                 reader.read_u16::<BigEndian>()?;
                 out
             }
-            0xb9 => Self::Invokeinterface(reader.read_u16::<BigEndian>()?, reader.read_u8()?),
+            0xb9 => { 
+                let out = Self::Invokeinterface(reader.read_u16::<BigEndian>()?, reader.read_u8()?);
+                
+                assert_eq!(reader.read_u8()?, 0);
+                
+                out
+            },
             0xb7 => Self::Invokespecial(reader.read_u16::<BigEndian>()?),
             0xb8 => Self::Invokestatic(reader.read_u16::<BigEndian>()?),
             0xb6 => Self::Invokevirtual(reader.read_u16::<BigEndian>()?),

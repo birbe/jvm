@@ -101,13 +101,13 @@ pub fn generate_helper_wasm() -> Module {
         let mut func = Function::new([(1, ValType::I32)]);
 
         func.instruction(&Instruction::Call(0));
-        func.instruction(&Instruction::LocalTee(2));
-        func.instruction(&Instruction::LocalGet(0));
-        func.instruction(&Instruction::LocalGet(1));
-        func.instruction(&Instruction::ArrayNewDefault(storage_type_start));
-        func.instruction(&Instruction::StructNew(1));
-        func.instruction(&Instruction::TableSet(0));
-        func.instruction(&Instruction::LocalGet(2));
+        func.instruction(&Instruction::LocalTee(2)); //ref slot ->
+        func.instruction(&Instruction::LocalGet(1)); //ref slot, class ptr ->
+        func.instruction(&Instruction::LocalGet(0)); //ref slot, class ptr, length ->
+        func.instruction(&Instruction::ArrayNewDefault(storage_type_start)); //ref slot, class ptr, array ref ->
+        func.instruction(&Instruction::StructNew(1)); //ref slot, struct array container ref ->
+        func.instruction(&Instruction::TableSet(0)); // ->
+        func.instruction(&Instruction::LocalGet(2)); //ref slot
 
         func.instruction(&Instruction::End);
         code.function(&func);
@@ -163,8 +163,6 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::Block(BlockType::Empty));
 
         func.instruction(&Instruction::LocalGet(0));
-        func.instruction(&Instruction::I32Const(4));
-        func.instruction(&Instruction::I32Sub);
 
         func.instruction(&Instruction::BrTable(Cow::Owned(vec![0, 1, 2, 3, 4, 5, 6, 7]), 0));
 
@@ -212,6 +210,51 @@ pub fn generate_helper_wasm() -> Module {
     }
 
     {
+        funcs.function(new_object_array_signature);
+
+        let mut func = Function::new([(1, ValType::I32)]);
+
+        //arrayref, index -> value
+
+        func.instruction(&Instruction::Call(0));
+        func.instruction(&Instruction::LocalTee(2));
+
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::TableGet(0));
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+        func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 1 });
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(storage_type_start)));
+
+        func.instruction(&Instruction::LocalGet(1));
+        func.instruction(&Instruction::ArrayGet(storage_type_start));
+        func.instruction(&Instruction::RefCastNullable(HeapType::Any));
+
+        func.instruction(&Instruction::TableSet(0));
+
+        func.instruction(&Instruction::LocalGet(2));
+
+        func.instruction(&Instruction::End);
+        code.function(&func);
+
+        exports.export("get_object_array_element", ExportKind::Func, 6);
+    }
+
+    {
+        funcs.function(object_class_signature);
+
+        let mut func = Function::new([]);
+
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::TableGet(0));
+        func.instruction(&Instruction::RefIsNull);
+
+        func.instruction(&Instruction::End);
+        code.function(&func);
+
+        exports.export("is_ref_null", ExportKind::Func, 7);
+    }
+
+    {
         array_types.iter().enumerate().for_each(|(index, (type_index, name, val_type))| {
             funcs.function(types.len());
             types.function(vec![ValType::I32, ValType::I32, *val_type], []);
@@ -231,7 +274,58 @@ pub fn generate_helper_wasm() -> Module {
 
             code.function(&func);
 
-            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 6);
+            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 8);
+        });
+
+    }
+
+    {
+        array_types.iter().enumerate().for_each(|(index, (type_index, name, val_type))| {
+            funcs.function(types.len());
+            types.function(vec![ValType::I32, ValType::I32], [ValType::I64]);
+
+            let mut func = Function::new([]);
+
+            func.instruction(&Instruction::LocalGet(0));
+            func.instruction(&Instruction::TableGet(0));
+            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+            func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 1 });
+            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(type_index + primitive_array_type_start)));
+            func.instruction(&Instruction::LocalGet(1));
+
+            match &name[..] {
+                "byte" | "bool" | "char" => {
+                    func.instruction(&Instruction::ArrayGetU(type_index + primitive_array_type_start));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                },
+                "short" => {
+                    func.instruction(&Instruction::ArrayGetS(type_index + primitive_array_type_start));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                },
+                "float" => {
+                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
+                    func.instruction(&Instruction::I32ReinterpretF32);
+                    func.instruction(&Instruction::I64ExtendI32U);
+                }
+                "double" => {
+                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
+                    func.instruction(&Instruction::I64ReinterpretF64);
+                }
+                "int" => {
+                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                }
+                "long" => {
+                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
+                }
+                _ => unreachable!("{name}")
+            };
+
+            func.instruction(&Instruction::End);
+
+            code.function(&func);
+
+            exports.export(&format!("{}_array_load", name), ExportKind::Func, exports.len() + 1);
         });
 
     }

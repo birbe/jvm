@@ -4,6 +4,7 @@ use crate::classfile::resolved::{Class, Ref};
 
 use std::fmt::{Debug, Formatter};
 use std::hash::Hasher;
+use std::io::Write;
 use std::sync::Arc;
 use highway::{HighwayHasher, Key};
 use parking_lot::{Mutex, RwLock};
@@ -55,7 +56,7 @@ pub struct ClassLoaderObject {
 
 unsafe impl Send for ClassLoaderObject {}
 
-pub trait ClassLoader {
+pub trait ClassLoader: Debug {
 
     fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>>;
 
@@ -65,22 +66,44 @@ pub trait ClassLoader {
 
 }
 
-impl ClassLoaderObject {
-    pub fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Object> {
+impl ClassLoader for Arc<ClassLoaderObject> {
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>> {
         let jvm = thread.jvm.clone();
         let classpath_string: Object = jvm.environment.new_string(classpath, thread);
 
-        let jvm = thread.jvm.clone();
+        {
+            let loaded_classes = jvm.loaded_classes.read();
 
-        unsafe {
-            Some(jvm.environment.object_from_operand(&thread.invoke(&self.find_class, Box::new([Operand {
-                objectref: classpath_string.ptr
-            }])).unwrap()))
+            let mut hasher = HighwayHasher::default();
+            hasher.write_all(classpath.as_bytes()).unwrap();
+            hasher.write_u32(self.get_id());
+            let hash_key = hasher.finish();
+            
+            match loaded_classes.get(&hash_key) {
+                None => {}
+                Some(class) => return Some(class.clone())
+            }
         }
+
+        //defineClass should be called by the ClassLoader when invoked
+        let operands = Box::new([
+            Operand { objectref: self.instance.ptr },
+            Operand { objectref: classpath_string.ptr }
+        ]);
+        
+        let object = unsafe {
+            jvm.environment.object_from_operand(&thread.invoke(&self.find_class, operands).unwrap())
+        };
+        let class = jvm.retrieve_class(classpath, self, thread).ok()?;
+        
+        Some(class)
     }
 
-    pub fn get_class_loader_object_handle(&self) -> &Object {
+    fn get_class_loader_object_handle(&self) -> &Object {
         &self.instance
     }
 
+    fn get_id(&self) -> u32 {
+        self.id
+    }
 }
