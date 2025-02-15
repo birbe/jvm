@@ -229,5 +229,5 @@ pub fn wasm_test() {
     let handle = jvm.get_method("Main", "main", "()I", 0);
 
     let operand = main_thread.invoke(&handle, Box::new([]));
-    console_log!("{:?}", unsafe { operand.unwrap().data });
+    console_log!("{:?}", operand.unwrap().data());
 }

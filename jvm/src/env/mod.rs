@@ -3,8 +3,6 @@ use crate::execution::MethodHandle;
 use crate::linker::{ClassLoader, ClassLoaderObject};
 use crate::thread::{Operand, Thread};
 use std::sync::Arc;
-
-pub mod interpreter;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
 #[cfg(target_arch = "wasm32")]
@@ -40,6 +38,8 @@ pub trait Environment {
 
     fn new_object_array(&self, class: &Class, size: i32) -> Object;
 
+    fn clone_reference(&self, object: &Object) -> Object;
+
     fn is_null(&self, object: &Object) -> bool;
     
     fn new_array(&self, type_: i32, size: i32) -> Object;
@@ -57,29 +57,33 @@ pub trait Environment {
     fn new_object(&self, class: &Class) -> Object;
 
     unsafe fn object_from_operand(&self, operand: &Operand) -> Object;
-
+    unsafe fn object_ref_from_operand(&self, operand: &Operand) -> &Object;
 }
 
 pub trait Compiler {}
 
-#[derive(Debug, PartialEq)]
+#[repr(C)]
 pub struct Object {
-    pub(crate) ptr: *mut (),
-    pub(crate) drop: Option<extern "C" fn(*mut ())>
+    pub ptr: *mut (),
+    padding: [u64; 0],
+    drop: extern "C" fn(*mut ())
 }
 
 impl Drop for Object {
+
+    #[inline(never)]
     fn drop(&mut self) {
-        if let Some(drop) = self.drop {
-            drop(self.ptr);
-        }
+        (self.drop)(self.ptr)
     }
 }
+
+extern "C" fn nothing(_: *mut ()) {}
 
 impl Object {
     pub const NULL: Self = Self {
         ptr: std::ptr::null_mut(),
-        drop: None,
+        padding: [],
+        drop: nothing,
     };
 
     pub fn consume(self) -> Operand {
@@ -87,14 +91,13 @@ impl Object {
         
         std::mem::forget(self);
         
-        Operand {
-            objectref: ptr
-        }
+        Operand::new_ref(ptr)
     }
     
-    pub unsafe fn from_raw(ptr: *mut (), drop: Option<extern "C" fn(*mut ())>) -> Self {
+    pub unsafe fn from_raw(ptr: *mut (), drop: extern "C" fn(*mut ())) -> Self {
         Self {
             ptr,
+            padding: [],
             drop,
         }
     }

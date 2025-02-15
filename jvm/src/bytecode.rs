@@ -13,7 +13,6 @@ pub struct LookupEntry {
     pub offset: i32,
 }
 
-#[derive(Debug)]
 pub enum JValue {
     Reference(Object),
     Int(i32),
@@ -25,23 +24,15 @@ pub enum JValue {
 }
 
 impl JValue {
-    pub fn as_operand(&self) -> Operand {
+    pub fn to_operand(self) -> Operand {
         match self {
-            JValue::Reference(object) => Operand {
-                objectref: object.ptr,
-            },
-            JValue::Int(int) => Operand { data: *int as u64 },
-            JValue::Long(long) => Operand { data: *long as u64 },
-            JValue::Float(float) => Operand {
-                data: u32::from_ne_bytes(float.to_ne_bytes()) as u64,
-            },
-            JValue::Double(double) => Operand {
-                data: u64::from_ne_bytes(double.to_ne_bytes()),
-            },
-            JValue::Short(short) => Operand {
-                data: *short as u64,
-            },
-            JValue::Byte(byte) => Operand { data: *byte as u64 },
+            JValue::Reference(object) => object.consume(),
+            JValue::Int(int) => Operand::new_data(int as u64),
+            JValue::Long(long) => Operand::new_data(long as u64),
+            JValue::Float(float) => Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes()) as u64),
+            JValue::Double(double) => Operand::new_data(u64::from_ne_bytes(double.to_ne_bytes())),
+            JValue::Short(short) => Operand::new_data(short as u64),
+            JValue::Byte(byte) => Operand::new_data(byte as u64),
         }
     }
 }

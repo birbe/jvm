@@ -65,6 +65,9 @@ pub fn generate_helper_wasm() -> Module {
     let alloc_signature = types.len();
     types.function([], [ValType::I32]);
 
+    let dealloc_signature = types.len();
+    types.function([ValType::I32], []);
+
     imports.import("jvm", "objects", EntityType::Table(TableType {
         element_type: RefType { nullable: true, heap_type: HeapType::Any },
         minimum: 0,
@@ -79,6 +82,7 @@ pub fn generate_helper_wasm() -> Module {
     types.function([ValType::I32; 3], []);
 
     imports.import("jvm", "alloc_ref", EntityType::Function(alloc_signature));
+    imports.import("jvm", "dealloc_ref", EntityType::Function(dealloc_signature));
 
     {
 
@@ -92,7 +96,7 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::End);
         code.function(&func);
 
-        exports.export("obj_class", ExportKind::Func, 1);
+        exports.export("obj_class", ExportKind::Func, 2);
     }
 
     {
@@ -112,7 +116,7 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::End);
         code.function(&func);
 
-        exports.export("new_object_array", ExportKind::Func, 2);
+        exports.export("new_object_array", ExportKind::Func, 3);
     }
 
     {
@@ -135,10 +139,13 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
         func.instruction(&Instruction::ArraySet(storage_type_start));
 
+        // func.instruction(&Instruction::LocalGet(2));
+        // func.instruction(&Instruction::Call(1));
+
         func.instruction(&Instruction::End);
         code.function(&func);
 
-        exports.export("set_object_array_element", ExportKind::Func, 3);
+        exports.export("set_object_array_element", ExportKind::Func, 4);
     }
 
     let array_types = [
@@ -188,7 +195,7 @@ pub fn generate_helper_wasm() -> Module {
 
         code.function(&func);
 
-        exports.export("new_array", ExportKind::Func, 4);
+        exports.export("new_array", ExportKind::Func, 5);
 
     }
 
@@ -206,7 +213,7 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::End);
         code.function(&func);
 
-        exports.export("get_array_length", ExportKind::Func, 5);
+        exports.export("get_array_length", ExportKind::Func, 6);
     }
 
     {
@@ -236,7 +243,7 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::End);
         code.function(&func);
 
-        exports.export("get_object_array_element", ExportKind::Func, 6);
+        exports.export("get_object_array_element", ExportKind::Func, 7);
     }
 
     {
@@ -251,7 +258,27 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::End);
         code.function(&func);
 
-        exports.export("is_ref_null", ExportKind::Func, 7);
+        exports.export("is_ref_null", ExportKind::Func, 8);
+    }
+
+    {
+        funcs.function(object_class_signature);
+
+        let mut func = Function::new([(1, ValType::I32)]);
+
+        func.instruction(&Instruction::Call(0));
+        func.instruction(&Instruction::LocalTee(1));
+
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::TableGet(0));
+        func.instruction(&Instruction::TableSet(0));
+
+        func.instruction(&Instruction::LocalGet(1));
+
+        func.instruction(&Instruction::End);
+        code.function(&func);
+
+        exports.export("clone_reference", ExportKind::Func, 9);
     }
 
     {
@@ -274,7 +301,7 @@ pub fn generate_helper_wasm() -> Module {
 
             code.function(&func);
 
-            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 8);
+            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 10);
         });
 
     }
@@ -325,7 +352,7 @@ pub fn generate_helper_wasm() -> Module {
 
             code.function(&func);
 
-            exports.export(&format!("{}_array_load", name), ExportKind::Func, exports.len() + 1);
+            exports.export(&format!("{}_array_load", name), ExportKind::Func, exports.len() + 2);
         });
 
     }

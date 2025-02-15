@@ -1,4 +1,4 @@
-use std::alloc::{alloc, Layout};
+use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::arch::asm;
 use crate::classfile::resolved::{AccessFlags, Class, ClassId, Method, Ref, ReturnType};
 use crate::env::{Compiler, Environment};
@@ -9,17 +9,14 @@ use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use js_sys::{Function, WebAssembly};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::mem::MaybeUninit;
 use std::sync::Arc;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::JsValue;
-use wasm_encoder::Encode;
-use crate::ClassContext;
 use crate::env::wasm::compile::generate_helper_wasm;
 use crate::env::wasm::compile::stub::create_stub_module;
 use crate::env::wasm::native::native_func;
 
-pub static mut OBJECT_REF_SLOTS: MaybeUninit<RefSlots> = MaybeUninit::uninit();
+pub static OBJECT_REF_SLOTS: OnceCell<Mutex<RefSlots>> = OnceCell::new();
 pub static OBJECT_REFS: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! console_log {
@@ -34,11 +31,16 @@ mod native;
 
 mod test;
 
+#[derive(Debug)]
 pub struct RefSlots {
     pub available: Vec<i32>,
     pub len: u32,
     pub table: WebAssembly::Table,
 }
+
+//TODO bad bad bad
+unsafe impl Send for RefSlots {}
+unsafe impl Sync for RefSlots {}
 
 type MethodId = u32;
 
@@ -49,12 +51,13 @@ struct ClassReflector {
 
 #[no_mangle]
 pub extern "C" fn alloc_ref() -> i32 {
-    let mut refs = unsafe { OBJECT_REF_SLOTS.assume_init_mut() };
+    let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
+    let mut refs = refs_lock.lock();
 
     assert!(refs.len > 0);
     assert_ne!(refs.available.as_ptr() as i32, 0);
 
-    if refs.available.len() == 0 {
+    let out = if refs.available.len() == 0 {
         refs.table.grow(1).unwrap();
 
         let len = refs.len;
@@ -65,12 +68,19 @@ pub extern "C" fn alloc_ref() -> i32 {
         len as i32
     } else {
         refs.available.pop().unwrap()
-    }
+    };
+    
+    out
 }
 
 #[no_mangle]
 pub extern "C" fn dealloc_ref(index: *mut ()) {
-    let mut refs = unsafe { OBJECT_REF_SLOTS.assume_init_mut() };
+    let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
+    let mut refs = refs_lock.lock();
+
+    if refs.available.contains(&(index as i32)) {
+        panic!("double free {}", index as u32);
+    }
 
     if index as i32 != 0 {
         refs.available.push(index as i32);
@@ -79,12 +89,12 @@ pub extern "C" fn dealloc_ref(index: *mut ()) {
 
 #[no_mangle]
 pub extern "C" fn malloc(size: i32) -> i32 {
-    unsafe { alloc(Layout::from_size_align(size as usize, 8).unwrap()) as i32 }
+    unsafe { alloc_zeroed(Layout::from_size_align(size as usize, 8).unwrap()) as i32 }
 }
 
 #[no_mangle]
 pub extern "C" fn push_frame(stack: &mut FrameStack, locals_length: i32, class: &Class, method: &Method) -> i32 {
-    stack.push(RawFrame::new(method, class, vec![Operand { data: 0 }; locals_length as usize].into_boxed_slice(), vec![Operand { data: 0 }; 256].into_boxed_slice()));
+    stack.push(RawFrame::new(method, class, vec![Operand::new_data(0); locals_length as usize].into_boxed_slice(), vec![Operand::new_data(0); 256].into_boxed_slice()));
     unsafe { stack.frames.as_mut_ptr().add(stack.frame_index as usize) as i32 }
 }
 
@@ -95,7 +105,7 @@ pub extern "C" fn debug(val: i32, _: i32) {
 
 #[no_mangle]
 pub extern "C" fn free(ptr: i32, len: i32) {
-    todo!()
+    unsafe { dealloc(ptr as *mut u8, Layout::from_size_align(len as usize, 8).unwrap()) }
 }
 
 pub struct WasmEnvironment {
@@ -112,7 +122,8 @@ pub struct WasmEnvironment {
     fn_set_char_array_elem: unsafe extern "C" fn(i32, i32, i32),
     fn_get_int_array_elem: unsafe extern "C" fn(i32, i32) -> Operand,
     fn_get_char_array_elem: unsafe extern "C" fn(i32, i32) -> Operand,
-    fn_is_ref_null: unsafe extern "C" fn(i32) -> i32
+    fn_is_ref_null: unsafe extern "C" fn(i32) -> i32,
+    fn_clone_reference: unsafe extern "C" fn(i32) -> i32
 }
 
 impl WasmEnvironment {
@@ -122,16 +133,14 @@ impl WasmEnvironment {
         js_sys::Reflect::set(&descriptor, &"element".into(), &"anyref".into()).unwrap();
         js_sys::Reflect::set(&descriptor, &"initial".into(), &"1".into()).unwrap();
 
-        let object_table = js_sys::WebAssembly::Table::new(&descriptor).unwrap();
+        let object_table = WebAssembly::Table::new(&descriptor).unwrap();
         let meta_exports = wasm_bindgen::exports();
 
-        unsafe {
-            OBJECT_REF_SLOTS.write(RefSlots {
-                available: vec![],
-                len: 1,
-                table: object_table.clone(),
-            });
-        }
+        OBJECT_REF_SLOTS.set(Mutex::new(RefSlots {
+            available: vec![],
+            len: 1,
+            table: object_table.clone(),
+        })).unwrap();
 
         let helper_module = generate_helper_wasm();
 
@@ -149,6 +158,7 @@ impl WasmEnvironment {
         js_sys::Reflect::set(&imports, &"jvm".into(), &jvm_import_object).unwrap();
         js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &object_table).unwrap();
         js_sys::Reflect::set(&jvm_import_object, &"alloc_ref".into(), &js_sys::Reflect::get(&meta_exports, &"alloc_ref".into()).unwrap()).unwrap();
+        js_sys::Reflect::set(&jvm_import_object, &"dealloc_ref".into(), &js_sys::Reflect::get(&meta_exports, &"dealloc_ref".into()).unwrap()).unwrap();
 
         let instance = WebAssembly::Instance::new(&module, &imports).unwrap();
 
@@ -158,6 +168,7 @@ impl WasmEnvironment {
         let set_object_array_elem = js_sys::Reflect::get(&exports, &"set_object_array_element".into()).unwrap();
         let get_object_array_elem = js_sys::Reflect::get(&exports, &"get_object_array_element".into()).unwrap();
         let is_ref_null = js_sys::Reflect::get(&exports, &"is_ref_null".into()).unwrap();
+        let clone_reference = js_sys::Reflect::get(&exports, &"clone_reference".into()).unwrap();
         let new_array = js_sys::Reflect::get(&exports, &"new_array".into()).unwrap();
         let ia_store = js_sys::Reflect::get(&exports, &"int_array_store".into()).unwrap();
         let ca_store = js_sys::Reflect::get(&exports, &"char_array_store".into()).unwrap();
@@ -172,6 +183,7 @@ impl WasmEnvironment {
         let set_object_array = Function::from(set_object_array_elem);
         let get_object_array = Function::from(get_object_array_elem);
         let is_ref_null = Function::from(is_ref_null);
+        let clone_reference = Function::from(clone_reference);
         let new_array = Function::from(new_array);
         let ia_store = Function::from(ia_store);
         let ca_store = Function::from(ca_store);
@@ -180,7 +192,7 @@ impl WasmEnvironment {
         let array_length = Function::from(array_length);
         
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
-        let get_object_class_indirect_index = func_table.grow(11).unwrap();
+        let get_object_class_indirect_index = func_table.grow(12).unwrap();
         
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index, &get_object_class).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 1, &new_object_array).unwrap();
@@ -193,6 +205,7 @@ impl WasmEnvironment {
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 8, &ca_load).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 9, &get_object_array).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 10, &is_ref_null).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 11, &clone_reference).unwrap();
         
         Self {
             class_function_pointers: RwLock::new(HashMap::new()),
@@ -209,6 +222,7 @@ impl WasmEnvironment {
             fn_get_int_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 7) },
             fn_get_char_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 8) },
             fn_is_ref_null: unsafe { std::mem::transmute(get_object_class_indirect_index + 10) },
+            fn_clone_reference: unsafe { std::mem::transmute(get_object_class_indirect_index + 11) }
         }
     }
 }
@@ -297,7 +311,7 @@ impl Environment for WasmEnvironment {
             ExecutionContext::Interpret(_) => unreachable!(), //Unused on WASM
             ExecutionContext::Compiled => {
                 let frame = RawFrame::new(&method_handle.method, &method_handle.class, args, Box::new([
-                    Operand { data: 0 }; 10
+                    Operand::new_data(0); 10
                 ]));
                 thread.frame_stack.push(frame);
 
@@ -306,14 +320,14 @@ impl Environment for WasmEnvironment {
                 out
             }
             ExecutionContext::Native => {
-                native_func(&method_handle, thread)
+                Some(Box::new(native_func(&method_handle, thread)))
             }
         };
 
         if matches!(method_handle.method.descriptor.return_type, ReturnType::Void) {
             None
         } else {
-            Some(operand)
+            Some(*operand.unwrap())
         }
     }
 
@@ -348,10 +362,10 @@ impl Environment for WasmEnvironment {
         let char_array = self.new_array(5, contents.chars().count() as i32);
 
         for (index, char) in contents.chars().enumerate() {
-            unsafe { self.set_array_element(5, &char_array, index as i32, Operand { data: char as u64 }) };
+            unsafe { self.set_array_element(5, &char_array, index as i32, Operand::new_data(char as u64)) };
         }
 
-        unsafe { self.set_object_field(&string_object, &string_class, "value", "[C", Operand { objectref: char_array.ptr }); }
+        unsafe { self.set_object_field(&string_object, &string_class, "value", "[C", Operand::new_ref(char_array.ptr)); }
 
         string_object
     }
@@ -373,16 +387,12 @@ impl Environment for WasmEnvironment {
             "L" | "[" => {
                 let get: unsafe fn(i32) -> i32 = unsafe { std::mem::transmute(*get) };
                 let field_value = unsafe { get(object.ptr as i32) };
-                Operand {
-                    objectref: field_value as *mut ()
-                }
+                Operand::new_ref(field_value as *mut ())
             },
             "I" => {
                 let get: unsafe fn(i32) -> i32 = unsafe { std::mem::transmute(*get) };
                 let field_value = unsafe { get(object.ptr as i32) };
-                Operand {
-                    data: field_value as u64
-                }
+                Operand::new_data(field_value as u64)
             },
             _ => unimplemented!("field type getter {}", field_name)
         }
@@ -397,22 +407,26 @@ impl Environment for WasmEnvironment {
         match &field_descriptor[0..1] {
             "L" | "[" => {
                 let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
-                unsafe { set(object.ptr as i32, value.objectref as i32) };
+                unsafe { set(object.ptr as i32, value.ref_() as i32) };
             },
             "I" => {
                 let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
-                unsafe { set(object.ptr as i32, value.data as i32) };
+                unsafe { set(object.ptr as i32, value.data() as i32) };
             },
             "F" => {
                 let set: unsafe fn(i32, f32) = unsafe { std::mem::transmute(*set) };
-                unsafe { set(object.ptr as i32, std::mem::transmute(value.data as u32)) };
+                unsafe { set(object.ptr as i32, std::mem::transmute(value.data() as u32)) };
             },
             _ => unimplemented!("field type setter {} {}", &field_descriptor[0..1], field_name)
         }
     }
 
     fn new_object_array(&self, class: &Class, size: i32) -> Object {
-        unsafe { Object::from_raw((self.fn_new_object_array)(size, class as *const Class as i32) as *mut (), None) }
+        unsafe { Object::from_raw((self.fn_new_object_array)(size, class as *const Class as i32) as *mut (), dealloc_ref) }
+    }
+
+    fn clone_reference(&self, object: &Object) -> Object {
+        unsafe { Object::from_raw((self.fn_clone_reference)(object.ptr as i32) as *mut (), dealloc_ref) }
     }
 
     fn is_null(&self, object: &Object) -> bool {
@@ -420,7 +434,7 @@ impl Environment for WasmEnvironment {
     }
 
     fn new_array(&self, type_: i32, size: i32) -> Object {
-        unsafe { Object::from_raw((self.fn_new_array)(type_ - 4, size) as *mut (), None) }
+        unsafe { Object::from_raw((self.fn_new_array)(type_ - 4, size) as *mut (), dealloc_ref) }
     }
 
     fn get_array_length(&self, array: &Object) -> i32 {
@@ -429,8 +443,8 @@ impl Environment for WasmEnvironment {
 
     unsafe fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand) {
         match array_type {
-            5 => unsafe { (self.fn_set_char_array_elem)(array.ptr as i32, index, value.data as i32); }
-            10 => unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data as i32); },
+            5 => unsafe { (self.fn_set_char_array_elem)(array.ptr as i32, index, value.data() as i32); }
+            10 => unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data() as i32); },
             4 | 5 | 6 | 7 | 8 | 9 | 11 => unimplemented!(),
             _ => unreachable!("Invalid array type")
         }
@@ -450,7 +464,7 @@ impl Environment for WasmEnvironment {
 
     unsafe fn set_object_array_element(&self, array: &Object, index: i32, value: Operand) {
         unsafe {
-            (self.fn_set_object_array_elem)(array.ptr as i32, index, value.objectref as i32)
+            (self.fn_set_object_array_elem)(array.ptr as i32, index, value.ref_() as i32)
         }
     }
 
@@ -458,7 +472,7 @@ impl Environment for WasmEnvironment {
         unsafe {
             Object::from_raw(
                 (self.fn_get_object_array_elem)(array.ptr as i32, index) as *mut (),
-                None
+                dealloc_ref
             )
         }
     }
@@ -471,13 +485,19 @@ impl Environment for WasmEnvironment {
         let new_func: fn() -> i32 = unsafe { std::mem::transmute(*new) };
         let object_id = new_func();
 
-        unsafe { Object::from_raw(object_id as *mut (), Some(dealloc_ref)) }
+        unsafe { Object::from_raw(object_id as *mut (), dealloc_ref) }
     }
 
     unsafe fn object_from_operand(&self, operand: &Operand) -> Object {
         Object {
-            ptr: unsafe { operand.objectref },
-            drop: None,
+            ptr: operand.ref_(),
+            padding: [],
+            drop: dealloc_ref
         }
     }
+
+    unsafe fn object_ref_from_operand(&self, operand: &Operand) -> &Object {
+        &*(operand as *const Operand as *const Object)
+    }
+
 }

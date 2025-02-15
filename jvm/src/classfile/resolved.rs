@@ -51,9 +51,7 @@ bitflags! {
 
 pub type ClassId = u32;
 
-#[repr(C)]
 pub struct Class {
-    indicator: u128,
     pub constant_pool: ConstantPool,
     pub this_class: Arc<String>,
     pub super_class: Option<Arc<Class>>,
@@ -164,9 +162,7 @@ impl Class {
             super_heap_size + (fields.len() - static_fields.len()) * size_of::<Operand>();
 
         Some(Self {
-            indicator: 0b10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010_10101010,
             super_class,
-            this_class,
             access_flags: AccessFlags::from_bits(classfile.access_flags)?,
             interfaces,
             fields,
@@ -174,10 +170,11 @@ impl Class {
                 .methods
                 .iter()
                 .map(|method_info| {
-                    Method::new(method_info, &constant_pool, classfile).map(Arc::new)
+                    Method::new(method_info, &constant_pool, classfile, this_class.clone()).map(Arc::new)
                 })
                 .collect::<Option<Vec<Arc<Method>>>>()?,
-            statics: Box::into_raw(vec![Operand { data: 0 }; static_fields].into_boxed_slice()),
+            this_class,
+            statics: Box::into_raw(vec![Operand::new_data(0); static_fields].into_boxed_slice()),
             static_init_state: AtomicU32::new(0),
             attributes: classfile
                 .attributes
@@ -207,6 +204,13 @@ impl Class {
         })
     }
 
+    pub fn get_method_by_name(&self, name: &str, descriptor: &str) -> Option<&Arc<Method>> {
+        self.methods.iter().find(|method| {
+            &*method.name == name
+                && method.descriptor.string == descriptor
+        })
+    }
+
     pub fn get_field(&self, name_and_type: &NameAndType) -> Option<&Field> {
         self.fields.iter().find(|field| {
             field.name == name_and_type.name && field.descriptor_string == *name_and_type.descriptor
@@ -232,19 +236,31 @@ impl Class {
             || otherwise )
     }
 
-    pub fn find_overriding_method(&self, ma: &Method, ca: &Class) -> Option<&Arc<Method>> {
+    pub fn find_overriding_method(&self, to_be_overridden: &Method, superclass: &Class) -> Option<&Arc<Method>> {
         self.methods.iter().find(|mc| {
-            self.does_method_override(ma, ca, &mc)
+            self.does_method_override(to_be_overridden, superclass, &mc)
         })
     }
 
-    pub fn parents(&self) -> Vec<Arc<Class>> {
+    pub fn parents_and_interfaces(&self) -> Vec<&Arc<Class>> {
+        let mut parents = vec![];
+
+        parents.extend(self.super_class.iter());
+        parents.extend(self.interfaces.iter());
+        if let Some(superclass) = &self.super_class {
+            parents.extend(superclass.parents_and_interfaces());
+        }
+
+        parents
+    }
+
+    pub fn parents(&self) -> Vec<&Arc<Class>> {
         let mut parents = vec![];
 
         let mut current = self.super_class.as_ref();
         loop {
             if let Some(super_) = current {
-                parents.push(super_.clone());
+                parents.push(super_);
                 current = super_.super_class.as_ref();
             } else {
                 break;
@@ -385,6 +401,7 @@ pub struct Method {
     pub name: Arc<String>,
     pub descriptor: MethodDescriptor,
     pub attributes: HashMap<String, Attribute>,
+    pub class: Arc<String>,
     identifier: String,
 }
 
@@ -393,6 +410,7 @@ impl Method {
         method_info: &MethodInfo,
         constant_pool: &ConstantPool,
         _classfile: &ClassFile,
+        class: Arc<String>,
     ) -> Option<Self> {
         let descriptor_string = (&**constant_pool
             .constants
@@ -420,6 +438,7 @@ impl Method {
                     Some((descriptor_kind, attribute))
                 })
                 .collect::<Option<HashMap<String, Attribute>>>()?,
+            class,
             identifier: format!("{}{}", method_name, descriptor_string),
         })
     }

@@ -3,30 +3,27 @@
 #![feature(alloc_layout_extra)]
 #![feature(if_let_guard)]
 #![feature(asm_experimental_arch)]
-
+#![feature(let_chains)]
 extern crate core;
 
-use std::cell::RefCell;
-use crate::classfile::resolved::{AccessFlags, Class, ClassId, Field, FieldType, Method, NameAndType, Ref};
+use crate::classfile::resolved::{Class, NameAndType, Ref};
 use crate::classfile::ClassFile;
 use crate::thread::{FrameStack, Operand, Thread, ThreadHandle};
-use bitflags::Flags;
 
 use jvm_types::JParse;
-use linker::ClassLoaderObject;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
-use std::io::{Cursor, Write};
+use std::io::Write;
 
 use crate::env::{Compiler, Environment, Object};
-use crate::execution::{ExecutionContext, MethodHandle};
+use crate::execution::MethodHandle;
+use crate::linker::{BootstrapLoader, ClassLoader};
+use highway::{HighwayHash, HighwayHasher};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use highway::{HighwayHash, HighwayHasher, Key};
-use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderThreadedContext};
 
 macro_rules! console_log {
     ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
@@ -145,10 +142,8 @@ impl JVM {
                 .ok_or(ClassLoadError::MalformedClassDef)?,
         );
         
-        console_log!("Generated {}", class.this_class);
-        
         let mut loaded_classes = self.loaded_classes.write();
-
+        
         let mut hasher = HighwayHasher::default();
         hasher.write_all(class.this_class.as_bytes()).unwrap();
         hasher.write_u32(class_loader.get_id());
@@ -177,24 +172,22 @@ impl JVM {
         if self.is_class_linked("java/lang/Class", 0).is_none() { return Ok(()); }
         
         let java_lang_class = self.bootstrap_classloader.get_class(thread, "java/lang/Class")?;
-
-        let mut hasher = HighwayHasher::default();
-        hasher.write_all(class.this_class.as_bytes()).unwrap();
-        hasher.write_u32(class_loader.get_id());
-        let hash_key = hasher.finish();
-
+        
         let class_object = self.environment.new_object(&java_lang_class);
         let handle = self.get_method("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;)V", 0);
+        
+        let class_loader_object = class_loader.get_class_loader_object_handle();
 
-        // let object = class_loader.get_class_loader_object_handle();
+        let op = self.environment.clone_reference(&class_object).consume();
 
-        // thread.invoke(&handle, Box::new([
-        //     Operand {
-        //         objectref: object.ptr
-        //     }
-        // ]));
+        thread.invoke(&handle, Box::new([
+            op,
+            self.environment.clone_reference(&class_loader_object).consume()
+        ]));
 
-        class.class_instance.set(class_object).unwrap();
+        if let Err(err) = class.class_instance.set(class_object) {
+            panic!(":(");
+        }
 
         Ok(())
     }
@@ -208,7 +201,10 @@ impl JVM {
         let key = hasher.finish();
 
         let handles = self.method_handles.read();
-        handles.get(&key).unwrap().clone()
+        match handles.get(&key) {
+            None => panic!("classpath {classpath} method name {method_name} descriptor {method_descriptor} loader {class_loader}"),
+            Some(handle) => handle.clone()
+        }
     }
 
     ///Return an already loaded Class, and if its not loaded, attempt to load it using the ClassLoader
@@ -293,90 +289,8 @@ impl JVM {
     }
 }
 
-pub fn routine_resolve_invokespecial(class: &Class, method_ref: &Ref) {
-    match class.get_method(&method_ref.name_and_type) {
-        None => {}
-        Some(_other_method) => {}
-    }
-}
-
-pub fn routine_resolve_field<'a>(
-    name_and_type: &'a NameAndType,
-    class: &'a Class,
-) -> Option<(&'a Field, &'a Class)> {
-    match class.get_field(name_and_type) {
-        None => {
-            //TODO: superinterfaces?
-
-            if let Some(superclass) = &class.super_class {
-                let super_resolve = routine_resolve_field(name_and_type, superclass);
-
-                if let Some(resolved) = super_resolve {
-                    return Some(resolved);
-                }
-            }
-
-            None
-        }
-        Some(field) => Some((field, class)),
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ResolveMethodError {
     IncompatibleClassChangeError,
 }
 
-pub fn routine_resolve_method<'class>(
-    thread: &Thread,
-    ref_: &Ref,
-    class: &'class Class,
-) -> Result<&'class Method, ResolveMethodError> {
-    if class.access_flags.contains(AccessFlags::INTERFACE) {
-        return Err(ResolveMethodError::IncompatibleClassChangeError);
-    }
-
-    fn step2<'class>(ref_: &Ref, class: &'class Class) -> Option<&'class Method> {
-        let methods: Vec<&Arc<Method>> = class
-            .methods
-            .iter()
-            .filter(|m| m.name == ref_.name_and_type.name)
-            .collect();
-
-        if methods.len() == 1 && methods[0].is_signature_polymorphic(&class.this_class) {
-            let resolved_method = methods[0];
-
-            for arg in &resolved_method.descriptor.args {
-                match arg {
-                    FieldType::Array { type_, dimensions } => {
-                        match &**type_ {
-                            FieldType::Class(classpath) => {
-                                todo!()
-                            },
-                            _ => {}
-                        }
-                    }
-                    FieldType::Class(_) => {},
-                    _ => {}
-                }
-            }
-
-            return Some(&*resolved_method);
-        }
-
-        if let Some(method) = class.get_method(&ref_.name_and_type) {
-            return Some(method);
-        }
-
-        class
-            .super_class
-            .as_ref()
-            .and_then(|super_class| step2(ref_, super_class))
-    }
-
-    if let Some(method) = step2(ref_, class) {
-        return Ok(method);
-    }
-
-    todo!()
-}
