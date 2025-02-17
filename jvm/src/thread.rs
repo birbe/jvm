@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Formatter};
-use crate::bytecode::{Bytecode, JValue};
+use std::mem::MaybeUninit;
+use crate::bytecode::{ArrayType, Bytecode, JValue};
 use crate::{Byte, Float, Int, Long, JVM};
 
 use crate::classfile::resolved::{
@@ -13,8 +14,9 @@ use parking_lot::Mutex;
 use std::ops::{BitAnd, BitOr, BitXor, Deref, DerefMut, Neg};
 use std::pin::Pin;
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use once_cell::sync::OnceCell;
 use crate::env::Object;
 use crate::execution::MethodHandle;
 
@@ -114,7 +116,8 @@ impl Drop for RawFrame {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum OperandTag {
     Ref = 0,
-    Data = 1
+    Data = 1,
+    Data2 = 2
 }
 
 #[repr(C)]
@@ -132,10 +135,28 @@ pub struct OperandData {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub union Operand {
     pub objectref: OperandRef,
     pub data: OperandData
+}
+
+impl Drop for Operand {
+
+    fn drop(&mut self) {
+        if self.tag() == OperandTag::Ref {
+            // panic!("Cannot drop objectref operand");
+        }
+    }
+
+}
+
+impl Debug for Operand {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.tag() {
+            OperandTag::Ref => write!(f, "@{}", self.ref_() as u32),
+            OperandTag::Data | OperandTag::Data2 => write!(f, "{}", self.data())
+        }
+    }
 }
 
 impl Operand {
@@ -145,17 +166,32 @@ impl Operand {
     }
 
     pub fn data(&self) -> u64 {
-        // assert_eq!(unsafe { self.data.tag }, OperandTag::Data);
+        assert!(matches!(self.tag(), OperandTag::Data | OperandTag::Data2));
         unsafe { self.data.data }
     }
     
-    pub fn new_data(data: u64) -> Self {
+    pub fn new_data(data: u32) -> Self {
         Self {
             data: OperandData {
                 tag: OperandTag::Data,
+                data: data as u64
+            }
+        }
+    }
+
+    pub fn new_data2(data: u64) -> Self {
+        Self {
+            data: OperandData {
+                tag: OperandTag::Data2,
                 data
             }
         }
+    }
+
+    pub fn copy_data(&self) -> Self {
+        assert_ne!(unsafe { self.data.tag}, OperandTag::Ref);
+
+        unsafe { std::ptr::read(self as *const Self) }
     }
     
     pub fn ref_(&self) -> *mut () {
@@ -187,24 +223,36 @@ impl<'a> Frame<'a> {
     pub fn pop<const N: usize>(&mut self) -> [Operand; N] {
         assert!(*self.stack_length >= N);
 
-        let val: [Operand; N] = (&self.stack[*self.stack_length - N..*self.stack_length])
-            .try_into()
-            .unwrap();
+        let mut val: MaybeUninit<[Operand; N]> = MaybeUninit::uninit();
+        let slice = &self.stack[*self.stack_length - N..*self.stack_length];
+
+        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), &mut (val.assume_init_mut()[0]) as *mut Operand, N) };
+
         *self.stack_length -= N;
-        val
+        unsafe { val.assume_init() }
     }
 
     pub fn pop_dynamic(&mut self, n: usize) -> Vec<Operand> {
         assert!(*self.stack_length >= n);
 
-        let val = Vec::from(&self.stack[*self.stack_length - n..*self.stack_length]);
+        let mut val = Vec::with_capacity(n);
+
+        let slice = &self.stack[*self.stack_length - n..*self.stack_length];
+
+        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), val.as_mut_ptr(), n) };
+        unsafe { val.set_len(n) };
+
         *self.stack_length -= n;
         val
     }
 
     pub fn push<const N: usize>(&mut self, operands: [Operand; N]) {
         let len = *self.stack_length;
-        (&mut self.stack[len..len + N]).copy_from_slice(&operands);
+
+        for ((index, operand), slot) in operands.into_iter().enumerate().zip(&mut self.stack[len..len + N]) {
+            *slot = operand;
+        }
+
         *self.stack_length += N;
     }
 
@@ -291,10 +339,13 @@ pub struct Thread {
     pub class_loader: Arc<dyn ClassLoader>,
     pub id: u32,
     pub killed: bool,
+    pub instructions_executed: AtomicU64,
+    pub thread_obj: OnceCell<Object>
 }
 
 impl Thread {
 
+    #[must_use]
     pub(crate) fn invoke(&mut self, method_handle: &MethodHandle, args: Box<[Operand]>) -> Option<Operand> {
         let jvm = self.jvm.clone();
 
@@ -377,7 +428,7 @@ impl ThreadHandle {
                 FieldType::Short => JValue::Short(unsafe { return_value.data.data } as i16),
                 FieldType::Boolean => JValue::Int(unsafe { return_value.data.data } as i32),
                 FieldType::Class(_) | FieldType::Array { .. } => JValue::Reference(unsafe {
-                    self.jvm.environment.object_from_operand(&return_value)
+                    self.jvm.environment.object_from_operand(return_value)
                 }),
             }),
             (_, _) => None,
@@ -410,6 +461,10 @@ impl ThreadHandle {
             return;
         }
 
+        if let Some(superclass) = &class.super_class {
+            Self::init_static(superclass, thread);
+        }
+
         let status = class.static_init_state.load(Ordering::Acquire);
 
         //Class statics have already been initialized and <clinit> should not be called
@@ -426,7 +481,7 @@ impl ThreadHandle {
             Ok(_) => {
                 let method_handle = thread.jvm.get_method(&class.this_class, "<clinit>", "()V", class.class_loader.get_id());
 
-                thread.invoke(&method_handle, Box::new([]));
+                drop(thread.invoke(&method_handle, Box::new([])));
 
                 class.static_init_state.store(2, Ordering::Release);
             }
@@ -463,23 +518,39 @@ impl ThreadHandle {
         let bytes_index = instruction.bytes_index;
         let bytecode = &instruction.bytecode;
 
-        let locals: Vec<u32> = frame.locals.iter().map(|local| unsafe { local.data() as u32 }).collect();
-        let stack: Vec<u32> = (&frame.stack[..*frame.stack_length]).iter().map(|local| unsafe { local.data() as u32 }).collect();
+        let locals: Vec<String> = frame.locals.iter().map(|local| {
+            match local.tag() {
+                OperandTag::Ref => format!("@{}", local.ref_() as usize as u64),
+                OperandTag::Data | OperandTag::Data2 => format!("{}", local.data() as i32)
+            }
+        }).collect();
+        let stack: Vec<String> = (&frame.stack[..*frame.stack_length]).iter().map(|local| {
+            match local.tag() {
+                OperandTag::Ref => format!("@{}", local.ref_() as usize as u64),
+                OperandTag::Data | OperandTag::Data2 => format!("{}", local.data() as i32)
+            }
+        }).collect();
 
-        // if &*class.this_class != "java/lang/Class" {
-        //     let mut stdout = thread.jvm.stdout.lock();
-        //     write!(&mut stdout, "{}",
-        //            format!(
-        //                "{:<20} | {:<30} | {:<15} | {:<6} | {:?} | {:?}",
-        //                format!("{:?}", bytecode),
-        //                class.this_class,
-        //                method.name,
-        //                pc,
-        //                locals,
-        //                stack
-        //            )
-        //     ).unwrap();
-        // }
+        if &*class.this_class != "java/lang/Class" && &*method.name != "<init>"
+        {
+            let instr_count = thread.instructions_executed.load(Ordering::Acquire);
+
+            // if instr_count > 69000 {
+                let mut stdout = thread.jvm.stdout.lock();
+                write!(&mut stdout, "{}",
+                       format!(
+                           "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
+                           format!("{:?}", bytecode),
+                           class.this_class,
+                           method.identifier,
+                           pc,
+                           locals.join(", "),
+                           stack.join(", "),
+                           instr_count,
+                       )
+                ).unwrap();
+            // }
+        }
 
         let jvm = thread.jvm.clone();
 
@@ -492,7 +563,7 @@ impl ThreadHandle {
                     .unwrap()
                     .as_ref()
                     .unwrap();
-
+                
                 let class = jvm.retrieve_class(&ref_.class, &*class.class_loader, thread).unwrap();
 
                 if frame.class.get_id() != class.get_id() {
@@ -503,11 +574,8 @@ impl ThreadHandle {
 
                 let method_descriptor = &method_handle.method.descriptor;
 
-                let args = &frame.stack[*frame.stack_length - method_descriptor.args.len()..*frame.stack_length];
-
-                let operand = thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
-
-                *frame.stack_length -= method_descriptor.args.len();
+                let args = frame.pop_dynamic(method_descriptor.args.len());
+                let operand = thread.invoke(&method_handle, args.into_boxed_slice());
 
                 if let Some(return_value) = operand {
                     frame.push([return_value]);
@@ -551,7 +619,7 @@ impl ThreadHandle {
                 if method.access_flags.contains(AccessFlags::SYNCHRONIZED)
                     | method.access_flags.contains(AccessFlags::NATIVE)
                 {
-                    todo!()
+                    //only one thread atm
                 }
 
                 let method_descriptor =
@@ -575,7 +643,26 @@ impl ThreadHandle {
                 frame.pop::<1>();
             }
             Bytecode::Pop2 => {
-                frame.pop::<2>();
+                let [a] = frame.pop();
+
+                if matches!(a.tag(), OperandTag::Data | OperandTag::Ref) {
+                    let [b] = frame.pop();
+
+                    if matches!(
+                        (a.tag(), b.tag()),
+                        (OperandTag::Ref | OperandTag::Data, OperandTag::Ref | OperandTag::Data)
+                    ) {
+                        if matches!(a.tag(), OperandTag::Ref) {
+                            drop(unsafe { thread.jvm.environment.object_from_operand(a) });
+                        };
+
+                        if matches!(b.tag(), OperandTag::Ref) {
+                            drop(unsafe { thread.jvm.environment.object_from_operand(b) });
+                        }
+                    } else {
+                        panic!("Pop2 popped category 1 value, but then a category 2 value")
+                    }
+                }
             }
             Bytecode::Invokeinterface(constant_index, count) => {
                 let interface_method = class
@@ -590,10 +677,11 @@ impl ThreadHandle {
 
                 let mut nargs = frame.pop_dynamic(descriptor.args.len());
                 let [objectref] = frame.pop();
-                nargs.insert(0, objectref);
 
-                let object = unsafe { jvm.environment.object_from_operand(&objectref) };
+                let object = unsafe { jvm.environment.object_ref_from_operand(&objectref) };
                 let object_class = jvm.environment.get_object_class(&object);
+
+                nargs.insert(0, objectref);
 
                 let interface_class = class.class_loader.find_class(thread, &interface_method.class).unwrap();
 
@@ -612,11 +700,13 @@ impl ThreadHandle {
                     todo!()
                 };
 
-                let (selected_method, selected_class) = routine_select_method(resolved_method, object_class);
+                let selected_method = routine_select_method(resolved_method, resolved_method_class, object_class);
 
-                let handle = jvm.get_method(&selected_class.this_class, &selected_method.name, &selected_method.descriptor.string, class.class_loader.get_id());
+                let handle = jvm.get_method(&selected_method.class, &selected_method.name, &selected_method.descriptor.string, class.class_loader.get_id());
 
-                frame.push([thread.invoke(&handle, nargs.into_boxed_slice()).unwrap()]);
+                if let Some(op) = thread.invoke(&handle, nargs.into_boxed_slice()) {
+                    frame.push([op]);
+                }
 
             }
             Bytecode::Invokevirtual(constant_index) => {
@@ -636,21 +726,25 @@ impl ThreadHandle {
                     .unwrap();
 
                 let resolved_method = routine_resolve_method(&thread, &method_ref, &method_ref_class).unwrap();
+                let resolved_method_class = class.class_loader.find_class(thread, &method_ref.class).unwrap();
+
+                if resolved_method_class.this_class != class.this_class {
+                    Self::init_static(&resolved_method_class, thread);
+                }
 
                 let mut nargs = frame.pop_dynamic(resolved_method.descriptor.args.len());
 
                 let [objectref] = frame.pop();
 
-                nargs.insert(0, objectref);
-
-                let objectref = unsafe { thread.jvm.environment.object_from_operand(&objectref) };
-
+                let objectref = unsafe { thread.jvm.environment.object_from_operand(objectref) };
                 let object_class = thread.jvm.environment.get_object_class(&objectref);
+
+                nargs.insert(0, jvm.environment.clone_reference(&objectref).consume());
 
                 if !resolved_method.is_signature_polymorphic(classpath) {
 
-                    let (selected_method, selected_class) = routine_select_method(resolved_method, object_class);
-                    let handle = jvm.get_method(&selected_class.this_class, &selected_method.name, &selected_method.descriptor.string, class.class_loader.get_id());
+                    let selected_method = routine_select_method(resolved_method, &resolved_method_class, object_class);
+                    let handle = jvm.get_method(&selected_method.class, &selected_method.name, &selected_method.descriptor.string, class.class_loader.get_id());
 
                     frame.push_dynamic(thread.invoke(&handle, Vec::from(nargs).into_boxed_slice()));
 
@@ -724,9 +818,9 @@ impl ThreadHandle {
 
                 return ThreadStepResult::Return(Some(JValue::Long(long.data() as Long)));
             }
-            Bytecode::Bipush(value) => frame.push([Operand::new_data(*value as u64)]),
+            Bytecode::Bipush(value) => frame.push([Operand::new_data(*value as i32 as u32)]),
             Bytecode::Aload_n(index) | Bytecode::Aload(index) => {
-                let operand = frame.locals[*index as usize];
+                let operand = &frame.locals[*index as usize];
 
                 frame.push([unsafe { jvm.environment.clone_reference(jvm.environment.object_ref_from_operand(&operand)) }.consume()]);
             }
@@ -734,7 +828,7 @@ impl ThreadHandle {
                 let [ptr] = frame.pop();
 
                 return ThreadStepResult::Return(Some(JValue::Reference(unsafe {
-                    thread.jvm.environment.object_from_operand(&ptr)
+                    thread.jvm.environment.object_from_operand(ptr)
                 })));
             }
             Bytecode::Putfield(constant_index) => {
@@ -755,7 +849,7 @@ impl ThreadHandle {
                 }
 
                 let [object, value] = frame.pop();
-                let object = unsafe { thread.jvm.environment.object_from_operand(&object) };
+                let object = unsafe { thread.jvm.environment.object_from_operand(object) };
 
                 unsafe {
                     thread.jvm.environment.set_object_field(&object, &field_class, &field.name, &field_ref.name_and_type.descriptor, value);
@@ -779,7 +873,7 @@ impl ThreadHandle {
 
                 let [ptr] = frame.pop();
 
-                let object = unsafe { thread.jvm.environment.object_from_operand(&ptr) };
+                let object = unsafe { thread.jvm.environment.object_from_operand(ptr) };
                 let operand = unsafe { thread.jvm.environment.get_object_field(&object, &field_class, &field_ref.name_and_type.name, &field_ref.name_and_type.descriptor) };
 
                 if operand.tag() == OperandTag::Ref {
@@ -790,15 +884,18 @@ impl ThreadHandle {
                     frame.push([operand]);
                 }
             }
-            Bytecode::Iconst_n_m1(value) => frame.push([Operand::new_data(*value as u64)]),
-            Bytecode::Lconst_n(value) => frame.push([Operand::new_data(*value as u64)]),
+            Bytecode::Iconst_n_m1(value) => frame.push([Operand::new_data(*value as u32)]),
+            Bytecode::Lconst_n(value) => frame.push([Operand::new_data2(*value as u64)]),
             Bytecode::Fconst_n(index) => {
                 frame.push([Operand::new_data(u32::from_ne_bytes(match index {
                     0 => 0.0f32,
                     1 => 1.0f32,
                     2 => 2.0f32,
                     _ => unreachable!()
-                }.to_be_bytes()) as u64)]);
+                }.to_be_bytes()))]);
+            }
+            Bytecode::Dconst_n(double) => {
+                frame.push([Operand::new_data2(double.to_bits())]);
             }
             Bytecode::Fcmpg | Bytecode::Fcmpl => {
                 let [a, b] = frame.pop();
@@ -806,9 +903,62 @@ impl ThreadHandle {
                 let a = f32::from_ne_bytes((a.data() as u32).to_ne_bytes());
                 let b = f32::from_ne_bytes((b.data() as u32).to_ne_bytes());
 
-                let nan_out = if matches!(bytecode, Bytecode::Fcmpg) { 1 } else { -1i32 as u64 };
+                let nan_out = if matches!(bytecode, Bytecode::Fcmpg) { 1 } else { -1i32 as u32 };
 
-                frame.push([Operand::new_data(if a > b { 1 } else if a == b { 0 } else if a < b { -1i32 as u64 } else { nan_out })]);
+                frame.push([Operand::new_data(if a > b { 1 } else if a == b { 0 } else if a < b { -1i32 as u32 } else { nan_out })]);
+            }
+            Bytecode::L2f => {
+                let [op] = frame.pop();
+
+                frame.push([Operand::new_data((f64::from_bits(op.data()) as f32).to_bits())]);
+            }
+            Bytecode::If_acmpne(offset) => {
+                let [a, b] = frame.pop();
+
+                let object_a = unsafe { jvm.environment.object_from_operand(a) };
+                let object_b = unsafe { jvm.environment.object_from_operand(b) };
+
+                if !jvm.environment.object_ref_eq(&object_a, &object_b) {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
+            Bytecode::If_acmpeq(offset) => {
+                let [a, b] = frame.pop();
+
+                let object_a = unsafe { jvm.environment.object_from_operand(a) };
+                let object_b = unsafe { jvm.environment.object_from_operand(b) };
+
+                if jvm.environment.object_ref_eq(&object_a, &object_b) {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
+            Bytecode::If_icmpeq(offset) => {
+                let [a, b] = frame.pop();
+
+                let a = a.data() as i32;
+                let b = b.data() as i32;
+
+                if a == b {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
             }
             Bytecode::If_icmpge(offset) => {
                 let [a, b] = frame.pop();
@@ -874,6 +1024,22 @@ impl ThreadHandle {
                     pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
                 }
             }
+            Bytecode::If_icmple(offset) => {
+                let [a, b] = frame.pop();
+
+                let a = a.data() as i32;
+                let b = b.data() as i32;
+
+                if a <= b {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
             Bytecode::Ifeq(offset) => {
                 let [value] = frame.pop();
 
@@ -909,21 +1075,84 @@ impl ThreadHandle {
 
                 let value = value.data() as i32;
 
-                frame.push([Operand::new_data((value as f32).to_bits() as u64)])
+                frame.push([Operand::new_data((value as f32).to_bits() as u32)])
             }
             Bytecode::F2i => {
                 let [value] = frame.pop();
 
                 let value = f32::from_bits(value.data() as u32);
 
-                frame.push([Operand::new_data(value as i32 as u64)])
+                frame.push([Operand::new_data(value as i32 as u32)])
+            }
+            Bytecode::F2d => {
+                let [value] = frame.pop();
+
+                let value = f32::from_bits(value.data() as u32) as f64;
+
+                frame.push([Operand::new_data2(value.to_bits())])
+            }
+            Bytecode::D2l => {
+                let [value] = frame.pop();
+
+                let value = f64::from_bits(value.data());
+
+                frame.push([Operand::new_data2(value as u64)])
             }
             Bytecode::Fmul => {
                 let [a, b] = frame.pop();
                 let a = a.data() as f32;
                 let b = b.data() as f32;
 
-                frame.push([Operand::new_data((a*b).to_bits() as u64)]);
+                frame.push([Operand::new_data((a*b).to_bits())]);
+            }
+            Bytecode::Fadd => {
+                let [a, b] = frame.pop();
+                let a = a.data() as f32;
+                let b = b.data() as f32;
+
+                frame.push([Operand::new_data((a+b).to_bits())]);
+            }
+            Bytecode::Fsub => {
+                let [a, b] = frame.pop();
+                let a = a.data() as f32;
+                let b = b.data() as f32;
+
+                frame.push([Operand::new_data((a-b).to_bits())]);
+            }
+            Bytecode::Dmul => {
+                let [a, b] = frame.pop();
+                let a = f64::from_bits(a.data());
+                let b = f64::from_bits(b.data());
+
+                frame.push([Operand::new_data2((a*b).to_bits())]);
+            }
+            Bytecode::Dadd => {
+                let [a, b] = frame.pop();
+                let a = f64::from_bits(a.data());
+                let b = f64::from_bits(b.data());
+
+                frame.push([Operand::new_data2((a+b).to_bits())]);
+            }
+            Bytecode::Dsub => {
+                let [a, b] = frame.pop();
+                let a = f64::from_bits(a.data());
+                let b = f64::from_bits(b.data());
+
+                frame.push([Operand::new_data2((a-b).to_bits())]);
+            }
+            Bytecode::Ddiv => {
+                let [a, b] = frame.pop();
+                let a = f64::from_bits(a.data());
+                let b = f64::from_bits(b.data());
+
+                frame.push([Operand::new_data2((a/b).to_bits())]);
+            }
+            Bytecode::Fdiv => {
+                let [a, b] = frame.pop();
+                let a = a.data() as f32;
+                let b = b.data() as f32;
+
+                frame.push([Operand::new_data((a/b).to_bits())]);
             }
             Bytecode::Ifge(offset) => {
                 let [value] = frame.pop();
@@ -955,6 +1184,21 @@ impl ThreadHandle {
                     pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
                 }
             }
+            Bytecode::Iflt(offset) => {
+                let [value] = frame.pop();
+
+                let value = value.data() as i32;
+
+                if value < 0 {
+                    let target_offset = bytes_index as isize + *offset as isize;
+                    let idx = code
+                        .instructions
+                        .iter()
+                        .find(|instr| instr.bytes_index == target_offset as u32)
+                        .unwrap();
+                    pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+                }
+            }
             Bytecode::Ifgt(offset) => {
                 let [value] = frame.pop();
 
@@ -972,7 +1216,7 @@ impl ThreadHandle {
             }
             Bytecode::Ifnonnull(offset) => {
                 let [reference] = frame.pop::<1>();
-                let object = unsafe { jvm.environment.object_from_operand(&reference) };
+                let object = unsafe { jvm.environment.object_from_operand(reference) };
 
                 if !jvm.environment.is_null(&object) {
                     let target_offset = bytes_index as isize + *offset as isize;
@@ -986,7 +1230,7 @@ impl ThreadHandle {
             }
             Bytecode::Ifnull(offset) => {
                 let [reference] = frame.pop::<1>();
-                let object = unsafe { jvm.environment.object_from_operand(&reference) };
+                let object = unsafe { jvm.environment.object_from_operand(reference) };
 
                 if jvm.environment.is_null(&object) {
                     let target_offset = bytes_index as isize + *offset as isize;
@@ -1000,118 +1244,219 @@ impl ThreadHandle {
             }
             Bytecode::Astore(index)
             | Bytecode::Astore_n(index) => {
-                let operand = frame.locals[*index as usize];
-                drop(unsafe { jvm.environment.object_from_operand(&operand) });
+                let old = std::mem::replace(&mut frame.locals[*index as usize], Operand::new_ref(0 as _));
+                if old.tag() == OperandTag::Ref {
+                    drop(unsafe { jvm.environment.object_from_operand(old) });
+                }
 
-                frame.locals[*index as usize] = frame.pop::<1>()[0];
+                let [op] = frame.pop::<1>();
+                frame.locals[*index as usize] = op;
             }
             Bytecode::Istore(index)
             | Bytecode::Istore_n(index)
-            | Bytecode::Lstore_n(index) => {
-                frame.locals[*index as usize] = frame.pop::<1>()[0];
+            | Bytecode::Fstore(index)
+            | Bytecode::Fstore_n(index) => {
+                let [op] = frame.pop::<1>();
+                frame.locals[*index as usize] = op;
             }
-            Bytecode::Lload(index) | Bytecode::Lload_n(index) | Bytecode::Iload(index) | Bytecode::Iload_n(index) | Bytecode::Fload_n(index) | Bytecode::Fload(index) => {
-                frame.push([frame.locals[*index as usize]]);
+            Bytecode::Lstore(index)
+            | Bytecode::Lstore_n(index) => {
+                let [op] = frame.pop();
+                let long = op.data();
+
+                frame.locals[*index as usize] = Operand::new_data2(long & ((u32::MAX as u64) << 32));
+                frame.locals[*index as usize + 1] = Operand::new_data2(long & (u32::MAX as u64));
+            }
+            Bytecode::Lload(index) | Bytecode::Lload_n(index) => {
+                let op1 = frame.locals[*index as usize].data();
+                let op2 = frame.locals[*index as usize + 1].data();
+
+                frame.push([Operand::new_data2((op1 << 32) | op2)]);
+            }
+            Bytecode::Iload(index) | Bytecode::Iload_n(index) | Bytecode::Fload_n(index) | Bytecode::Fload(index) => {
+                frame.push([frame.locals[*index as usize].copy_data()]);
+            }
+            Bytecode::Monitorenter | Bytecode::Monitorexit => {
+                let [op] = frame.pop();
+                drop(unsafe { jvm.environment.object_from_operand(op) });
             }
             Bytecode::I2l => {
                 let [int] = frame.pop::<1>();
                 frame.push([
-                    Operand::new_data(int.data() as i64 as u64)
+                    Operand::new_data2(int.data() as i64 as u64)
+                ]);
+            }
+            Bytecode::I2c => {
+                let [int] = frame.pop::<1>();
+                frame.push([
+                    Operand::new_data(int.data() as u32 & u16::MAX as u32)
+                ]);
+            }
+            Bytecode::L2i => {
+                let [int] = frame.pop::<1>();
+                frame.push([
+                    Operand::new_data(int.data() as u32 & u32::MAX)
+                ]);
+            }
+            Bytecode::I2b => {
+                let [int] = frame.pop::<1>();
+                frame.push([
+                    Operand::new_data(int.data() as u8 as u32)
                 ]);
             }
             Bytecode::Ladd => {
                 let [a, b] = frame.pop();
 
                 frame.push([
-                    Operand::new_data(((a.data() as i64) + (b.data() as i64)) as u64)
+                    Operand::new_data2(((a.data() as i64) + (b.data() as i64)) as u64)
+                ]);
+            }
+            Bytecode::Lmul => {
+                let [a, b] = frame.pop();
+
+                frame.push([
+                    Operand::new_data2(((a.data() as i64) * (b.data() as i64)) as u64)
+                ]);
+            }
+            Bytecode::Lsub => {
+                let [a, b] = frame.pop();
+
+                frame.push([
+                    Operand::new_data2(((a.data() as i64) - (b.data() as i64)) as u64)
+                ]);
+            }
+            Bytecode::Lcmp => {
+                let [a, b] = frame.pop();
+
+                let a = a.data() as i64;
+                let b = b.data() as i64;
+
+                let result: i64 = if a > b { 1 } else if a == b { 0 } else { -1 };
+
+                frame.push([
+                    Operand::new_data2(result as u64)
                 ]);
             }
             Bytecode::Iushr => {
                 let [a, b] = frame.pop();
-                unsafe {
-                    frame.push([
-                        Operand::new_data((a.data() as i32 >> ((b.data() as i32) & 0b11111)) as u64)
-                    ]);
-                }
+                frame.push([
+                    Operand::new_data((a.data() as i32 >> ((b.data() as i32) & 0b11111)) as u32)
+                ]);
             }
             Bytecode::Lshl => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data(((a.data() as i64) << ((b.data() as i32 as i64) & 0b111111)) as u64)
+                    Operand::new_data2(((a.data() as i64) << ((b.data() as i32 as i64) & 0b111111)) as u64)
                 ]);
             }
             Bytecode::Lshr => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data(((a.data() as i64) >> ((b.data() as i32 as i64) & 0b111111)) as u64)
+                    Operand::new_data2(((a.data() as i64) >> ((b.data() as i32 as i64) & 0b111111)) as u64)
+                ]);
+            }
+            Bytecode::Ishl => {
+                let [a, b] = frame.pop();
+                frame.push([
+                    Operand::new_data(((a.data() as i32) << ((b.data() as i32) & 0b11111)) as u32)
+                ]);
+            }
+            Bytecode::Ishr => {
+                let [a, b] = frame.pop();
+                frame.push([
+                    Operand::new_data(((a.data() as i32) >> ((b.data() as i32) & 0b11111)) as u32)
                 ]);
             }
             Bytecode::Ixor => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i32).bitxor(b.data() as i32) as u64)
+                    Operand::new_data((a.data() as i32).bitxor(b.data() as i32) as u32)
                 ]);
             }
             Bytecode::Ior => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i32).bitor(b.data() as i32) as u64)
+                    Operand::new_data((a.data() as i32).bitor(b.data() as i32) as u32)
                 ]);
             }
             Bytecode::Iand => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i32).bitand(b.data() as i32) as u64)
+                    Operand::new_data((a.data() as i32).bitand(b.data() as i32) as u32)
                 ]);
             }
             Bytecode::Land => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i64).bitand(b.data() as i64) as u64)
+                    Operand::new_data2((a.data() as i64).bitand(b.data() as i64) as u64)
                 ]);
             }
             Bytecode::Lor => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i64).bitor(b.data() as i64) as u64)
+                    Operand::new_data2((a.data() as i64).bitor(b.data() as i64) as u64)
                 ]);
             }
             Bytecode::Lxor => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i64).bitxor(b.data() as i64) as u64)
+                    Operand::new_data2((a.data() as i64).bitxor(b.data() as i64) as u64)
                 ]);
             }
             Bytecode::Lneg => {
                 let [a] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i64).neg() as u64)
+                    Operand::new_data2((a.data() as i64).neg() as u64)
                 ]);
             }
             Bytecode::Ineg => {
                 let [a] = frame.pop();
                 frame.push([
-                    Operand::new_data((a.data() as i32).neg() as u64)
+                    Operand::new_data((a.data() as i32).neg() as u32)
                 ]);
             }
             Bytecode::Iadd => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data(((a.data() as i32) + (b.data() as i32)) as u64)
+                    Operand::new_data(((a.data() as i32) + (b.data() as i32)) as u32)
+                ]);
+            }
+            Bytecode::Irem => {
+                let [a, b] = frame.pop();
+
+                let a = a.data() as i32;
+                let b = b.data() as i32;
+
+                assert_ne!(b, 0);
+
+                frame.push([
+                    Operand::new_data((a - (a / b) * b) as u32)
+                ]);
+            }
+            Bytecode::Imul => {
+                let [a, b] = frame.pop();
+                frame.push([
+                    Operand::new_data((a.data() as i32).overflowing_mul(b.data() as i32).0 as u32)
+                ]);
+            }
+            Bytecode::Idiv => {
+                let [a, b] = frame.pop();
+                frame.push([
+                    Operand::new_data(((a.data() as i32) / (b.data() as i32)) as u32)
                 ]);
             }
             Bytecode::Isub => {
                 let [a, b] = frame.pop();
                 frame.push([
-                    Operand::new_data(((a.data() as i32) - (b.data() as i32)) as u64)
+                    Operand::new_data(((a.data() as i32) - (b.data() as i32)) as u32)
                 ]);
             }
             Bytecode::Sipush(short) => {
-                frame.push([Operand::new_data(*short as u64)]);
+                frame.push([Operand::new_data(*short as u32)]);
             }
             Bytecode::Iinc(index, inc) => {
                 let int = frame.locals[*index as usize].data() as i32;
-                frame.locals[*index as usize] = Operand::new_data((int + (*inc as i32)) as u64);
+                frame.locals[*index as usize] = Operand::new_data((int + (*inc as i32)) as u32);
             }
             Bytecode::Goto(offset) => {
                 let target_offset = bytes_index as isize + *offset as isize;
@@ -1131,13 +1476,13 @@ impl ThreadHandle {
 
                 match constant {
                     Constant::Integer(int) => {
-                        frame.push([Operand::new_data( *int as u64)]);
+                        frame.push([Operand::new_data( *int as u32)]);
                     }
                     Constant::Float(float) => {
-                        frame.push([Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes()) as u64)]);
+                        frame.push([Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes()))]);
                     }
                     Constant::String(string) => {
-                        let string = jvm.environment.new_string(&string, thread);
+                        let string = jvm.new_string(&string, thread);
 
                         frame.push([
                             string.consume()
@@ -1146,10 +1491,20 @@ impl ThreadHandle {
                     Constant::Class {
                         path, depth
                     } => {
-                        let class = class.class_loader.find_class(thread, path).unwrap();
-                        let object = jvm.environment.clone_reference(class.class_instance.get().unwrap());
+                        if *depth == 0 {
+                            let class = class.class_loader.find_class(thread, path).unwrap();
+                            let object = jvm.environment.clone_reference(class.class_instance.get().unwrap());
 
-                        frame.push([object.consume()]);
+                            let class = jvm.environment.get_object_class(&object);
+
+                            frame.push([object.consume()]);
+                        } else {
+                            let class = class.class_loader.find_class(thread, path).unwrap();
+                            let class = jvm.find_array_class(thread, class, *depth);
+                            let object = jvm.environment.clone_reference(class.class_instance.get().unwrap());
+
+                            frame.push([object.consume()]);
+                        }
                     }
                     _ => unimplemented!("Ldc {constant:?} unimplemented"),
                 }
@@ -1163,33 +1518,31 @@ impl ThreadHandle {
 
                 match constant {
                     Constant::Integer(int) => {
-                        frame.push([Operand::new_data(*int as u64)]);
+                        frame.push([Operand::new_data(*int as u32)]);
                     }
                     Constant::Float(float) => {
-                        frame.push([Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes()) as u64)]);
+                        frame.push([Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes()))]);
                     }
                     Constant::String(string) => {
-                        let string_class = jvm.retrieve_class("java/lang/String", &*class.class_loader, thread).unwrap();
+                        let string = jvm.new_string(string, thread);
 
-                        if &*class.this_class != "java/lang/String" {
-                            Self::init_static(&string_class, thread);
-                        }
-
-                        let string_object = jvm.environment.new_object(&string_class);
-
-                        frame.push([string_object.consume()]);
+                        frame.push([string.consume()]);
                     }
                     Constant::Class {
                         path, depth
                     } => {
-                        todo!()
-                        // let object = objects.get(&class.get_id()).unwrap();
+                        if *depth == 0 {
+                            let class = class.class_loader.find_class(thread, path).unwrap();
+                            let object = jvm.environment.clone_reference(class.class_instance.get().unwrap());
 
-                        // frame.push([
-                        //     Operand {
-                        //         objectref: object.ptr
-                        //     }
-                        // ]);
+                            frame.push([object.consume()]);
+                        } else {
+                            let class = class.class_loader.find_class(thread, path).unwrap();
+                            let class = jvm.find_array_class(thread, class, *depth);
+                            let object = jvm.environment.clone_reference(class.class_instance.get().unwrap());
+
+                            frame.push([object.consume()]);
+                        }
                     }
                     _ => unimplemented!("Ldc_w {constant:?} unimplemented"),
                 }
@@ -1203,18 +1556,38 @@ impl ThreadHandle {
 
                 match constant {
                     Constant::Long(long) => {
-                        frame.push([Operand::new_data(*long as u64)]);
+                        frame.push([Operand::new_data2(*long as u64)]);
                     }
                     Constant::Double(double) => {
-                        frame.push([Operand::new_data(double.to_bits())]);
+                        frame.push([Operand::new_data2(double.to_bits())]);
                     }
                     _ => unimplemented!("Invalid Ldc2_w constant"),
                 }
             }
+            Bytecode::Tableswitch { default, low, high, offsets } => {
+                let [val] = frame.pop();
+                let int = val.data() as i32;
+
+                let byte_offset;
+
+                if int < *low || int > *high {
+                    byte_offset = *default;
+                } else {
+                    byte_offset = offsets[(int - *low) as usize];
+                }
+
+                let target_offset = bytes_index as isize + byte_offset as isize;
+                let idx = code
+                    .instructions
+                    .iter()
+                    .find(|instr| instr.bytes_index == target_offset as u32)
+                    .unwrap();
+                pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+            }
             Bytecode::Iastore => {
                 let [arrayref, index, value] = frame.pop();
 
-                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
 
                 if jvm.environment.is_null(&array) {
                     return ThreadStepResult::Error(ThreadError::RuntimeException(
@@ -1224,12 +1597,27 @@ impl ThreadHandle {
 
                 let index = index.data() as i32;
 
-                unsafe { thread.jvm.environment.set_array_element(10, &array, index, value) };
+                unsafe { thread.jvm.environment.set_array_element(ArrayType::Int, &array, index, value) };
+            }
+            Bytecode::Bastore => {
+                let [arrayref, index, value] = frame.pop();
+
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
+
+                if jvm.environment.is_null(&array) {
+                    return ThreadStepResult::Error(ThreadError::RuntimeException(
+                        RuntimeException::NullPointer,
+                    ));
+                }
+
+                let index = index.data() as i32;
+
+                unsafe { thread.jvm.environment.set_array_element(ArrayType::Byte, &array, index, value) };
             }
             Bytecode::Castore => {
                 let [arrayref, index, value] = frame.pop();
 
-                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
                 if jvm.environment.is_null(&array) {
                     return ThreadStepResult::Error(ThreadError::RuntimeException(
                         RuntimeException::NullPointer,
@@ -1238,12 +1626,12 @@ impl ThreadHandle {
 
                 let index = index.data() as i32;
 
-                unsafe { thread.jvm.environment.set_array_element(5, &array, index, value) };
+                unsafe { thread.jvm.environment.set_array_element(ArrayType::Char, &array, index, value) };
             }
             Bytecode::Aastore => {
                 let [arrayref, index, value] = frame.pop();
 
-                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
                 if jvm.environment.is_null(&array) {
                     return ThreadStepResult::Error(ThreadError::RuntimeException(
                         RuntimeException::NullPointer,
@@ -1257,7 +1645,7 @@ impl ThreadHandle {
             Bytecode::Aaload => {
                 let [arrayref, index] = frame.pop();
 
-                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
                 if jvm.environment.is_null(&array) {
                     return ThreadStepResult::Error(ThreadError::RuntimeException(
                         RuntimeException::NullPointer,
@@ -1273,16 +1661,32 @@ impl ThreadHandle {
             Bytecode::Caload => {
                 let [arrayref, index] = frame.pop();
 
-                let array = unsafe { thread.jvm.environment.object_from_operand(&arrayref) };
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
                 if jvm.environment.is_null(&array) {
                     return ThreadStepResult::Error(ThreadError::RuntimeException(
                         RuntimeException::NullPointer,
                     ));
                 }
 
-                let index = unsafe { index.data() as i32 };
+                let index = index.data() as i32;
 
-                let element = unsafe { thread.jvm.environment.get_array_element(5, &array, index) };
+                let element = unsafe { thread.jvm.environment.get_array_element(ArrayType::Char, &array, index) };
+
+                frame.push([element]);
+            }
+            Bytecode::Baload => {
+                let [arrayref, index] = frame.pop();
+
+                let array = unsafe { thread.jvm.environment.object_from_operand(arrayref) };
+                if jvm.environment.is_null(&array) {
+                    return ThreadStepResult::Error(ThreadError::RuntimeException(
+                        RuntimeException::NullPointer,
+                    ));
+                }
+
+                let index = index.data() as i32;
+
+                let element = unsafe { thread.jvm.environment.get_array_element(ArrayType::Byte, &array, index) };
 
                 frame.push([element]);
             }
@@ -1290,30 +1694,60 @@ impl ThreadHandle {
                 let [count] = frame.pop();
                 let count = unsafe { count.data() as i32 };
 
-                let object = jvm.environment.new_array(*type_ as i32, count);
+                let object = jvm.environment.new_array(*type_, count);
 
                 frame.push([object.consume()]);
             }
-            Bytecode::Checkcast(constant_index) => {
+            Bytecode::Instanceof(constant_index) => {
                 let [objectref] = frame.pop();
-                let object = unsafe { thread.jvm.environment.object_from_operand(&objectref) };
+                let object = unsafe { thread.jvm.environment.object_from_operand(objectref) };
 
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
 
-                let classpath = if let Constant::Class { path, ..} = constant {
-                    path
+                let (classpath, depth) = if let Constant::Class { path, depth } = constant {
+                    (path, *depth)
                 } else {
                     panic!()
                 };
 
-                let type_class = class.class_loader.find_class(thread, classpath).unwrap();
+                let component_class = class.class_loader.find_class(thread, classpath).unwrap();
+                let type_class = jvm.find_array_class(thread, component_class, depth);
 
                 if !jvm.environment.is_null(&object) {
                     let object_class = jvm.environment.get_object_class(&object);
 
                     if &*type_class == object_class || object_class.parents_and_interfaces().iter().any(|super_| &***super_ == &*type_class) {
+                        frame.push([Operand::new_data(1)]);
+                    } else {
+                        frame.push([Operand::new_data(0)]);
+                    }
+                } else {
+                    frame.push([Operand::new_data(0)]);
+                }
+            }
+            Bytecode::Checkcast(constant_index) => {
+                let [objectref] = frame.pop();
+                let object = unsafe { thread.jvm.environment.object_from_operand(objectref) };
 
-                    } else if object_class.interfaces.iter().any(|super_| &**super_ == &*type_class) {
+                let constant = class.constant_pool.constants.get(constant_index).unwrap();
+
+                let type_class;
+
+                if let Constant::Class { path, depth } = constant {
+                    if *depth == 0 {
+                        type_class = class.class_loader.find_class(thread, path).unwrap()
+                    } else {
+                        let component = class.class_loader.find_class(thread, path).unwrap();
+                        type_class = jvm.find_array_class(thread, component, *depth);
+                    }
+                } else {
+                    panic!()
+                };
+
+                if !jvm.environment.is_null(&object) {
+                    let object_class = jvm.environment.get_object_class(&object);
+
+                    if &*type_class == object_class || object_class.parents_and_interfaces().iter().any(|super_| &***super_ == &*type_class) || object_class.interfaces.iter().any(|super_| &**super_ == &*type_class) {
 
                     } else {
                         panic!("{} {}", object_class.this_class, type_class.this_class);
@@ -1324,19 +1758,21 @@ impl ThreadHandle {
             }
             Bytecode::Arraylength => {
                 let [objectref] = frame.pop();
-                let object = unsafe { jvm.environment.object_from_operand(&objectref) };
+                let object = unsafe { jvm.environment.object_from_operand(objectref) };
 
-                frame.push([Operand::new_data(jvm.environment.get_array_length(&object) as u64)]);
+                frame.push([Operand::new_data(jvm.environment.get_array_length(&object) as u32)]);
             }
             Bytecode::Anewarray(constant_index) => {
                 let [count] = frame.pop();
-                let count = unsafe { count.data() as i32 };
+                let count = count.data() as i32 ;
 
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
-                if let Constant::Class { path, .. } = constant {
-                    let array_class = jvm
+                if let Constant::Class { path, depth } = constant {
+                    let component_class = jvm
                         .retrieve_class(&path, &*class.class_loader, thread)
                         .unwrap();
+
+                    let array_class = jvm.find_array_class(thread, component_class, *depth + 1);
 
                     let object = thread.jvm.environment.new_object_array(&array_class, count);
 
@@ -1344,6 +1780,54 @@ impl ThreadHandle {
                 } else {
                     panic!()
                 };
+            }
+            Bytecode::Athrow => {
+                let [objectref] = frame.pop();
+                let object = unsafe { jvm.environment.object_from_operand(objectref) };
+                let object_class = jvm.environment.get_object_class(&object);
+
+                console_log!("Athrow {}", object_class.this_class);
+
+                'a: {
+
+                    for exception in &code.exception_table {
+                        if !(bytes_index >= exception.start_pc as u32 && bytes_index <= exception.end_pc as u32) {
+                            continue;
+                        }
+
+                        if &*exception.catch_type == &*object_class.this_class || {
+                            let clazz = class.class_loader.find_class(thread, &exception.catch_type).unwrap();
+                            JVM::is_subclass(object_class, &clazz)
+                        } {
+                            let target_offset = exception.handler_pc as u32;
+                            let idx = code
+                                .instructions
+                                .iter()
+                                .find(|instr| instr.bytes_index == target_offset)
+                                .unwrap();
+                            pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
+
+                            for op in frame.stack.iter_mut() {
+                                *op = Operand::new_data(0);
+                            }
+
+                            *frame.stack_length = 0;
+
+                            break 'a;
+                        }
+                    }
+
+                    let to_string = jvm.get_method("java/lang/Throwable", "toString", "()Ljava/lang/String;", class.class_loader.get_id());
+
+                    let string_op = thread.invoke(&to_string, Box::new([
+                        object.consume()
+                    ])).unwrap();
+
+                    let string = jvm.get_string(&unsafe { jvm.environment.object_from_operand(string_op) });
+
+                    panic!("Athrow fail\n{string}");
+
+                }
             }
             Bytecode::Putstatic(constant_index) => {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
@@ -1384,26 +1868,28 @@ impl ThreadHandle {
                     .retrieve_class(classpath, &*class.class_loader, thread)
                     .unwrap();
 
-                if target_class.this_class != class.this_class {
-                    Self::init_static(&target_class, thread);
+                let (_, resolved_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+
+                if resolved_class.this_class != class.this_class {
+                    Self::init_static(&resolved_class, thread);
                 }
 
-                let index = target_class
+                let index = resolved_class
                     .fields
                     .iter()
                     .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
                     .position(|field| field.name == field_ref.name_and_type.name)
                     .unwrap();
 
-                let operand = unsafe { (*target_class.statics)[index] };
+                let operand = unsafe { &(*resolved_class.statics)[index] };
 
                 if operand.tag() == OperandTag::Ref {
-                    let object = unsafe { thread.jvm.environment.object_ref_from_operand(&operand) };
+                    let object = unsafe { thread.jvm.environment.object_ref_from_operand(operand) };
                     let ref_clone = jvm.environment.clone_reference(&object);
 
                     frame.push([ref_clone.consume()]);
                 } else {
-                    frame.push([operand]);
+                    frame.push([operand.copy_data()]);
                 }
             }
             Bytecode::New(constant_index) => {
@@ -1429,12 +1915,56 @@ impl ThreadHandle {
                 let [operand] = frame.pop::<1>();
 
                 if operand.tag() == OperandTag::Ref {
-                    let object = unsafe { thread.jvm.environment.object_from_operand(&operand) };
+                    let object = unsafe { thread.jvm.environment.object_from_operand(operand) };
                     let ref_clone = jvm.environment.clone_reference(&object);
 
                     frame.push([object.consume(), ref_clone.consume()]);
                 } else {
-                    frame.push([operand, operand]);
+                    frame.push([operand.copy_data(), operand]);
+                }
+            }
+            Bytecode::Dup2 => {
+                let [a] = frame.pop();
+
+                if matches!(a.tag(), OperandTag::Data2) {
+                    frame.push([a.copy_data(), a]);
+                } else {
+                    let [b] = frame.pop();
+
+                    if matches!(
+                        (a.tag(), b.tag()),
+                        (OperandTag::Ref | OperandTag::Data, OperandTag::Ref | OperandTag::Data)
+                    ) {
+                        let [a1, a2] = if matches!(a.tag(), OperandTag::Ref) {
+                            let object = unsafe { thread.jvm.environment.object_from_operand(a) };
+                            [jvm.environment.clone_reference(&object).consume(), object.consume()]
+                        } else {
+                            [a.copy_data(), a]
+                        };
+
+                        let [b1, b2] = if matches!(b.tag(), OperandTag::Ref) {
+                            let object = unsafe { thread.jvm.environment.object_from_operand(b) };
+                            [jvm.environment.clone_reference(&object).consume(), object.consume()]
+                        } else {
+                            [b.copy_data(), b]
+                        };
+
+                        frame.push([b1, a1, b2, a2]);
+                    } else {
+                        panic!()
+                    }
+                }
+            }
+            Bytecode::Dup_x1 => {
+                let [a, b] = frame.pop();
+
+                if b.tag() == OperandTag::Ref {
+                    let object = unsafe { thread.jvm.environment.object_from_operand(b) };
+                    let ref_clone = jvm.environment.clone_reference(&object);
+
+                    frame.push([object.consume(), a, ref_clone.consume()]);
+                } else {
+                    frame.push([b.copy_data(), a, b]);
                 }
             }
             Bytecode::Aconst_null => {
@@ -1455,6 +1985,8 @@ impl ThreadHandle {
             }
             _ => unimplemented!("Bytecode {:?} unimplemented in interpreter", bytecode),
         }
+
+        thread.instructions_executed.fetch_add(1, Ordering::Relaxed);
 
         *frame.program_counter = frame.program_counter.checked_add_signed(pc_inc).unwrap();
 

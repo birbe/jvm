@@ -1,4 +1,4 @@
-use crate::classfile::attribute_info::{BootstrapMethodsAttributeInfo, CodeAttributeInfo};
+use crate::classfile::attribute_info::{BootstrapMethodsAttributeInfo, CodeAttributeInfo, ExceptionTableInfo};
 use crate::classfile::constant::{
     ClassInfo, DynamicInfo, MethodHandleInfo, MethodTypeInfo, ModuleInfo, NameAndTypeInfo,
     PackageInfo, RefInfo, StringInfo, Utf8Info,
@@ -22,6 +22,7 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicU32, AtomicU8};
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
+use crate::bytecode::BytecodeParseError;
 use crate::env::Object;
 
 bitflags! {
@@ -51,6 +52,7 @@ bitflags! {
 
 pub type ClassId = u32;
 
+#[derive(Debug)]
 pub struct Class {
     pub constant_pool: ConstantPool,
     pub this_class: Arc<String>,
@@ -68,7 +70,11 @@ pub struct Class {
     pub heap_size: usize,
     pub class_loader: Arc<dyn ClassLoader>,
     pub class_instance: OnceCell<Object>,
-    internal_id: ClassId,
+    pub(crate) internal_id: ClassId,
+    pub(crate) is_array: bool,
+    pub(crate) is_primitive: bool,
+    //Normal classes will have the format Lx; where x is the classpath, other possibilities are arrays such as [B, or primitives with a single character
+    pub(crate) internal_identifier: String
 }
 
 impl Drop for Class {
@@ -86,11 +92,11 @@ impl Class {
         thread: &mut Thread,
         class_loader: Arc<dyn ClassLoader>,
         internal_id: ClassId,
-    ) -> Option<Self> {
+    ) -> Result<Self, ClassDeserializationError> {
         let constant_pool =
-            ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool)?;
+            ConstantPool::from_constant_info_pool(classfile, &classfile.constant_pool).ok_or(ClassDeserializationError::ParseError)?;
 
-        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class)?;
+        let this_class = resolve_string(&classfile.constant_pool, classfile.this_class).ok_or(ClassDeserializationError::ParseError)?;
         
         let super_class = if &*this_class != "java/lang/Object" {
             Some(
@@ -150,7 +156,7 @@ impl Class {
 
                 field
             })
-            .collect::<Option<Vec<Field>>>()?;
+            .collect::<Result<Vec<Field>, ClassDeserializationError>>()?;
 
         let static_fields = fields
             .iter()
@@ -161,9 +167,10 @@ impl Class {
         let heap_size =
             super_heap_size + (fields.len() - static_fields.len()) * size_of::<Operand>();
 
-        Some(Self {
+        Ok(Self {
+            internal_identifier: format!("L{};", this_class),
             super_class,
-            access_flags: AccessFlags::from_bits(classfile.access_flags)?,
+            access_flags: AccessFlags::from_bits(classfile.access_flags).ok_or(ClassDeserializationError::ParseError)?,
             interfaces,
             fields,
             methods: classfile
@@ -172,9 +179,9 @@ impl Class {
                 .map(|method_info| {
                     Method::new(method_info, &constant_pool, classfile, this_class.clone()).map(Arc::new)
                 })
-                .collect::<Option<Vec<Arc<Method>>>>()?,
+                .collect::<Result<Vec<Arc<Method>>, ClassDeserializationError>>()?,
             this_class,
-            statics: Box::into_raw(vec![Operand::new_data(0); static_fields].into_boxed_slice()),
+            statics: Box::into_raw((0..static_fields).map(|_| Operand::new_data(0)).collect::<Vec<_>>().into_boxed_slice()),
             static_init_state: AtomicU32::new(0),
             attributes: classfile
                 .attributes
@@ -182,18 +189,21 @@ impl Class {
                 .map(|attribute_info| {
                     let attribute_kind = constant_pool
                         .constants
-                        .get(&attribute_info.name_index)?
-                        .as_string()?;
+                        .get(&attribute_info.name_index).map(|constant| constant.as_string())
+                        .flatten()
+                        .ok_or(ClassDeserializationError::InvalidConstant)?;
 
-                    Some(Attribute::new(attribute_kind, attribute_info, &constant_pool).unwrap())
+                    Ok(Attribute::new(attribute_kind, attribute_info, &constant_pool).unwrap())
                 })
-                .collect::<Option<Vec<Attribute>>>()?,
+                .collect::<Result<Vec<Attribute>, ClassDeserializationError>>()?,
             constant_pool,
             #[cfg(not(target_arch = "wasm32"))]
             heap_size,
             class_loader,
             class_instance: OnceCell::new(),
-            internal_id
+            internal_id,
+            is_array: false,
+            is_primitive: false,
         })
     }
 
@@ -217,6 +227,7 @@ impl Class {
         })
     }
 
+    ///mc overrides ma (mc is in a subclass of ma)
     fn does_method_override(&self, ma: &Method, ca: &Class, mc: &Method) -> bool {
         let otherwise = (ma.access_flags & (AccessFlags::PUBLIC | AccessFlags::PROTECTED | AccessFlags::PRIVATE)).is_empty()
             && {
@@ -236,9 +247,10 @@ impl Class {
             || otherwise )
     }
 
-    pub fn find_overriding_method(&self, to_be_overridden: &Method, superclass: &Class) -> Option<&Arc<Method>> {
+    ///Finds a method in this class which overrides a method from another class
+    pub fn find_overriding_method(&self, to_be_overridden: &Method, class: &Class) -> Option<&Arc<Method>> {
         self.methods.iter().find(|mc| {
-            self.does_method_override(to_be_overridden, superclass, &mc)
+            self.does_method_override(to_be_overridden, class, &mc)
         })
     }
 
@@ -250,6 +262,15 @@ impl Class {
         if let Some(superclass) = &self.super_class {
             parents.extend(superclass.parents_and_interfaces());
         }
+
+        parents
+    }
+
+    pub fn superinterfaces(&self) -> Vec<&Arc<Class>> {
+        let mut parents = vec![];
+
+        parents.extend(self.interfaces.iter());
+        parents.extend(self.interfaces.iter().map(|interface| interface.superinterfaces()).flatten());
 
         parents
     }
@@ -402,7 +423,7 @@ pub struct Method {
     pub descriptor: MethodDescriptor,
     pub attributes: HashMap<String, Attribute>,
     pub class: Arc<String>,
-    identifier: String,
+    pub(crate) identifier: String,
 }
 
 impl Method {
@@ -411,33 +432,33 @@ impl Method {
         constant_pool: &ConstantPool,
         _classfile: &ClassFile,
         class: Arc<String>,
-    ) -> Option<Self> {
-        let descriptor_string = (&**constant_pool
+    ) -> Result<Self, ClassDeserializationError> {
+        let descriptor_string = &**constant_pool
             .constants
-            .get(&method_info.descriptor_index)?
-            .as_string()?);
+            .get(&method_info.descriptor_index).ok_or(ClassDeserializationError::InvalidConstant)?
+            .as_string().ok_or(ClassDeserializationError::InvalidConstant)?;
 
         let method_name = constant_pool
             .constants
-            .get(&method_info.name_index)?
-            .as_string()?;
+            .get(&method_info.name_index).ok_or(ClassDeserializationError::InvalidConstant)?
+            .as_string().ok_or(ClassDeserializationError::InvalidConstant)?;
 
-        Some(Self {
-            access_flags: AccessFlags::from_bits(method_info.access_flags)?,
+        Ok(Self {
+            access_flags: AccessFlags::from_bits(method_info.access_flags).unwrap(),
             name: method_name.clone(),
-            descriptor: descriptor_string[..].try_into().ok()?,
+            descriptor: descriptor_string[..].try_into().map_err(|_| ClassDeserializationError::InvalidMethodDescriptor)?,
             attributes: method_info
                 .attributes
                 .iter()
                 .map(|attr| {
                     let descriptor_kind =
-                        (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
+                        (**(constant_pool.constants.get(&attr.name_index).ok_or(ClassDeserializationError::InvalidConstant)?.as_string().unwrap())).clone();
 
-                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
+                    let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool).map_err(|err| ClassDeserializationError::MethodDeserializationError((&**method_name).clone(), Box::new(err)))?;
 
-                    Some((descriptor_kind, attribute))
+                    Ok((descriptor_kind, attribute))
                 })
-                .collect::<Option<HashMap<String, Attribute>>>()?,
+                .collect::<Result<HashMap<String, Attribute>, ClassDeserializationError>>()?,
             class,
             identifier: format!("{}{}", method_name, descriptor_string),
         })
@@ -478,7 +499,7 @@ pub enum Attribute {
     NestHost,
     NestMembers,
     PermittedSubclasses,
-    Exceptions,
+    Exceptions(ExceptionTableInfo),
     InnerClasses,
     EnclosingMethod,
     Synthetic,
@@ -491,37 +512,50 @@ pub enum Attribute {
     Other(String, Vec<u8>),
 }
 
+#[derive(Debug)]
+pub enum ClassDeserializationError {
+    BytecodeDeserializationError(BytecodeParseError),
+    ParseError,
+    MethodDeserializationError(String, Box<ClassDeserializationError>),
+    InvalidConstant,
+    InvalidMethodDescriptor,
+    AccessFlags,
+}
+
 impl Attribute {
     pub fn new(
         kind: &str,
         attribute_info: &AttributeInfo,
         constant_pool: &ConstantPool,
-    ) -> Option<Self> {
+    ) -> Result<Self, ClassDeserializationError> {
         let mut cursor = Cursor::new(&attribute_info.info);
 
-        Some(match kind {
-            "Code" => Self::Code(Code::new(
-                &CodeAttributeInfo::from_bytes(&mut cursor).ok()?,
-                constant_pool,
-            )?),
+        Ok(match kind {
+            "Code" => {
+                let code_attribute = &CodeAttributeInfo::from_bytes(&mut cursor).map_err(|_| ClassDeserializationError::ParseError)?;
+
+                Self::Code(Code::new(
+                    code_attribute,
+                    constant_pool,
+                ).map_err(|err| ClassDeserializationError::BytecodeDeserializationError(err))?,)
+            },
             "BootstrapMethods" => Self::BootstrapMethods(BootstrapMethods::new(
-                &BootstrapMethodsAttributeInfo::from_bytes(&mut cursor)
-                    .expect(&format!("{:?}", cursor)),
+                &BootstrapMethodsAttributeInfo::from_bytes(&mut cursor).map_err(|_| ClassDeserializationError::ParseError)?,
                 constant_pool,
-            )?),
+            ).ok_or(ClassDeserializationError::ParseError)?),
             _ => Self::Other(kind.to_string(), attribute_info.info.clone()),
         })
     }
 }
 
 pub mod attribute {
-    use crate::bytecode::Bytecode;
+    use crate::bytecode::{Bytecode, BytecodeParseError};
     use crate::classfile::attribute_info::{
         BootstrapMethodsAttributeInfo, CodeAttributeInfo, ExceptionTableInfo,
     };
-    use crate::classfile::resolved::{Attribute, Constant, ConstantPool, MethodHandle};
+    use crate::classfile::resolved::{Attribute, ClassDeserializationError, Constant, ConstantPool, MethodHandle};
     use std::io::Cursor;
-
+    
     #[derive(Clone, Debug, PartialEq)]
     pub struct BootstrapMethod {
         pub method_ref: MethodHandle,
@@ -582,24 +616,27 @@ pub mod attribute {
     }
 
     impl Code {
-        pub fn new(code_info: &CodeAttributeInfo, constant_pool: &ConstantPool) -> Option<Self> {
+        pub fn new(code_info: &CodeAttributeInfo, constant_pool: &ConstantPool) -> Result<Self, BytecodeParseError> {
             let mut cursor = Cursor::new(&code_info.code);
             let mut instructions = Vec::new();
 
             loop {
                 let index = cursor.position();
 
-                instructions.push(match Bytecode::from_bytes(&mut cursor) {
-                    Ok(bytecode) => Instruction {
-                        bytecode,
+                if index == code_info.code.len() as u64 {
+                    break
+                }
+
+                instructions.push({
+                    Instruction {
+                        bytecode: Bytecode::from_bytes(&mut cursor)?,
                         bytes_index: index as u32,
                         bytecode_index: instructions.len() as u32,
-                    },
-                    Err(_) => break,
+                    }
                 });
             }
 
-            Some(Self {
+            Ok(Self {
                 attribute_name: "Code",
                 max_stack: code_info.max_stack,
                 max_locals: code_info.max_locals,
@@ -611,19 +648,21 @@ pub mod attribute {
                     .map(|exception_table_info| {
                         ExceptionTable::new(exception_table_info, constant_pool)
                     })
-                    .collect::<Option<Vec<ExceptionTable>>>()?,
+                    .collect::<Option<Vec<ExceptionTable>>>().unwrap(),
                 attributes: code_info
                     .attributes
                     .iter()
                     .map(|attribute_info| {
                         let attribute_kind = constant_pool
                             .constants
-                            .get(&attribute_info.name_index)?
-                            .as_string()?;
+                            .get(&attribute_info.name_index)
+                            .map(|constant| constant.as_string())
+                            .flatten()
+                            .ok_or(ClassDeserializationError::InvalidConstant)?;
 
                         Attribute::new(attribute_kind, attribute_info, constant_pool)
                     })
-                    .collect::<Option<Vec<Attribute>>>()?,
+                    .collect::<Result<Vec<Attribute>, ClassDeserializationError>>().unwrap(),
             })
         }
     }
@@ -714,7 +753,7 @@ fn resolve_constant(
             let depth = (string.len() - path.len()) as u8;
 
             if depth > 0 {
-                path = String::from(path.trim_start_matches("L"));
+                path = String::from(path.trim_start_matches("L")).replace(";", "");
             }
 
             Constant::Class { path, depth }
@@ -762,7 +801,7 @@ fn resolve_constant(
     Some(insert)
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ConstantPool {
     pub constants: HashMap<u16, Constant>,
 }
@@ -954,38 +993,44 @@ impl Field {
         constant_pool: &ConstantPool,
         #[cfg(not(target_arch = "wasm32"))]
         heap_offset: usize,
-    ) -> Option<Self> {
-        Some(Self {
-            access_flags: AccessFlags::from_bits(field_info.access_flags)?,
+    ) -> Result<Self, ClassDeserializationError> {
+        Ok(Self {
+            access_flags: AccessFlags::from_bits(field_info.access_flags).ok_or(ClassDeserializationError::AccessFlags)?,
             name: constant_pool
                 .constants
-                .get(&field_info.name_index)?
-                .as_string()?
+                .get(&field_info.name_index)
+                .map(|constant| constant.as_string())
+                .flatten()
+                .ok_or(ClassDeserializationError::InvalidConstant)?
                 .clone(),
             descriptor: FieldType::from_str(
                 constant_pool
                     .constants
-                    .get(&field_info.descriptor_index)?
-                    .as_string()?,
+                    .get(&field_info.descriptor_index).map(|constant| constant.as_string())
+                    .flatten()
+                    .ok_or(ClassDeserializationError::InvalidConstant)?,
             )
             .0,
             descriptor_string: (**constant_pool
                 .constants
-                .get(&field_info.descriptor_index)?
-                .as_string()?)
+                .get(&field_info.descriptor_index).map(|constant| constant.as_string())
+                .flatten()
+                .ok_or(ClassDeserializationError::InvalidConstant)?)
             .clone(),
             attributes: field_info
                 .attributes
                 .iter()
                 .map(|attr| {
                     let descriptor_kind =
-                        (**(constant_pool.constants.get(&attr.name_index)?.as_string()?)).clone();
+                        (**(constant_pool.constants.get(&attr.name_index).map(|constant| constant.as_string())
+                            .flatten()
+                            .ok_or(ClassDeserializationError::InvalidConstant)?)).clone();
 
                     let attribute = Attribute::new(&descriptor_kind, &attr, constant_pool)?;
 
-                    Some((descriptor_kind, attribute))
+                    Ok((descriptor_kind, attribute))
                 })
-                .collect::<Option<HashMap<String, Attribute>>>()?,
+                .collect::<Result<HashMap<String, Attribute>, ClassDeserializationError>>()?,
             #[cfg(not(target_arch = "wasm32"))]
             heap_offset,
         })

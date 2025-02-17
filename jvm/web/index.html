@@ -20,9 +20,11 @@
         let worker = new Worker("worker.js?");
         worker.postMessage([module, memory]);
 
-        while(true) {
-            await listen();
-        }
+        setInterval(()=>listen().then(()=>{}), 1000);
+
+        // while(true) {
+        //     await listen();
+        // }
     }
 
     run().then(()=>{});

@@ -7,6 +7,19 @@ use std::fmt::{Display, Formatter};
 use std::io::{Error, Read, Seek};
 use std::ops::Deref;
 
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum ArrayType {
+    Bool = 4,
+    Char = 5,
+    Float = 6,
+    Double = 7,
+    Byte = 8,
+    Short = 9,
+    Int = 10,
+    Long = 11
+}
+
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
 pub struct LookupEntry {
     pub key: i32,
@@ -27,19 +40,19 @@ impl JValue {
     pub fn to_operand(self) -> Operand {
         match self {
             JValue::Reference(object) => object.consume(),
-            JValue::Int(int) => Operand::new_data(int as u64),
-            JValue::Long(long) => Operand::new_data(long as u64),
-            JValue::Float(float) => Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes()) as u64),
-            JValue::Double(double) => Operand::new_data(u64::from_ne_bytes(double.to_ne_bytes())),
-            JValue::Short(short) => Operand::new_data(short as u64),
-            JValue::Byte(byte) => Operand::new_data(byte as u64),
+            JValue::Int(int) => Operand::new_data(int as u32),
+            JValue::Long(long) => Operand::new_data2(long as u64),
+            JValue::Float(float) => Operand::new_data(u32::from_ne_bytes(float.to_ne_bytes())),
+            JValue::Double(double) => Operand::new_data2(u64::from_ne_bytes(double.to_ne_bytes())),
+            JValue::Short(short) => Operand::new_data(short as u32),
+            JValue::Byte(byte) => Operand::new_data(byte as u32),
         }
     }
 }
 
 #[derive(Debug)]
 pub enum BytecodeParseError {
-    InvalidOpcode,
+    InvalidOpcode(u8, u64),
     IOError(std::io::Error),
 }
 
@@ -77,7 +90,7 @@ pub enum Bytecode {
     Dastore,                             //0x52
     Dcmpg,                               //0x98
     Dcmpl,                               //0x97
-    Dconst_n(u8),                        //0xe - 0xf
+    Dconst_n(f64),                        //0xe - 0xf
     Ddiv,                                //0x6f
     Dload(u8),                           //0x18
     Dload_n(u8),                         //0x26 - 0x29
@@ -89,6 +102,7 @@ pub enum Bytecode {
     Dstore_n(u8),                        //0x47 - 0x4a
     Dsub,                                //0x67
     Dup,                                 //0x59
+    Dup_x1,                              //0x5a
     Dup_x2,                              //0x5b
     Dup2,                                //0x5c
     Dup2_x1,                             //0x5d
@@ -190,7 +204,7 @@ pub enum Bytecode {
     Lreturn,                 //0xad
     Lshl,                    //0x79
     Lshr,                    //0x7b
-    Lstore,                  //0x37
+    Lstore(u8),                  //0x37
     Lstore_n(u8),            //0x3f - 0x42
     Lsub,                    //0x65
     Lushr,                   //0x7d
@@ -199,7 +213,7 @@ pub enum Bytecode {
     Monitorexit,             //0xc3
     Multianewarray(u16, u8), //0xc5
     New(u16),                //0xbb
-    Newarray(u8),            //0xbc
+    Newarray(ArrayType),            //0xbc
     Nop,                     //0x0
     Pop,                     //0x57
     Pop2,                    //0x58
@@ -211,7 +225,12 @@ pub enum Bytecode {
     Sastore,                 //0x56
     Sipush(i16),             //0x11
     Swap,                    //0x5f
-    Tableswitch,             //0xaa
+    Tableswitch {
+        default: i32,
+        low: i32,
+        high: i32,
+        offsets: Vec<i32>
+    },             //0xaa
     Wide(Vec<u8>),           //0xc4
 }
 
@@ -253,7 +272,7 @@ impl Bytecode {
             0x52 => Self::Dastore,
             0x98 => Self::Dcmpg,
             0x97 => Self::Dcmpl,
-            0xe..=0xf => Self::Dconst_n(opcode - 0x3),
+            0xe..=0xf => Self::Dconst_n(if opcode - 0x3 == 0 { 0.0 } else { 1.0 }),
             0x6f => Self::Ddiv,
             0x18 => Self::Dload(reader.read_u8()?),
             0x26..=0x29 => Self::Dload_n(opcode - 0x26),
@@ -265,6 +284,7 @@ impl Bytecode {
             0x47..=0x4a => Self::Dstore_n(opcode - 0x47),
             0x67 => Self::Dsub,
             0x59 => Self::Dup,
+            0x5a => Self::Dup_x1,
             0x5b => Self::Dup_x2,
             0x5c => Self::Dup2,
             0x5d => Self::Dup2_x1,
@@ -377,9 +397,9 @@ impl Bytecode {
                     entries: Vec<LookupEntry>
                 }
 
-                let position = reader.stream_position().unwrap();
-                let padding = (position.next_multiple_of(2) - position) as usize;
-                reader.read(&mut vec![0; padding])?;
+                let position = reader.stream_position()?;
+                let padding = (position.next_multiple_of(4) - position) as usize;
+                reader.seek_relative(padding as i64)?;
 
                 let default = reader.read_i32::<BigEndian>()?;
                 let entries = LookupEntries::from_bytes(&mut reader)?.entries;
@@ -391,7 +411,7 @@ impl Bytecode {
             0xad => Self::Lreturn,
             0x79 => Self::Lshl,
             0x7b => Self::Lshr,
-            0x37 => Self::Lstore,
+            0x37 => Self::Lstore(reader.read_u8()?),
             0x3f..=0x42 => Self::Lstore_n(opcode - 0x3f),
             0x65 => Self::Lsub,
             0x7d => Self::Lushr,
@@ -400,7 +420,21 @@ impl Bytecode {
             0xc3 => Self::Monitorexit,
             0xc5 => Self::Multianewarray(reader.read_u16::<BigEndian>()?, reader.read_u8()?),
             0xbb => Self::New(reader.read_u16::<BigEndian>()?),
-            0xbc => Self::Newarray(reader.read_u8()?),
+            0xbc => Self::Newarray({
+                let byte = reader.read_u8()?;
+
+                match byte {
+                    4 => ArrayType::Bool,
+                    5 => ArrayType::Char,
+                    6 => ArrayType::Float,
+                    7 => ArrayType::Double,
+                    8 => ArrayType::Byte,
+                    9 => ArrayType::Short,
+                    10 => ArrayType::Int,
+                    11 => ArrayType::Long,
+                    _ => unreachable!("Invalid array type {byte}")
+                }
+            }),
             0x0 => Self::Nop,
             0x57 => Self::Pop,
             0x58 => Self::Pop2,
@@ -412,9 +446,33 @@ impl Bytecode {
             0x56 => Self::Sastore,
             0x11 => Self::Sipush(reader.read_i16::<BigEndian>()?),
             0x5f => Self::Swap,
-            0xaa => Self::Tableswitch,
-            0xcf => Self::Wide(Vec::new()),
-            _ => return Err(BytecodeParseError::InvalidOpcode),
+            0xaa => {
+                let position = reader.stream_position()?;
+                let padding = (position.next_multiple_of(4) - position) as usize;
+                reader.seek_relative(padding as i64)?;
+
+                let default = reader.read_i32::<BigEndian>()?;
+                let low = reader.read_i32::<BigEndian>()?;
+                let high = reader.read_i32::<BigEndian>()?;
+
+                assert!(low <= high);
+
+                let offset_count = high - low + 1;
+                let mut offsets = vec![0; offset_count as usize];
+
+                for i in 0..offset_count {
+                    offsets[i as usize] = reader.read_i32::<BigEndian>()?;
+                }
+
+                Self::Tableswitch {
+                    default,
+                    low,
+                    high,
+                    offsets,
+                }
+            },
+            0xc4 => Self::Wide(todo!()),
+            _ => return Err(BytecodeParseError::InvalidOpcode(opcode, reader.stream_position()?)),
         };
 
         Ok(bytecode)

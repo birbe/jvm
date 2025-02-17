@@ -55,7 +55,7 @@ impl ComponentNode {
                 }
             }
             Bytecode::Lookupswitch(_, _) => unimplemented!(),
-            Bytecode::Tableswitch => unimplemented!(),
+            Bytecode::Tableswitch { .. } => unimplemented!(),
             Bytecode::Wide(_) => unimplemented!(),
             _ => {
                 if instruction.bytecode_index < last_index {

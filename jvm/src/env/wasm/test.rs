@@ -18,7 +18,7 @@ use js_sys::{ArrayBuffer, Uint8Array};
 use once_cell::sync::Lazy;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, RequestMode, Response, Worker};
+use web_sys::{Request, RequestInit, RequestMode, Response, Worker, WorkerGlobalScope};
 use jvm_types::JParse;
 use crate::classfile::ClassFile;
 use crate::env::Object;
@@ -26,7 +26,9 @@ use crate::env::wasm::native::native_func;
 use crate::thread::Thread;
 
 static CHANNEL: Lazy<(Sender<String>, Mutex<Receiver<String>>)> = Lazy::new(|| {
-    let (sender, recv) = async_channel::unbounded();
+    console_log!("initializing lazy");
+
+    let (sender, recv) = async_channel::bounded(1);
     (sender, Mutex::new(recv))
 });
 static CLASSES: Lazy<ArcSwap<HashMap<String, Arc<Vec<u8>>>>> = Lazy::new(|| ArcSwap::new(Arc::new(HashMap::new())));
@@ -77,7 +79,7 @@ impl BootstrapLoader for Arc<NativeClassLoader> {
         let classfile = self.get_classfile(classpath).unwrap();
 
         match thread.jvm.is_class_linked(classpath, self.get_id()) {
-            None => thread.jvm.clone().generate_class(&classfile, Arc::new(self.clone()), thread),
+            None => thread.jvm.clone().generate_class(classpath, &classfile, Arc::new(self.clone()), thread),
             Some(class) => Ok(class)
         }
     }
@@ -86,18 +88,18 @@ impl BootstrapLoader for Arc<NativeClassLoader> {
 const THE_NULL: &Object = &Object::NULL;
 
 impl ClassLoader for Arc<NativeClassLoader> {
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>> {
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
         if let Some(class) = thread.jvm.is_class_linked(classpath, self.get_id()) {
-            return Some(class);
+            return Ok(class);
         }
 
         let classfile = self.get_classfile(classpath).unwrap();
         let jvm = thread.jvm.clone();
-        let class = jvm.generate_class(&classfile, Arc::new(self.clone()), thread).ok()?;
+        let class = jvm.generate_class(classpath, &classfile, Arc::new(self.clone()), thread)?;
 
-        if classpath != "java/lang/Class" { jvm.generate_class_object(class.clone(), self, thread).unwrap() };
+        if classpath != "java/lang/Class" { jvm.generate_class_object(class.clone(), self, thread)? };
 
-        Some(class)
+        Ok(class)
     }
 
     fn get_class_loader_object_handle(&self) -> &Object {
@@ -167,6 +169,7 @@ pub fn main_thread_begin() -> JsValue {
 pub async fn listen() {
     let recv = CHANNEL.1.lock();
     let classpath = recv.recv().await.unwrap();
+    drop(recv);
 
     let mut opts = RequestInit::new();
     opts.method("GET");
@@ -180,8 +183,8 @@ pub async fn listen() {
         .headers()
         .set("Accept", "*/*").unwrap();
 
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await.unwrap();
+    let scope: WorkerGlobalScope = js_sys::global().dyn_into().unwrap();
+    let resp_value = JsFuture::from(scope.fetch_with_request(&request)).await.unwrap();
 
     // `resp_value` is a `Response` object.
     assert!(resp_value.is_instance_of::<Response>());

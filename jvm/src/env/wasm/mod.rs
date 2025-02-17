@@ -1,7 +1,7 @@
 use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
 use std::arch::asm;
-use crate::classfile::resolved::{AccessFlags, Class, ClassId, Method, Ref, ReturnType};
-use crate::env::{Compiler, Environment};
+use crate::classfile::resolved::{AccessFlags, Attribute, Class, ClassId, FieldType, Method, Ref, ReturnType};
+use crate::env::{nothing, Compiler, Environment};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::env::Object;
 use crate::linker::{ClassLoader, ClassLoaderObject};
@@ -9,14 +9,20 @@ use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use js_sys::{Function, WebAssembly};
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use highway::HighwayHasher;
+use js_sys::WebAssembly::Module;
 use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::JsValue;
+use crate::bytecode::ArrayType;
 use crate::env::wasm::compile::generate_helper_wasm;
 use crate::env::wasm::compile::stub::create_stub_module;
 use crate::env::wasm::native::native_func;
 
 pub static OBJECT_REF_SLOTS: OnceCell<Mutex<RefSlots>> = OnceCell::new();
+pub static NULL_TABLE_SLOT: OnceCell<unsafe extern "C" fn(i32)> = OnceCell::new();
 pub static OBJECT_REFS: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! console_log {
@@ -75,16 +81,19 @@ pub extern "C" fn alloc_ref() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn dealloc_ref(index: *mut ()) {
-    let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
-    let mut refs = refs_lock.lock();
-
-    if refs.available.contains(&(index as i32)) {
-        panic!("double free {}", index as u32);
-    }
-
-    if index as i32 != 0 {
-        refs.available.push(index as i32);
-    }
+    // let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
+    // let mut refs = refs_lock.lock();
+    //
+    // if refs.available.contains(&(index as i32)) {
+    //     panic!("double free {}", index as u32);
+    // }
+    //
+    // let fn_ptr = unsafe { *NULL_TABLE_SLOT.get_unchecked() };
+    // unsafe { fn_ptr(index as i32); };
+    //
+    // if index as i32 != 0 {
+    //     refs.available.push(index as i32);
+    // }
 }
 
 #[no_mangle]
@@ -94,7 +103,7 @@ pub extern "C" fn malloc(size: i32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn push_frame(stack: &mut FrameStack, locals_length: i32, class: &Class, method: &Method) -> i32 {
-    stack.push(RawFrame::new(method, class, vec![Operand::new_data(0); locals_length as usize].into_boxed_slice(), vec![Operand::new_data(0); 256].into_boxed_slice()));
+    stack.push(RawFrame::new(method, class, (0..locals_length).map(|_| Operand::new_data(0)).collect::<Vec<_>>().into_boxed_slice(), (0..256).map(|_| Operand::new_data(0)).collect::<Vec<_>>().into_boxed_slice()));
     unsafe { stack.frames.as_mut_ptr().add(stack.frame_index as usize) as i32 }
 }
 
@@ -112,18 +121,29 @@ pub struct WasmEnvironment {
     pub class_function_pointers: RwLock<HashMap<ClassId, HashMap<String, u32>>>,
     pub object_table: WebAssembly::Table,
     fn_get_object_class: unsafe extern "C" fn(i32) -> i32,
-    fn_new_object_array: unsafe extern "C" fn(i32, i32) -> i32,
+    fn_new_object_array: unsafe extern "C" fn(i32, i32, i64) -> i32,
     fn_set_object_array_elem: unsafe extern "C" fn(i32, i32, i32),
     fn_get_object_array_elem: unsafe extern "C" fn(i32, i32) -> i32,
     fn_array_length: unsafe extern "C" fn(i32) -> i32,
-    fn_new_array: unsafe extern "C" fn(i32, i32) -> i32,
+    fn_new_array: unsafe extern "C" fn(i32, i32, i32, i64) -> i32,
 
     fn_set_int_array_elem: unsafe extern "C" fn(i32, i32, i32),
     fn_set_char_array_elem: unsafe extern "C" fn(i32, i32, i32),
-    fn_get_int_array_elem: unsafe extern "C" fn(i32, i32) -> Operand,
-    fn_get_char_array_elem: unsafe extern "C" fn(i32, i32) -> Operand,
+    fn_set_byte_array_elem: unsafe extern "C" fn(i32, i32, i32),
+    fn_get_byte_array_elem: unsafe extern "C" fn(i32, i32) -> i64,
+
+    fn_get_int_array_elem: unsafe extern "C" fn(i32, i32) -> i64,
+    fn_get_char_array_elem: unsafe extern "C" fn(i32, i32) -> i64,
     fn_is_ref_null: unsafe extern "C" fn(i32) -> i32,
-    fn_clone_reference: unsafe extern "C" fn(i32) -> i32
+    fn_clone_reference: unsafe extern "C" fn(i32) -> i32,
+    fn_ref_eq: unsafe extern "C" fn(i32, i32) -> i32,
+    fn_obj_hash: unsafe extern "C" fn(i32) -> i64,
+
+    fn_null_slot: unsafe extern "C" fn(i32),
+
+    primitive_arrays: OnceCell<HashMap<ArrayType, Arc<Class>>>,
+
+    object_id: AtomicU64
 }
 
 impl WasmEnvironment {
@@ -150,7 +170,12 @@ impl WasmEnvironment {
 
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
-        let module = WebAssembly::Module::new(&uint8array).unwrap();
+        let module = match WebAssembly::Module::new(&uint8array) {
+            Ok(module) => module,
+            Err(err) => {
+                panic!("{wat}\n{err:?}")
+            }
+        };
 
         let imports = js_sys::Object::new();
         let jvm_import_object = js_sys::Object::new();
@@ -169,6 +194,7 @@ impl WasmEnvironment {
         let get_object_array_elem = js_sys::Reflect::get(&exports, &"get_object_array_element".into()).unwrap();
         let is_ref_null = js_sys::Reflect::get(&exports, &"is_ref_null".into()).unwrap();
         let clone_reference = js_sys::Reflect::get(&exports, &"clone_reference".into()).unwrap();
+        let ref_eq = js_sys::Reflect::get(&exports, &"ref_eq".into()).unwrap();
         let new_array = js_sys::Reflect::get(&exports, &"new_array".into()).unwrap();
         let ia_store = js_sys::Reflect::get(&exports, &"int_array_store".into()).unwrap();
         let ca_store = js_sys::Reflect::get(&exports, &"char_array_store".into()).unwrap();
@@ -176,7 +202,12 @@ impl WasmEnvironment {
         let ia_load = js_sys::Reflect::get(&exports, &"int_array_load".into()).unwrap();
         let ca_load = js_sys::Reflect::get(&exports, &"char_array_load".into()).unwrap();
 
+        let ba_load = js_sys::Reflect::get(&exports, &"byte_array_load".into()).unwrap();
+        let ba_store = js_sys::Reflect::get(&exports, &"byte_array_store".into()).unwrap();
+
         let array_length = js_sys::Reflect::get(&exports, &"get_array_length".into()).unwrap();
+        let obj_hash = js_sys::Reflect::get(&exports, &"obj_hash".into()).unwrap();
+        let null_slot = js_sys::Reflect::get(&exports, &"null_slot".into()).unwrap();
 
         let get_object_class = Function::from(obj_class_func);
         let new_object_array = Function::from(new_object_array_func);
@@ -184,15 +215,20 @@ impl WasmEnvironment {
         let get_object_array = Function::from(get_object_array_elem);
         let is_ref_null = Function::from(is_ref_null);
         let clone_reference = Function::from(clone_reference);
+        let ref_eq = Function::from(ref_eq);
         let new_array = Function::from(new_array);
         let ia_store = Function::from(ia_store);
         let ca_store = Function::from(ca_store);
         let ia_load = Function::from(ia_load);
         let ca_load = Function::from(ca_load);
+        let ba_load = Function::from(ba_load);
+        let ba_store = Function::from(ba_store);
         let array_length = Function::from(array_length);
+        let obj_hash = Function::from(obj_hash);
+        let null_slot = Function::from(null_slot);
         
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
-        let get_object_class_indirect_index = func_table.grow(12).unwrap();
+        let get_object_class_indirect_index = func_table.grow(17).unwrap();
         
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index, &get_object_class).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 1, &new_object_array).unwrap();
@@ -206,11 +242,20 @@ impl WasmEnvironment {
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 9, &get_object_array).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 10, &is_ref_null).unwrap();
         WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 11, &clone_reference).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 12, &ref_eq).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 13, &ba_store).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 14, &ba_load).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 15, &obj_hash).unwrap();
+        WebAssembly::Table::set(&func_table, get_object_class_indirect_index + 16, &null_slot).unwrap();
+        
+        let fn_null_slot = unsafe { std::mem::transmute(get_object_class_indirect_index + 16) };
+        NULL_TABLE_SLOT.set(fn_null_slot).unwrap();
         
         Self {
             class_function_pointers: RwLock::new(HashMap::new()),
             object_table,
             fn_get_object_class: unsafe { std::mem::transmute(get_object_class_indirect_index) },
+            fn_obj_hash: unsafe { std::mem::transmute(get_object_class_indirect_index + 15) },
             fn_new_object_array: unsafe { std::mem::transmute(get_object_class_indirect_index + 1) },
             fn_set_object_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 2) },
             fn_get_object_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 9) },
@@ -219,15 +264,32 @@ impl WasmEnvironment {
 
             fn_set_int_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 4) },
             fn_set_char_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 5) },
+            fn_set_byte_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 13) },
+            fn_get_byte_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 14) },
             fn_get_int_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 7) },
             fn_get_char_array_elem: unsafe { std::mem::transmute(get_object_class_indirect_index + 8) },
             fn_is_ref_null: unsafe { std::mem::transmute(get_object_class_indirect_index + 10) },
-            fn_clone_reference: unsafe { std::mem::transmute(get_object_class_indirect_index + 11) }
+            fn_clone_reference: unsafe { std::mem::transmute(get_object_class_indirect_index + 11) },
+            fn_null_slot,
+            fn_ref_eq: unsafe { std::mem::transmute(get_object_class_indirect_index + 12) },
+            primitive_arrays: OnceCell::new(),
+            object_id: AtomicU64::new(1),
         }
     }
 }
 
 impl Environment for WasmEnvironment {
+    fn get_object_hash(&self, object: &Object) -> i32 {
+        let mut hasher = HighwayHasher::new(Default::default());
+        let id = unsafe { (self.fn_obj_hash)(object.ptr as i32) as i32 };
+        hasher.write_i32(id);
+        hasher.finish() as i32
+    }
+
+    fn store_primitive_classes(&self, primitives: HashMap<ArrayType, Arc<Class>>) {
+        self.primitive_arrays.set(primitives).unwrap();
+    }
+
     fn link_class(&self, class: Arc<Class>) {
         let stub = create_stub_module(&class);
 
@@ -305,14 +367,51 @@ impl Environment for WasmEnvironment {
         &self,
         thread: &mut Thread,
         method_handle: &MethodHandle,
-        args: Box<[Operand]>,
+        mut args: Box<[Operand]>,
     ) -> Option<Operand> {
         let operand = match &method_handle.context {
             ExecutionContext::Interpret(_) => unreachable!(), //Unused on WASM
             ExecutionContext::Compiled => {
-                let frame = RawFrame::new(&method_handle.method, &method_handle.class, args, Box::new([
-                    Operand::new_data(0); 10
-                ]));
+                let code = method_handle.method.attributes.get("Code").unwrap();
+
+                let (max_locals, max_stack) = if let Attribute::Code(code) = code {
+                    (code.max_locals as usize, code.max_stack as usize)
+                } else {
+                    panic!()
+                };
+
+                let mut locals = (0..max_locals).map(|_| Operand::new_data(0)).collect::<Vec<_>>().into_boxed_slice();
+                let stack = (0..max_stack).map(|_| Operand::new_data(0)).collect::<Vec<_>>().into_boxed_slice();
+
+                let (mut index, instance_index_offset) = if !method_handle.method.access_flags.contains(AccessFlags::STATIC) {
+                    //Instance method
+                    locals[0] = std::mem::replace(&mut args[0], Operand::new_ref(0 as _));
+
+                    (1, 1)
+                } else {
+                    (0, 0)
+                };
+
+                for (arg_index, type_) in method_handle.method.descriptor.args.iter().enumerate() {
+                    match type_ {
+                        FieldType::Double | FieldType::Long => {
+                            let op = std::mem::replace(&mut args[arg_index + instance_index_offset], Operand::new_data(0)).data();
+
+                            locals[index] = Operand::new_data((op & ((u32::MAX as u64) << 32)) as u32);
+                            locals[index + 1] = Operand::new_data((op & (u32::MAX as u64)) as u32);
+
+                            index += 2;
+                        }
+                        _ => {
+                            let op = std::mem::replace(&mut args[arg_index + instance_index_offset], Operand::new_ref(0 as _));
+                            locals[index] = op;
+
+                            index += 1;
+                        }
+                    }
+                }
+
+                let frame = RawFrame::new(&method_handle.method, &method_handle.class, locals, stack);
                 thread.frame_stack.push(frame);
 
                 let out = unsafe { method_handle.ptr.unwrap()(thread) };
@@ -320,7 +419,7 @@ impl Environment for WasmEnvironment {
                 out
             }
             ExecutionContext::Native => {
-                Some(Box::new(native_func(&method_handle, thread)))
+                Some(Box::new(native_func(&method_handle, thread, args)))
             }
         };
 
@@ -354,27 +453,9 @@ impl Environment for WasmEnvironment {
         }
     }
 
-    fn new_string(&self, contents: &str, thread: &mut Thread) -> Object {
-        let jvm = thread.jvm.clone();
-        let string_class = jvm.bootstrap_classloader.find_class(thread,"java/lang/String").unwrap();
-        let string_object = self.new_object(&string_class);
-
-        let char_array = self.new_array(5, contents.chars().count() as i32);
-
-        for (index, char) in contents.chars().enumerate() {
-            unsafe { self.set_array_element(5, &char_array, index as i32, Operand::new_data(char as u64)) };
-        }
-
-        unsafe { self.set_object_field(&string_object, &string_class, "value", "[C", Operand::new_ref(char_array.ptr)); }
-
-        string_object
-    }
-
-    fn get_string(&self, object: &Object) -> String {
-        String::new()
-    }
-
     fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class {
+        assert!(!self.is_null(object));
+
         unsafe { std::mem::transmute((self.fn_get_object_class)(object.ptr as i32)) }
     }
 
@@ -389,12 +470,27 @@ impl Environment for WasmEnvironment {
                 let field_value = unsafe { get(object.ptr as i32) };
                 Operand::new_ref(field_value as *mut ())
             },
-            "I" => {
+            "I" | "Z" | "S" | "C" | "B" => {
                 let get: unsafe fn(i32) -> i32 = unsafe { std::mem::transmute(*get) };
                 let field_value = unsafe { get(object.ptr as i32) };
-                Operand::new_data(field_value as u64)
+                Operand::new_data(field_value as u32)
             },
-            _ => unimplemented!("field type getter {}", field_name)
+            "J" => {
+                let get: unsafe fn(i32) -> i64 = unsafe { std::mem::transmute(*get) };
+                let field_value = unsafe { get(object.ptr as i32) };
+                Operand::new_data2(field_value as u64)
+            },
+            "D" => {
+                let get: unsafe fn(i32) -> f64 = unsafe { std::mem::transmute(*get) };
+                let field_value = unsafe { get(object.ptr as i32) };
+                Operand::new_data2(field_value as u64)
+            },
+            "F" => {
+                let get: unsafe fn(i32) -> f32 = unsafe { std::mem::transmute(*get) };
+                let field_value = unsafe { get(object.ptr as i32) };
+                Operand::new_data(field_value.to_bits())
+            },
+            _ => unimplemented!("field type getter {field_name} ({field_descriptor})")
         }
     }
 
@@ -415,51 +511,73 @@ impl Environment for WasmEnvironment {
             },
             "F" => {
                 let set: unsafe fn(i32, f32) = unsafe { std::mem::transmute(*set) };
-                unsafe { set(object.ptr as i32, std::mem::transmute(value.data() as u32)) };
+                unsafe { set(object.ptr as i32, f32::from_bits(value.data() as u32)) };
             },
+            "J" => {
+                let set: unsafe fn(i32, i64) = unsafe { std::mem::transmute(*set) };
+                unsafe { set(object.ptr as i32, value.data() as i64) };
+            }
+            "Z" | "B" => {
+                let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
+                unsafe { set(object.ptr as i32, value.data() as i32) };
+            }
             _ => unimplemented!("field type setter {} {}", &field_descriptor[0..1], field_name)
         }
     }
 
     fn new_object_array(&self, class: &Class, size: i32) -> Object {
-        unsafe { Object::from_raw((self.fn_new_object_array)(size, class as *const Class as i32) as *mut (), dealloc_ref) }
+        assert!(class.is_array);
+
+        let object_hash = self.object_id.fetch_add(1, Ordering::Relaxed);
+        
+        unsafe { Object::from_raw((self.fn_new_object_array)(size, class as *const Class as i32, object_hash as i64) as *mut (), dealloc_ref) }
     }
 
     fn clone_reference(&self, object: &Object) -> Object {
-        unsafe { Object::from_raw((self.fn_clone_reference)(object.ptr as i32) as *mut (), dealloc_ref) }
+        unsafe { Object::from_raw(object.ptr, nothing) }
+
+        // unsafe { Object::from_raw((self.fn_clone_reference)(object.ptr as i32) as *mut (), dealloc_ref) }
     }
 
     fn is_null(&self, object: &Object) -> bool {
         unsafe { (self.fn_is_ref_null)(object.ptr as i32) == 1 }
     }
 
-    fn new_array(&self, type_: i32, size: i32) -> Object {
-        unsafe { Object::from_raw((self.fn_new_array)(type_ - 4, size) as *mut (), dealloc_ref) }
+    fn new_array(&self, type_: ArrayType, size: i32) -> Object {
+        let primitive_class = self.primitive_arrays.get().unwrap();
+        let primitive = primitive_class.get(&type_).unwrap();
+
+        let object_hash = self.object_id.fetch_add(1, Ordering::Relaxed);
+        
+        unsafe { Object::from_raw((self.fn_new_array)((type_ as u8 - 4) as i32, size, &**primitive as *const Class as i32, object_hash as i64) as *mut (), dealloc_ref) }
     }
 
     fn get_array_length(&self, array: &Object) -> i32 {
         unsafe { (self.fn_array_length)(array.ptr as i32) }
     }
 
-    unsafe fn set_array_element(&self, array_type: u8, array: &Object, index: i32, value: Operand) {
+    unsafe fn set_array_element(&self, array_type: ArrayType, array: &Object, index: i32, value: Operand) {
         match array_type {
-            5 => unsafe { (self.fn_set_char_array_elem)(array.ptr as i32, index, value.data() as i32); }
-            10 => unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data() as i32); },
-            4 | 5 | 6 | 7 | 8 | 9 | 11 => unimplemented!(),
-            _ => unreachable!("Invalid array type")
+            ArrayType::Char => unsafe { (self.fn_set_char_array_elem)(array.ptr as i32, index, value.data() as i32); }
+            ArrayType::Int => unsafe { (self.fn_set_int_array_elem)(array.ptr as i32, index, value.data() as i32); },
+            ArrayType::Byte => unsafe { (self.fn_set_byte_array_elem)(array.ptr as i32, index, value.data() as i32); },
+            _ => unimplemented!("{array_type:?}"),
         }
     }
 
-
-    unsafe fn get_array_element(&self, array_type: u8, array: &Object, index: i32) -> Operand {
-        let ptr = match array_type {
-            5 => self.fn_get_char_array_elem,
-            10 => self.fn_get_int_array_elem,
-            4 | 6 | 7 | 8 | 9 | 11 => unimplemented!(),
-            _ => unreachable!("Invalid array type")
-        };
-
-        ptr(array.ptr as i32, index)
+    unsafe fn get_array_element(&self, array_type: ArrayType, array: &Object, index: i32) -> Operand {
+        match array_type {
+            ArrayType::Char => {
+                Operand::new_data((self.fn_get_char_array_elem)(array.ptr as i32, index) as u32)
+            },
+            ArrayType::Int => {
+                Operand::new_data((self.fn_get_int_array_elem)(array.ptr as i32, index) as u32)
+            },
+            ArrayType::Byte => {
+                Operand::new_data((self.fn_get_byte_array_elem)(array.ptr as i32, index) as u32)
+            },
+            _ => unimplemented!("{array_type:?}"),
+        }
     }
 
     unsafe fn set_object_array_element(&self, array: &Object, index: i32, value: Operand) {
@@ -478,17 +596,20 @@ impl Environment for WasmEnvironment {
     }
 
     fn new_object(&self, class: &Class) -> Object {
+        assert!(!class.is_array);
+
         let ptrs = self.class_function_pointers.read();
         let class_ptrs = ptrs.get(&class.get_id()).unwrap();
         let new = class_ptrs.get("new").unwrap();
 
-        let new_func: fn() -> i32 = unsafe { std::mem::transmute(*new) };
-        let object_id = new_func();
+        let hash_id = self.object_id.fetch_add(1, Ordering::Relaxed);
 
+        let new_func: fn(i64) -> i32 = unsafe { std::mem::transmute(*new) };
+        let object_id = new_func(hash_id as i64);
         unsafe { Object::from_raw(object_id as *mut (), dealloc_ref) }
     }
 
-    unsafe fn object_from_operand(&self, operand: &Operand) -> Object {
+    unsafe fn object_from_operand(&self, operand: Operand) -> Object {
         Object {
             ptr: operand.ref_(),
             padding: [],
@@ -500,4 +621,7 @@ impl Environment for WasmEnvironment {
         &*(operand as *const Operand as *const Object)
     }
 
+    fn object_ref_eq(&self, a: &Object, b: &Object) -> bool {
+        (unsafe { (self.fn_ref_eq)(a.ptr as i32, b.ptr as i32) }) != 0
+    }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use wasm_encoder::{BlockType, CodeSection, CompositeType, ConstExpr, Elements, ElementSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType, ImportSection, Instruction, MemArg, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
 use std::sync::Arc;
 use wasmparser::WasmFeatures;
@@ -128,6 +129,11 @@ fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Fiel
         mutable: true,
     });
 
+    field_types.insert(1, wasm_encoder::FieldType {
+        element_type: StorageType::Val(ValType::I64),
+        mutable: true,
+    });
+
     SubType {
         is_final: false,
         supertype_idx: Some(index),
@@ -153,6 +159,10 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 fields: Box::new([
                     wasm_encoder::FieldType {
                         element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    },
+                    wasm_encoder::FieldType {
+                        element_type: StorageType::Val(ValType::I64),
                         mutable: true,
                     }
                 ]),
@@ -187,6 +197,18 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             .map(|field| (class, field))
             .collect::<Vec<(&Class, &Field)>>()
     );
+
+    let java_lang_class_internal_id = Field {
+        access_flags: AccessFlags::PRIVATE,
+        name: Arc::new("__jvm_internal_id".to_string()),
+        descriptor: FieldType::Int,
+        descriptor_string: "I".to_string(),
+        attributes: HashMap::new(),
+    };
+    
+    if &*class.this_class == "java/lang/Class" {
+        recursive_fields.extend([(class, &java_lang_class_internal_id)]);
+    }
 
     let struct_type_index = types.len();
 
@@ -273,8 +295,16 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
     let mut accessors = vec![];
 
-    for (index, field) in class.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
-        .enumerate().map(|(index, field)| (index as u32 + this_class_field_offset + 1, field))
+    let member_fields = class.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC));
+    
+    let field_extend = if &*class.this_class == "java/lang/Class" {
+        vec![&java_lang_class_internal_id]
+    } else {
+        vec![]
+    };
+    
+    for (index, field) in member_fields.chain(field_extend)
+        .enumerate().map(|(index, field)| (index as u32 + this_class_field_offset + 2, field))
     {
         for is_setter in [true, false] {
             let func_type_index = types.len();
@@ -318,9 +348,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 if is_object {
                     function.instruction(&Instruction::TableGet(0));
 
-                    // if matches!(field.descriptor, FieldType::Array { .. }) {
-                    //     function.instruction(&Instruction::RefCastNullable(HeapType::Array));
-                    // }
+                    function.instruction(&Instruction::LocalGet(1));
+                    function.instruction(&Instruction::Call(dealloc_ref));
                 }
 
                 //Set the field
@@ -436,6 +465,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         }));
         func.instruction(&Instruction::LocalSet(jlocal_box_addr_local));
 
+        let mut local_store_index = 0;
+
         for (index, arg) in params.iter().enumerate() {
             match arg {
                 //Heap type
@@ -462,7 +493,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
                     func.instruction(&Instruction::LocalGet(i32_helper));
                     func.instruction(&Instruction::I32Store(MemArg {
-                        offset: (index * size_of::<Operand>()) as u64,
+                        offset: (local_store_index * size_of::<Operand>()) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
@@ -474,12 +505,14 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
                     func.instruction(&Instruction::I32Const(0));
                     func.instruction(&Instruction::I32Store(MemArg {
-                        offset: (index * size_of::<Operand>()) as u64,
+                        offset: (local_store_index * size_of::<Operand>()) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
 
                     func.instruction(&Instruction::End);
+
+                    local_store_index += 1;
                 }
                 //Scalar type
                 FieldType::Int
@@ -490,37 +523,71 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
                     func.instruction(&Instruction::I32Store(MemArg {
-                        offset: (index * size_of::<Operand>()) as u64,
+                        offset: (local_store_index * size_of::<Operand>()) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
+
+                    local_store_index += 1;
                 }
                 FieldType::Long => {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
+                    func.instruction(&Instruction::I64Const(((u32::MAX as u64) << 32) as i64));
+                    func.instruction(&Instruction::I64And);
                     func.instruction(&Instruction::I64Store(MemArg {
-                        offset: (index * size_of::<Operand>()) as u64,
+                        offset: (local_store_index * size_of::<Operand>()) as u64,
                         align: 3,
                         memory_index: 0,
                     }));
+                    
+                    func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                    func.instruction(&Instruction::LocalGet(index as u32));
+                    func.instruction(&Instruction::I64Const(u32::MAX as i64));
+                    func.instruction(&Instruction::I64And);
+                    func.instruction(&Instruction::I64Store(MemArg {
+                        offset: ((local_store_index + 1) * size_of::<Operand>()) as u64,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+
+                    local_store_index += 2;
                 }
                 FieldType::Double => {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
-                    func.instruction(&Instruction::F64Store(MemArg {
-                        offset: (index * size_of::<Operand>()) as u64,
+                    func.instruction(&Instruction::I64ReinterpretF64);
+                    func.instruction(&Instruction::I64Const(((u32::MAX as u64) << 32) as i64));
+                    func.instruction(&Instruction::I64And);
+                    func.instruction(&Instruction::I64Store(MemArg {
+                        offset: (local_store_index * size_of::<Operand>()) as u64,
                         align: 3,
                         memory_index: 0,
                     }));
+                    
+                    func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                    func.instruction(&Instruction::LocalGet(index as u32));
+                    func.instruction(&Instruction::I64ReinterpretF64);
+                    func.instruction(&Instruction::I64Const(u32::MAX as i64));
+                    func.instruction(&Instruction::I64And);
+                    func.instruction(&Instruction::I64Store(MemArg {
+                        offset: ((local_store_index + 1) * size_of::<Operand>()) as u64,
+                        align: 3,
+                        memory_index: 0,
+                    }));
+
+                    local_store_index += 2;
                 }
                 FieldType::Float => {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
                     func.instruction(&Instruction::LocalGet(index as u32));
                     func.instruction(&Instruction::F32Store(MemArg {
-                        offset: (index * size_of::<Operand>()) as u64,
+                        offset: (local_store_index * size_of::<Operand>()) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
+
+                    local_store_index += 1;
                 }
                 _ => unimplemented!("{:?}", arg),
             }
@@ -691,7 +758,9 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         }));
         func.instruction(&Instruction::LocalSet(operand_local));
 
-        for (index, (is_this, arg)) in params.iter().enumerate() {
+        let mut index = 0;
+
+        for (is_this, arg) in params.iter() {
             match arg {
                 FieldType::Class(_) | FieldType::Array { .. } => {
                     func.instruction(&Instruction::LocalGet(operand_local));
@@ -714,14 +783,31 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
                     func.instruction(&Instruction::LocalGet(i32_local));
                     func.instruction(&Instruction::Call(dealloc_ref));
+
+                    index += 1;
                 }
                 FieldType::Double => {
                     func.instruction(&Instruction::LocalGet(operand_local));
-                    func.instruction(&Instruction::F64Load(MemArg {
+                    func.instruction(&Instruction::I32Load(MemArg {
                         offset: (index * size_of::<Operand>()) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                    func.instruction(&Instruction::I64Const(32));
+                    func.instruction(&Instruction::I64Shl);
+
+                    func.instruction(&Instruction::LocalGet(operand_local));
+                    func.instruction(&Instruction::I32Load(MemArg {
+                        offset: ((index + 1) * size_of::<Operand>()) as u64,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                    func.instruction(&Instruction::I64Or);
+                    func.instruction(&Instruction::F64ReinterpretI64);
+
+                    index += 2;
                 }
                 FieldType::Float => {
                     func.instruction(&Instruction::LocalGet(operand_local));
@@ -730,14 +816,30 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         align: 2,
                         memory_index: 0,
                     }));
+
+                    index += 1;
                 }
                 FieldType::Long => {
                     func.instruction(&Instruction::LocalGet(operand_local));
-                    func.instruction(&Instruction::I64Load(MemArg {
+                    func.instruction(&Instruction::I32Load(MemArg {
                         offset: (index * size_of::<Operand>()) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                    func.instruction(&Instruction::I64Const(32));
+                    func.instruction(&Instruction::I64Shl);
+
+                    func.instruction(&Instruction::LocalGet(operand_local));
+                    func.instruction(&Instruction::I32Load(MemArg {
+                        offset: ((index + 1) * size_of::<Operand>()) as u64,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+                    func.instruction(&Instruction::I64ExtendI32U);
+                    func.instruction(&Instruction::I64Or);
+
+                    index += 2;
                 }
                 _ => {
                     func.instruction(&Instruction::LocalGet(operand_local));
@@ -746,6 +848,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         align: 2,
                         memory_index: 0,
                     }));
+
+                    index += 1;
                 }
             }
 
@@ -816,6 +920,15 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                             memory_index: 0,
                         }));
 
+                        //*OperandTag = 2
+                        func.instruction(&Instruction::LocalGet(temp));
+                        func.instruction(&Instruction::I32Const(2));
+                        func.instruction(&Instruction::I32Store8(MemArg {
+                            offset: 8,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+
                         func.instruction(&Instruction::LocalGet(temp));
                     }
                     FieldType::Float => {
@@ -828,6 +941,15 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         func.instruction(&Instruction::F32Store(MemArg {
                             offset: 0,
                             align: 2,
+                            memory_index: 0,
+                        }));
+
+                        //*OperandTag = 1
+                        func.instruction(&Instruction::LocalGet(temp));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Store8(MemArg {
+                            offset: 8,
+                            align: 0,
                             memory_index: 0,
                         }));
 
@@ -846,6 +968,15 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                             memory_index: 0,
                         }));
 
+                        //*OperandTag = 2
+                        func.instruction(&Instruction::LocalGet(temp));
+                        func.instruction(&Instruction::I32Const(2));
+                        func.instruction(&Instruction::I32Store8(MemArg {
+                            offset: 8,
+                            align: 0,
+                            memory_index: 0,
+                        }));
+
                         func.instruction(&Instruction::LocalGet(temp));
                     }
                     _ => {
@@ -859,6 +990,15 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                         func.instruction(&Instruction::I32Store(MemArg {
                             offset: 0,
                             align: 2,
+                            memory_index: 0,
+                        }));
+
+                        //*OperandTag = 1
+                        func.instruction(&Instruction::LocalGet(temp));
+                        func.instruction(&Instruction::I32Const(1));
+                        func.instruction(&Instruction::I32Store8(MemArg {
+                            offset: 8,
+                            align: 0,
                             memory_index: 0,
                         }));
 
@@ -885,14 +1025,15 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     {
         exports.export("new", ExportKind::Func, funcs.len() + func_imports_len);
         funcs.function(types.len());
-        types.function([], [ValType::I32]);
+        types.function([ValType::I64], [ValType::I32]);
 
         let mut function = Function::new([(1, ValType::I32)]);
 
         function.instruction(&Instruction::Call(alloc_ref));
-        function.instruction(&Instruction::LocalTee(0));
-        
+        function.instruction(&Instruction::LocalTee(1));
+
         function.instruction(&Instruction::I32Const(class as *const Class as i32));
+        function.instruction(&Instruction::LocalGet(0));
 
         for (_, field) in recursive_fields {
             match field.descriptor {
@@ -912,7 +1053,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
         function.instruction(&Instruction::RefCastNullable(HeapType::Any));
         function.instruction(&Instruction::TableSet(0));
-        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::LocalGet(1));
         function.instruction(&Instruction::End);
 
         code.function(&function);

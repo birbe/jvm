@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use crate::classfile::resolved::{AccessFlags, Class, Field, FieldType, Method, NameAndType, Ref};
 
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::hash::Hasher;
 use std::io::Write;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ unsafe impl Send for ClassLoaderObject {}
 
 pub trait ClassLoader {
 
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>>;
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError>;
 
     fn get_class_loader_object_handle(&self) -> &Object;
 
@@ -62,10 +62,16 @@ pub trait ClassLoader {
 
 }
 
+impl Debug for dyn ClassLoader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "( ClassLoader )")
+    }
+}
+
 impl ClassLoader for Arc<ClassLoaderObject> {
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Option<Arc<Class>> {
+    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
         let jvm = thread.jvm.clone();
-        let classpath_string: Object = jvm.environment.new_string(classpath, thread);
+        let classpath_string: Object = jvm.new_string(classpath, thread);
 
         {
             let loaded_classes = jvm.loaded_classes.read();
@@ -77,7 +83,7 @@ impl ClassLoader for Arc<ClassLoaderObject> {
             
             match loaded_classes.get(&hash_key) {
                 None => {}
-                Some(class) => return Some(class.clone())
+                Some(class) => return Ok(class.clone())
             }
         }
 
@@ -88,11 +94,11 @@ impl ClassLoader for Arc<ClassLoaderObject> {
         ]);
         
         let object = unsafe {
-            jvm.environment.object_from_operand(&thread.invoke(&self.find_class, operands).unwrap())
+            jvm.environment.object_from_operand(thread.invoke(&self.find_class, operands).unwrap())
         };
-        let class = jvm.retrieve_class(classpath, self, thread).ok()?;
+        let class = jvm.retrieve_class(classpath, self, thread)?;
         
-        Some(class)
+        Ok(class)
     }
 
     fn get_class_loader_object_handle(&self) -> &Object {
@@ -134,25 +140,32 @@ pub fn routine_resolve_field<'a>(
 }
 
 //https://docs.oracle.com/javase/specs/jvms/se20/html/jvms-5.html#jvms-5.4.6
-pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, object_type: &'b Class) -> (&'a Method, &'b Class) {
+pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_method_class: &Class, object_type: &'b Class) -> &'a Method {
     if resolved_method.access_flags.contains(AccessFlags::PRIVATE) {
-        (resolved_method, object_type)
+        resolved_method
     } else {
         let mut out = None;
 
         let classes = object_type.parents();
 
         for parent in [object_type].into_iter().chain(classes.iter().map(|parent| &***parent)) {
-            if let Some(overrider) = parent.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string) && parent.find_overriding_method(&resolved_method, object_type).is_some() {
+            if let Some(overrider) = parent.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string) && parent.find_overriding_method(&resolved_method, resolved_method_class).is_some() {
                 out = Some((&**overrider, parent));
                 break;
             }
         }
 
         if let Some((overrider, parent)) = out {
-            (overrider, parent)
+            overrider
         } else {
-            todo!()
+            for superinterface in object_type.superinterfaces().iter().map(|parent| &***parent) {
+                if let Some(maximally_specific) = superinterface.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string)
+                    && !maximally_specific.access_flags.contains(AccessFlags::STATIC) && !maximally_specific.access_flags.contains(AccessFlags::PRIVATE) {
+                    return &**maximally_specific;
+                }
+            }
+
+            panic!("Method selection failed");
         }
     }
 }
