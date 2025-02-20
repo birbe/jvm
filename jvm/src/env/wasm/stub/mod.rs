@@ -16,7 +16,7 @@ pub fn generate_helper_wasm() -> Module {
     let mut code = CodeSection::new();
     let mut funcs = FunctionSection::new();
     let mut exports = ExportSection::new();
-
+    
     types.rec(
         [SubType {
             is_final: false,

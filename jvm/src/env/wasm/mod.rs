@@ -1,10 +1,10 @@
-use std::alloc::{alloc, alloc_zeroed, dealloc, Layout};
-use std::arch::asm;
+use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::any::Any;
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, ClassId, FieldType, Method, Ref, ReturnType};
-use crate::env::{nothing, Compiler, Environment};
+use crate::env::{nothing, Compiler, Environment, ToAny};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::env::Object;
-use crate::linker::{ClassLoader, ClassLoaderObject};
+use crate::linker::ClassLoader;
 use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use js_sys::{Function, WebAssembly};
 use parking_lot::{Mutex, RwLock};
@@ -13,13 +13,15 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use highway::HighwayHasher;
-use js_sys::WebAssembly::Module;
 use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::JsValue;
+use wasm_encoder::Module;
 use crate::bytecode::ArrayType;
-use crate::env::wasm::compile::generate_helper_wasm;
-use crate::env::wasm::compile::stub::create_stub_module;
+use crate::env::wasm::jit::JitResult;
+use crate::env::wasm::stub::generate_helper_wasm;
+use crate::env::wasm::stub::stub::create_stub_module;
 use crate::env::wasm::native::native_func;
+use crate::JVM;
 
 pub static OBJECT_REF_SLOTS: OnceCell<Mutex<RefSlots>> = OnceCell::new();
 pub static NULL_TABLE_SLOT: OnceCell<unsafe extern "C" fn(i32)> = OnceCell::new();
@@ -29,13 +31,11 @@ macro_rules! console_log {
     ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
 }
 
-pub mod cfg;
-pub mod compile;
-mod scc;
-pub mod wasm;
+pub mod stub;
 mod native;
 
 mod test;
+pub mod jit;
 
 #[derive(Debug)]
 pub struct RefSlots {
@@ -53,6 +53,11 @@ type MethodId = u32;
 struct ClassReflector {
     pub field_accessors: HashMap<String, u32>,
     pub trampolines: HashMap<String, u32>,
+}
+
+#[no_mangle]
+pub extern "C" fn init_static(class: &Class, thread: &mut Thread) {
+    ThreadHandle::init_static(class, thread);
 }
 
 #[no_mangle]
@@ -81,19 +86,19 @@ pub extern "C" fn alloc_ref() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn dealloc_ref(index: *mut ()) {
-    // let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
-    // let mut refs = refs_lock.lock();
-    //
-    // if refs.available.contains(&(index as i32)) {
-    //     panic!("double free {}", index as u32);
-    // }
-    //
-    // let fn_ptr = unsafe { *NULL_TABLE_SLOT.get_unchecked() };
-    // unsafe { fn_ptr(index as i32); };
-    //
-    // if index as i32 != 0 {
-    //     refs.available.push(index as i32);
-    // }
+    let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
+    let mut refs = refs_lock.lock();
+
+    if refs.available.contains(&(index as i32)) {
+        panic!("double free {}", index as u32);
+    }
+
+    let fn_ptr = unsafe { *NULL_TABLE_SLOT.get_unchecked() };
+    unsafe { fn_ptr(index as i32); };
+
+    if index as i32 != 0 {
+        refs.available.push(index as i32);
+    }
 }
 
 #[no_mangle]
@@ -276,6 +281,64 @@ impl WasmEnvironment {
             object_id: AtomicU64::new(1),
         }
     }
+
+    pub fn get_linked_function_ptr(&self, class: &Class, identifier: &str) -> u32 {
+        let cfps = self.class_function_pointers.read();
+        let class_pointers = cfps.get(&class.get_id()).unwrap();
+        *class_pointers.get(identifier).unwrap()
+    }
+
+    fn link_jit(&self, jvm: &JVM, jit: JitResult) {
+        let jvm_import_object = js_sys::Object::new();
+
+        let meta_exports = wasm_bindgen::exports();
+        let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
+
+        for cross_import in ["init_static"] {
+            let key: JsValue = cross_import.into();
+
+            js_sys::Reflect::set(
+                &jvm_import_object,
+                &key,
+                &js_sys::Reflect::get(&meta_exports, &key).unwrap(),
+            )
+                .unwrap();
+        }
+
+        js_sys::Reflect::set(&jvm_import_object, &"functions".into(), &wasm_bindgen::function_table()).unwrap();
+        js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &self.object_table).unwrap();
+
+        let imports = js_sys::Object::new();
+
+        js_sys::Reflect::set(&imports, &"jvm".into(), &jvm_import_object).unwrap();
+
+        let wasm_bytes = jit.module.finish();
+        let wat = wasmprinter::print_bytes(&wasm_bytes).unwrap();
+        let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
+
+        let module = match WebAssembly::Module::new(&uint8array) {
+            Ok(module) => module,
+            Err(err) => {
+                panic!("{wat}\n{err:?}")
+            }
+        };
+
+        let instance = WebAssembly::Instance::new(&module, &imports).unwrap();
+
+        let exports = js_sys::Reflect::get(&instance, &"exports".into()).unwrap();
+
+        for (method, class, key) in jit.functions {
+            let old_index = self.get_linked_function_ptr(class, method.get_identifier());
+            console_log!("linked jit func {} as {} @ {}", method.name, &key, old_index);
+
+            let func = js_sys::Function::from(
+                js_sys::Reflect::get(&exports, &key.into()).unwrap(),
+            );
+
+            WebAssembly::Table::set(&func_table, old_index, &func).unwrap();
+        }
+    }
+
 }
 
 impl Environment for WasmEnvironment {
@@ -291,13 +354,16 @@ impl Environment for WasmEnvironment {
     }
 
     fn link_class(&self, class: Arc<Class>) {
-        let stub = create_stub_module(&class);
-
         let jvm_import_object = js_sys::Object::new();
 
         let meta_exports = wasm_bindgen::exports();
         let meta_memory = wasm_bindgen::memory();
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
+
+        let stubbable_methods = class.methods.iter().filter(|method| !method.access_flags.contains(AccessFlags::NATIVE)).count();
+        let stubbable_methods_offset = WebAssembly::Table::grow(&func_table, stubbable_methods as u32).unwrap();
+
+        let stub = create_stub_module(&class, stubbable_methods_offset);
 
         for cross_import in ["alloc_ref", "dealloc_ref", "malloc", "free", "interpret", "debug_framestack", "push_frame", "debug"] {
             let key: JsValue = cross_import.into();
@@ -310,6 +376,7 @@ impl Environment for WasmEnvironment {
             .unwrap();
         }
 
+        js_sys::Reflect::set(&jvm_import_object, &"functions".into(), &func_table).unwrap();
         js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &self.object_table).unwrap();
         js_sys::Reflect::set(&jvm_import_object, &"memory".into(), &meta_memory).unwrap();
 
@@ -322,6 +389,8 @@ impl Environment for WasmEnvironment {
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
         let module = WebAssembly::Module::new(&uint8array).unwrap();
+
+        //The WASM module contains an ElementSection which will automatically initialize the method function refs
         let instance = WebAssembly::Instance::new(&module, &imports).unwrap();
 
         let exports = js_sys::Reflect::get(&instance, &"exports".into()).unwrap();
@@ -333,17 +402,16 @@ impl Environment for WasmEnvironment {
             .map(|method| {
                 let identifier = method.get_identifier();
 
-                [identifier.to_string(), format!("{}_abi", identifier)]
+                format!("{}_abi", identifier)
             })
-            .flatten()
             .collect();
 
         funcs_to_link.extend(stub.accessors.clone());
         funcs_to_link.push("new".into());
 
-        let old_length = WebAssembly::Table::grow(&func_table, funcs_to_link.len() as u32).unwrap();
+        let table_length = WebAssembly::Table::grow(&func_table, funcs_to_link.len() as u32).unwrap();
 
-        let ptrs: HashMap<String, u32> = funcs_to_link
+        let mut ptrs: HashMap<String, u32> = funcs_to_link
             .into_iter()
             .enumerate()
             .map(|(index, func_name)| {
@@ -351,13 +419,24 @@ impl Environment for WasmEnvironment {
                     js_sys::Reflect::get(&exports, &func_name.clone().into()).unwrap(),
                 );
 
-                let indirect_index = (index as u32) + old_length;
-
+                let indirect_index = (index as u32) + table_length;
                 WebAssembly::Table::set(&func_table, indirect_index, &func).unwrap();
 
                 (func_name, indirect_index)
             })
             .collect();
+
+        class
+            .methods
+            .iter()
+            .filter(|method| !method.access_flags.contains(AccessFlags::NATIVE))
+            .enumerate()
+            .for_each(|(index, method)| {
+                ptrs.insert(
+                    method.identifier.clone(),
+                    index as u32 + stubbable_methods_offset
+                );
+            });
 
         let mut cfp = self.class_function_pointers.write();
         cfp.insert(class.get_id(), ptrs);
@@ -433,7 +512,7 @@ impl Environment for WasmEnvironment {
     fn create_method_handle(&self, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>, class_loader: &dyn ClassLoader) -> MethodHandle {
         if method.access_flags.contains(AccessFlags::NATIVE) {
             return MethodHandle {
-                ptr: unsafe { std::mem::transmute(0) },
+                ptr: None,
                 context: ExecutionContext::Native,
                 class,
                 method,
@@ -445,7 +524,7 @@ impl Environment for WasmEnvironment {
         let class_pointers = cfps.get(&class.get_id()).unwrap();
 
         MethodHandle {
-            ptr: unsafe { std::mem::transmute(*class_pointers.get(&format!("{}_abi", method.get_identifier())).unwrap()) },
+            ptr: unsafe { Some(std::mem::transmute(*class_pointers.get(&format!("{}_abi", method.get_identifier())).unwrap())) },
             context: ExecutionContext::Compiled,
             class,
             method,
@@ -534,9 +613,9 @@ impl Environment for WasmEnvironment {
     }
 
     fn clone_reference(&self, object: &Object) -> Object {
-        unsafe { Object::from_raw(object.ptr, nothing) }
+        // unsafe { Object::from_raw(object.ptr, nothing) }
 
-        // unsafe { Object::from_raw((self.fn_clone_reference)(object.ptr as i32) as *mut (), dealloc_ref) }
+        unsafe { Object::from_raw((self.fn_clone_reference)(object.ptr as i32) as *mut (), dealloc_ref) }
     }
 
     fn is_null(&self, object: &Object) -> bool {

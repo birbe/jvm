@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicU32, AtomicU8};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use crate::bytecode::BytecodeParseError;
@@ -130,7 +130,7 @@ impl Class {
 
         let mut index = 0;
 
-        let fields = classfile
+        let mut fields = classfile
             .fields
             .iter()
             .map(|field_info| {
@@ -158,6 +158,18 @@ impl Class {
             })
             .collect::<Result<Vec<Field>, ClassDeserializationError>>()?;
 
+        if &*this_class == "java/lang/Class" {
+            fields.push(
+                Field {
+                    access_flags: AccessFlags::PRIVATE,
+                    name: Arc::new("__jvm_internal_id".to_string()),
+                    descriptor: FieldType::Int,
+                    descriptor_string: "I".to_string(),
+                    attributes: HashMap::new(),
+                }
+            );
+        }
+        
         let static_fields = fields
             .iter()
             .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
@@ -207,6 +219,10 @@ impl Class {
         })
     }
 
+    pub fn is_initialized(&self) -> bool {
+        self.static_init_state.load(Ordering::Acquire) == 2
+    }
+    
     pub fn get_method(&self, name_and_type: &NameAndType) -> Option<&Arc<Method>> {
         self.methods.iter().find(|method| {
             method.name == name_and_type.name

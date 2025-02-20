@@ -1,7 +1,8 @@
+use std::any::Any;
 use std::collections::HashMap;
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::execution::MethodHandle;
-use crate::linker::{ClassLoader, ClassLoaderObject};
+use crate::linker::ClassLoader;
 use crate::thread::{Operand, Thread};
 use std::sync::Arc;
 use crate::bytecode::ArrayType;
@@ -11,7 +12,19 @@ pub mod native;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
-pub trait Environment {
+trait ToAny: 'static {
+    
+    fn to_any(&self) -> &dyn Any;
+    
+}
+
+impl<T: 'static> ToAny for T {
+    fn to_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub trait Environment: ToAny {
 
     fn get_object_hash(&self, object: &Object) -> i32;
     

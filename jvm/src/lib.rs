@@ -27,8 +27,14 @@ use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use crate::bytecode::ArrayType;
 
+#[cfg(target_arch = "wasm32")]
 macro_rules! console_log {
     ($($t:tt)*) => (web_sys::console::log_1(&format_args!($($t)*).to_string().into()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! console_log {
+    ($($t:tt)*) => (println!($t))
 }
 
 pub mod classfile;
@@ -138,7 +144,7 @@ impl JVM {
         let ref_class = jvm.bootstrap_classloader.find_class(&mut temp_thread, "java/lang/ref/Reference").unwrap();
         ThreadHandle::init_static(&ref_class, &mut temp_thread);
 
-        temp_thread.call("java/lang/System", "initPhase1", "()V", Box::new([])).unwrap();
+        // temp_thread.call("java/lang/System", "initPhase1", "()V", Box::new([])).unwrap();
         
         jvm
     }

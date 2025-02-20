@@ -2,16 +2,18 @@ use std::collections::HashMap;
 use wasm_encoder::{BlockType, CodeSection, CompositeType, ConstExpr, Elements, ElementSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType, ImportSection, Instruction, MemArg, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
 use std::sync::Arc;
 use wasmparser::WasmFeatures;
-use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, FieldType, Method, ReturnType};
+use crate::classfile::resolved::{AccessFlags, Attribute, Class, Field, FieldType, Method, MethodDescriptor, ReturnType};
 use crate::thread::{Operand, RawFrame};
 
-struct MethodSignature {
+#[derive(Debug)]
+pub struct MethodSignature {
     pub params: Vec<ValType>,
     pub return_type: Option<ValType>,
-    pub thread_local: u32,
+    pub thread_local: u32
 }
 
 impl MethodSignature {
+
     fn field_type_to_val_type(field_type: &FieldType) -> ValType {
         match field_type {
             FieldType::Array { .. } => ValType::Ref(RefType {
@@ -30,6 +32,38 @@ impl MethodSignature {
                 nullable: true,
                 heap_type: HeapType::Any,
             }),
+        }
+    }
+
+    pub fn new_from_descriptor(descriptor: &MethodDescriptor, is_static: bool) -> Self {
+        let mut params: Vec<ValType> = descriptor
+            .args
+            .iter()
+            .map(Self::field_type_to_val_type)
+            .collect();
+
+        //*mut Thread
+        params.push(ValType::I32);
+
+        if !is_static {
+            params.insert(
+                0,
+                ValType::Ref(RefType {
+                    nullable: false,
+                    heap_type: HeapType::Any,
+                }),
+            );
+        }
+
+        let return_type = match &descriptor.return_type {
+            ReturnType::FieldType(field_type) => Some(Self::field_type_to_val_type(field_type)),
+            ReturnType::Void => None,
+        };
+
+        Self {
+            thread_local: (params.len() - 1) as u32,
+            params,
+            return_type,
         }
     }
 
@@ -62,7 +96,7 @@ impl MethodSignature {
         Self {
             thread_local: (params.len() - 1) as u32,
             params,
-            return_type,
+            return_type
         }
     }
 }
@@ -143,14 +177,7 @@ fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Fiel
     }
 }
 
-pub fn create_stub_module(class: &Class) -> StubModule {
-    let mut module = Module::new();
-
-    let mut types = TypeSection::new();
-    let mut exports = ExportSection::new();
-
-    let mut recursive_fields = vec![];
-
+pub fn create_base_object_type(types: &mut TypeSection) {
     types.rec([
         SubType {
             is_final: false,
@@ -170,6 +197,16 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         }
     ]);
 
+}
+
+struct GeneratedRec<'a> {
+    this_class_field_offset: u32,
+    recursive_fields: Vec<(&'a Class, &'a Field)>,
+    type_index: u32
+}
+
+fn create_class_rec<'a: 'b, 'b>(class: &'a Class, types: &'b mut TypeSection) -> GeneratedRec<'a> {
+    let mut recursive_fields = vec![];
     let parents = class.parents();
 
     for (index, parent) in parents.iter().rev().enumerate() {
@@ -198,23 +235,28 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             .collect::<Vec<(&Class, &Field)>>()
     );
 
-    let java_lang_class_internal_id = Field {
-        access_flags: AccessFlags::PRIVATE,
-        name: Arc::new("__jvm_internal_id".to_string()),
-        descriptor: FieldType::Int,
-        descriptor_string: "I".to_string(),
-        attributes: HashMap::new(),
-    };
-    
-    if &*class.this_class == "java/lang/Class" {
-        recursive_fields.extend([(class, &java_lang_class_internal_id)]);
-    }
-
-    let struct_type_index = types.len();
+    let type_index = types.len();
 
     types.rec(
         [sub_type_from_class(class.parents().len() as u32, recursive_fields.iter().map(|(_, field)| *field))]
     );
+
+    GeneratedRec {
+        this_class_field_offset,
+        recursive_fields,
+        type_index
+    }
+}
+
+pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
+    let mut module = Module::new();
+
+    let mut types = TypeSection::new();
+    let mut exports = ExportSection::new();
+
+    create_base_object_type(&mut types);
+
+    let generated_rec = create_class_rec(class, &mut types);
 
     let mut imports = ImportSection::new();
 
@@ -225,6 +267,19 @@ pub fn create_stub_module(class: &Class) -> StubModule {
             element_type: RefType {
                 nullable: true,
                 heap_type: HeapType::Any,
+            },
+            minimum: 0,
+            maximum: None,
+        }),
+    );
+
+    imports.import(
+        "jvm",
+        "functions",
+        EntityType::Table(TableType {
+            element_type: RefType {
+                nullable: true,
+                heap_type: HeapType::Func,
             },
             minimum: 0,
             maximum: None,
@@ -296,15 +351,8 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     let mut accessors = vec![];
 
     let member_fields = class.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC));
-    
-    let field_extend = if &*class.this_class == "java/lang/Class" {
-        vec![&java_lang_class_internal_id]
-    } else {
-        vec![]
-    };
-    
-    for (index, field) in member_fields.chain(field_extend)
-        .enumerate().map(|(index, field)| (index as u32 + this_class_field_offset + 2, field))
+
+    for (index, field) in member_fields.enumerate().map(|(index, field)| (index as u32 + generated_rec.this_class_field_offset + 2, field))
     {
         for is_setter in [true, false] {
             let func_type_index = types.len();
@@ -339,7 +387,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 function.instruction(&Instruction::LocalGet(0));
                 function.instruction(&Instruction::TableGet(0));
                 function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
-                    struct_type_index,
+                    generated_rec.type_index,
                 )));
 
                 //Push the value we want to set onto the stack
@@ -354,7 +402,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
 
                 //Set the field
                 function.instruction(&Instruction::StructSet {
-                    struct_type_index,
+                    struct_type_index: generated_rec.type_index,
                     field_index: index,
                 });
             } else {
@@ -367,10 +415,10 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 function.instruction(&Instruction::LocalGet(0));
                 function.instruction(&Instruction::TableGet(0));
                 function.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
-                    struct_type_index,
+                    generated_rec.type_index,
                 )));
                 function.instruction(&Instruction::StructGet {
-                    struct_type_index,
+                    struct_type_index: generated_rec.type_index,
                     field_index: index,
                 });
 
@@ -701,12 +749,6 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         code.function(&func);
     }
 
-    tables.table(TableType {
-        element_type: RefType { nullable: true, heap_type: HeapType::Func },
-        minimum: class.methods.len() as u32,
-        maximum: Some(class.methods.len() as u32),
-    });
-
     for (func_index, method) in stubbable_methods.iter().enumerate() {
         let mut func = Function::new([(1, ValType::Ref(RefType {
             nullable: true,
@@ -856,8 +898,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         }
 
         func.instruction(&Instruction::LocalGet(thread_local));
-        func.instruction(&Instruction::I32Const(func_index as i32));
-
+        func.instruction(&Instruction::I32Const(func_index as i32 + func_table_offset as i32));
         func.instruction(&Instruction::CallIndirect {
             ty: method_types[func_index],
             table: 1,
@@ -1035,7 +1076,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
         function.instruction(&Instruction::I32Const(class as *const Class as i32));
         function.instruction(&Instruction::LocalGet(0));
 
-        for (_, field) in recursive_fields {
+        for (_, field) in generated_rec.recursive_fields {
             match field.descriptor {
                 FieldType::Array { .. } => function.instruction(&Instruction::RefNull(HeapType::Any)),
                 FieldType::Byte => function.instruction(&Instruction::I32Const(0)),
@@ -1049,7 +1090,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
                 FieldType::Class(_) => function.instruction(&Instruction::RefNull(HeapType::Any)),
             };
         }
-        function.instruction(&Instruction::StructNew(struct_type_index));
+        function.instruction(&Instruction::StructNew(generated_rec.type_index));
 
         function.instruction(&Instruction::RefCastNullable(HeapType::Any));
         function.instruction(&Instruction::TableSet(0));
@@ -1066,7 +1107,7 @@ pub fn create_stub_module(class: &Class) -> StubModule {
     module.section(&exports);
     module.section(ElementSection::new().active(
         Some(1),
-        &ConstExpr::i32_const(0),
+        &ConstExpr::i32_const(func_table_offset as i32),
         Elements::Functions(&method_func_indices)
     ));
     module.section(&code);

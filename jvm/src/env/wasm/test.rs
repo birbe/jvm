@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use wasm_bindgen::prelude::wasm_bindgen;
 use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
 use crate::{ClassContext, ClassInstance, ClassLoadError, JVM};
-use crate::classfile::resolved::{Class, Ref};
+use crate::classfile::resolved::{Class, Method, Ref};
 use crate::execution::MethodHandle;
 use highway::HighwayHash;
 use js_sys::{ArrayBuffer, Uint8Array};
@@ -21,7 +21,8 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response, Worker, WorkerGlobalScope};
 use jvm_types::JParse;
 use crate::classfile::ClassFile;
-use crate::env::Object;
+use crate::env::{Object, ToAny};
+use crate::env::wasm::jit::{jit_module, translate_method_java_to_wasm};
 use crate::env::wasm::native::native_func;
 use crate::thread::Thread;
 
@@ -218,19 +219,22 @@ pub fn wasm_test() {
 
     let mut main_thread = jvm.create_thread(native_bootstrapper.clone());
 
-    // let wasm_classloader_class = native_bootstrapper.find_class(&mut main_thread, "WASMClassLoader").unwrap();
-    // let wasm_classloader = jvm.environment.new_object(&wasm_classloader_class);
-    //
-    // let mut main_thread = jvm.create_thread(Arc::new(Arc::new(ClassLoaderObject {
-    //     instance: wasm_classloader,
-    //     loader_classpath: "WASMClassLoader".into(),
-    //     find_class: jvm.get_method("WASMClassLoader", "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", 0),
-    //     id: 1,
-    // })));
-
     let class = main_thread.class_loader.clone().find_class(&mut main_thread, "Main").unwrap();
-    let handle = jvm.get_method("Main", "main", "()I", 0);
+    let string = main_thread.class_loader.clone().find_class(&mut main_thread, "java/lang/String").unwrap();
 
-    let operand = main_thread.invoke(&handle, Box::new([]));
-    console_log!("{:?}", operand.unwrap().data());
+    // let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
+    let method = class.get_method_by_name("jitTest", "()I").unwrap();
+
+    let env = (*jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
+
+    let to_jit: [(&Method, &Class); 1] = [(method, &class)];
+
+    let jit = jit_module(&jvm, env, &to_jit, &mut main_thread);
+
+    env.link_jit(&jvm, jit);
+
+    // let handle = jvm.get_method("Main", "jitTest", "()I", 0);
+    //
+    // console_log!("{:?}", main_thread.invoke(&handle, Box::new([])));
+
 }
