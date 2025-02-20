@@ -143,6 +143,7 @@ impl Class {
 
                 #[cfg(target_arch = "wasm32")]
                 let field = Field::new(
+                    this_class.clone(),
                     field_info,
                     &constant_pool
                 );
@@ -166,6 +167,7 @@ impl Class {
                     descriptor: FieldType::Int,
                     descriptor_string: "I".to_string(),
                     attributes: HashMap::new(),
+                    class: this_class.clone(),
                 }
             );
         }
@@ -999,12 +1001,14 @@ pub struct Field {
     pub descriptor: FieldType,
     pub descriptor_string: String,
     pub attributes: HashMap<String, Attribute>,
+    pub class: Arc<String>,
     #[cfg(not(target_arch = "wasm32"))]
     pub heap_offset: usize,
 }
 
 impl Field {
     fn new(
+        class: Arc<String>,
         field_info: &FieldInfo,
         constant_pool: &ConstantPool,
         #[cfg(not(target_arch = "wasm32"))]
@@ -1047,6 +1051,7 @@ impl Field {
                     Ok((descriptor_kind, attribute))
                 })
                 .collect::<Result<HashMap<String, Attribute>, ClassDeserializationError>>()?,
+            class,
             #[cfg(not(target_arch = "wasm32"))]
             heap_offset,
         })

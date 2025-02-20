@@ -49,7 +49,7 @@ impl MethodSignature {
             params.insert(
                 0,
                 ValType::Ref(RefType {
-                    nullable: false,
+                    nullable: true,
                     heap_type: HeapType::Any,
                 }),
             );
@@ -82,7 +82,7 @@ impl MethodSignature {
             params.insert(
                 0,
                 ValType::Ref(RefType {
-                    nullable: false,
+                    nullable: true,
                     heap_type: HeapType::Any,
                 }),
             );
@@ -106,7 +106,7 @@ pub struct StubModule {
     pub(crate) accessors: Vec<String>,
 }
 
-fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Field>) -> SubType {
+pub fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Field>) -> SubType {
     let mut field_types = fields
         .into_iter()
         .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
@@ -177,7 +177,8 @@ fn sub_type_from_class<'a>(index: u32, fields: impl IntoIterator<Item = &'a Fiel
     }
 }
 
-pub fn create_base_object_type(types: &mut TypeSection) {
+pub fn create_base_object_type(types: &mut TypeSection) -> u32 {
+    let id = types.len();
     types.rec([
         SubType {
             is_final: false,
@@ -197,6 +198,7 @@ pub fn create_base_object_type(types: &mut TypeSection) {
         }
     ]);
 
+    id
 }
 
 struct GeneratedRec<'a> {
@@ -219,9 +221,12 @@ fn create_class_rec<'a: 'b, 'b>(class: &'a Class, types: &'b mut TypeSection) ->
                 .collect::<Vec<(&Class, &Field)>>()
         );
 
-        types.rec(
-            [sub_type_from_class(index as u32, recursive_fields.iter().map(|(_, field)| *field))]
-        );
+        //Not java/lang/Object
+        if parent.super_class.is_some() {
+            types.rec(
+                [sub_type_from_class(index as u32 - 1, recursive_fields.iter().map(|(_, field)| *field))]
+            );
+        }
     }
 
     let this_class_field_offset = recursive_fields.len() as u32;
@@ -238,7 +243,7 @@ fn create_class_rec<'a: 'b, 'b>(class: &'a Class, types: &'b mut TypeSection) ->
     let type_index = types.len();
 
     types.rec(
-        [sub_type_from_class(class.parents().len() as u32, recursive_fields.iter().map(|(_, field)| *field))]
+        [sub_type_from_class(class.parents().len() as u32 - 1, recursive_fields.iter().map(|(_, field)| *field))]
     );
 
     GeneratedRec {
@@ -256,7 +261,15 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
 
     create_base_object_type(&mut types);
 
-    let generated_rec = create_class_rec(class, &mut types);
+    let generated_rec = if class.super_class.is_some() {
+        create_class_rec(class, &mut types)
+    } else {
+        GeneratedRec {
+            this_class_field_offset: 0,
+            recursive_fields: vec![],
+            type_index: 0,
+        }
+    };
 
     let mut imports = ImportSection::new();
 
@@ -819,9 +832,9 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
                     //     func.instruction(&Instruction::RefCastNullable(HeapType::Array));
                     // }
 
-                    if *is_this {
-                        func.instruction(&Instruction::RefCastNonNull(HeapType::Any));
-                    }
+                    // if *is_this {
+                    //     func.instruction(&Instruction::RefCastNonNull(HeapType::Any));
+                    // }
 
                     func.instruction(&Instruction::LocalGet(i32_local));
                     func.instruction(&Instruction::Call(dealloc_ref));

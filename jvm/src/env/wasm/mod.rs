@@ -16,6 +16,7 @@ use highway::HighwayHasher;
 use once_cell::sync::{Lazy, OnceCell};
 use wasm_bindgen::JsValue;
 use wasm_encoder::Module;
+use wasmparser::WasmFeatures;
 use crate::bytecode::ArrayType;
 use crate::env::wasm::jit::JitResult;
 use crate::env::wasm::stub::generate_helper_wasm;
@@ -171,7 +172,10 @@ impl WasmEnvironment {
 
         let wasm_bytes = helper_module.finish();
 
-        let wat = wasmprinter::print_bytes(&wasm_bytes).unwrap();
+        let mut printer = wasmprinter::Printer::new();
+        printer.print_offsets(true);
+
+        let wat = printer.print(&wasm_bytes).unwrap();
 
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
@@ -313,7 +317,26 @@ impl WasmEnvironment {
         js_sys::Reflect::set(&imports, &"jvm".into(), &jvm_import_object).unwrap();
 
         let wasm_bytes = jit.module.finish();
-        let wat = wasmprinter::print_bytes(&wasm_bytes).unwrap();
+
+        let mut printer = wasmprinter::Printer::new();
+        printer.print_offsets(true);
+
+        let wat = printer.print(&wasm_bytes).unwrap();
+
+        match wasmparser::Validator::new_with_features(WasmFeatures {
+            gc: true,
+            function_references: true,
+            bulk_memory: true,
+            ..Default::default()
+        })
+            .validate_all(&wasm_bytes)
+        {
+            Ok(_) => {}
+            Err(error) => {
+                console_log!("{error}\n{wat}");
+            }
+        }
+
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
 
         let module = match WebAssembly::Module::new(&uint8array) {

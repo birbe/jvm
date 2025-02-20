@@ -223,18 +223,25 @@ pub fn wasm_test() {
     let string = main_thread.class_loader.clone().find_class(&mut main_thread, "java/lang/String").unwrap();
 
     // let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
-    let method = class.get_method_by_name("jitTest", "()I").unwrap();
+    let method = class.get_method_by_name("jitTest", "(LMain;)I").unwrap();
 
     let env = (*jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
 
     let to_jit: [(&Method, &Class); 1] = [(method, &class)];
 
+
+    let time = js_sys::Date::now();
+
     let jit = jit_module(&jvm, env, &to_jit, &mut main_thread);
+
+    let new_time = js_sys::Date::now();
+
+    // console_log!("Generated JIT in {}ms", (new_time - time) / 1000.0);
 
     env.link_jit(&jvm, jit);
 
-    // let handle = jvm.get_method("Main", "jitTest", "()I", 0);
+    let handle = jvm.get_method("Main", "main", "()I", 0);
     //
-    // console_log!("{:?}", main_thread.invoke(&handle, Box::new([])));
+    console_log!("{:?}", main_thread.invoke(&handle, Box::new([])));
 
 }

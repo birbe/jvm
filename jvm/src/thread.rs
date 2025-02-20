@@ -627,10 +627,6 @@ impl ThreadHandle {
 
                 let args = frame.pop_dynamic(method_descriptor.args.len() + 1);
 
-                // if method_descriptor.return_type != ReturnType::Void {
-                //     panic!()
-                // }
-
                 let method_handle = jvm.get_method(&c.this_class, &ref_.name_and_type.name, &ref_.name_and_type.descriptor, class.class_loader.get_id());
 
                 let return_value = thread.invoke(&method_handle, Vec::from(args).into_boxed_slice());
@@ -844,10 +840,6 @@ impl ThreadHandle {
                 let (field, field_class) =
                     routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
-                if field_class.this_class != class.this_class {
-                    Self::init_static(&field_class, thread);
-                }
-
                 let [object, value] = frame.pop();
                 let object = unsafe { thread.jvm.environment.object_from_operand(object) };
 
@@ -866,10 +858,6 @@ impl ThreadHandle {
                     .unwrap();
 
                 let (_, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
-
-                if field_class.this_class != class.this_class {
-                    Self::init_static(&field_class, thread);
-                }
 
                 let [ptr] = frame.pop();
 
