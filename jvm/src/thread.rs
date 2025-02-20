@@ -536,19 +536,19 @@ impl ThreadHandle {
             let instr_count = thread.instructions_executed.load(Ordering::Acquire);
 
             // if instr_count > 69000 {
-            //     let mut stdout = thread.jvm.stdout.lock();
-            //     write!(&mut stdout, "{}",
-            //            format!(
-            //                "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
-            //                format!("{:?}", bytecode),
-            //                class.this_class,
-            //                method.identifier,
-            //                pc,
-            //                locals.join(", "),
-            //                stack.join(", "),
-            //                instr_count,
-            //            )
-            //     ).unwrap();
+                let mut stdout = thread.jvm.stdout.lock();
+                write!(&mut stdout, "{}",
+                       format!(
+                           "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
+                           format!("{:?}", bytecode),
+                           class.this_class,
+                           method.identifier,
+                           pc,
+                           locals.join(", "),
+                           stack.join(", "),
+                           instr_count,
+                       )
+                ).unwrap();
             // }
         }
 
@@ -696,7 +696,7 @@ impl ThreadHandle {
                     todo!()
                 };
 
-                let selected_method = routine_select_method(resolved_method, resolved_method_class, object_class);
+                let (selected_method, _) = routine_select_method(resolved_method, resolved_method_class, object_class);
 
                 let handle = jvm.get_method(&selected_method.class, &selected_method.name, &selected_method.descriptor.string, class.class_loader.get_id());
 
@@ -706,7 +706,6 @@ impl ThreadHandle {
 
             }
             Bytecode::Invokevirtual(constant_index) => {
-
                 let method_ref = class
                     .constant_pool
                     .constants
@@ -724,10 +723,6 @@ impl ThreadHandle {
                 let resolved_method = routine_resolve_method(&thread, &method_ref, &method_ref_class).unwrap();
                 let resolved_method_class = class.class_loader.find_class(thread, &method_ref.class).unwrap();
 
-                if resolved_method_class.this_class != class.this_class {
-                    Self::init_static(&resolved_method_class, thread);
-                }
-
                 let mut nargs = frame.pop_dynamic(resolved_method.descriptor.args.len());
 
                 let [objectref] = frame.pop();
@@ -739,7 +734,7 @@ impl ThreadHandle {
 
                 if !resolved_method.is_signature_polymorphic(classpath) {
 
-                    let selected_method = routine_select_method(resolved_method, &resolved_method_class, object_class);
+                    let (selected_method, _) = routine_select_method(resolved_method, &resolved_method_class, object_class);
                     let handle = jvm.get_method(&selected_method.class, &selected_method.name, &selected_method.descriptor.string, class.class_loader.get_id());
 
                     frame.push_dynamic(thread.invoke(&handle, Vec::from(nargs).into_boxed_slice()));

@@ -223,7 +223,7 @@ pub fn wasm_test() {
     let string = main_thread.class_loader.clone().find_class(&mut main_thread, "java/lang/String").unwrap();
 
     // let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
-    let method = class.get_method_by_name("jitTest", "(LMain;)I").unwrap();
+    let method = class.get_method_by_name("jitTest", "()I").unwrap();
 
     let env = (*jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
 

@@ -441,7 +441,7 @@ pub struct Method {
     pub descriptor: MethodDescriptor,
     pub attributes: HashMap<String, Attribute>,
     pub class: Arc<String>,
-    pub(crate) identifier: String,
+    pub(crate) identifier: Arc<String>,
 }
 
 impl Method {
@@ -478,7 +478,7 @@ impl Method {
                 })
                 .collect::<Result<HashMap<String, Attribute>, ClassDeserializationError>>()?,
             class,
-            identifier: format!("{}{}", method_name, descriptor_string),
+            identifier: Arc::new(format!("{}{}", method_name, descriptor_string)),
         })
     }
 

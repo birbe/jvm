@@ -357,7 +357,7 @@ impl JVM {
                         descriptor: MethodDescriptor::try_from(&*format!("(){}", classpath)).unwrap(),
                         name: Arc::new("clone".into()),
                         attributes: HashMap::new(),
-                        identifier: format!("clone(){}", classpath)
+                        identifier: Arc::new(format!("clone(){}", classpath))
                     }
                 )
             ],

@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::vec::Splice;
 use petgraph::algo::{condensation, kosaraju_scc, tarjan_scc};
 use petgraph::Graph;
 use petgraph::graph::NodeIndex;
@@ -15,7 +17,7 @@ use crate::env::wasm::jit::OperandType::{Class1, Class2, Ref};
 use crate::env::wasm::stub::stub::{create_base_object_type, sub_type_from_class, MethodSignature};
 use crate::env::wasm::WasmEnvironment;
 use crate::JVM;
-use crate::linker::{routine_resolve_field, ClassLoader};
+use crate::linker::{routine_resolve_field, routine_resolve_method, routine_select_method, ClassLoader};
 use crate::thread::{Operand, OperandTag, Thread};
 
 type Instr<'a> = wasm_encoder::Instruction<'a>;
@@ -48,12 +50,17 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     let i64_in = types.len();
     types.function([ValType::I64], []);
 
+    let routine_select_method = types.len();
+    types.function([ValType::I32; 4], [ValType::I32]);
+
     let mut generated_function_signatures: HashMap<MethodDescriptor, u32> = HashMap::new();
     let mut generated_object_recs: HashMap<String, u32> = HashMap::new();
 
     let mut imports = ImportSection::new();
 
     let function_table_id = imports.len();
+
+    let jit_routine_select_method;
 
     {
         imports.import("jvm", "functions", TableType {
@@ -72,16 +79,18 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
         });
 
         imports.import("jvm", "init_static", EntityType::Function(init_static_type));
+        jit_routine_select_method = 1;
+        imports.import("jvm", "_jit_routine_select_method", EntityType::Function(routine_select_method));
     }
 
-    let func_imports_len = 1;
+    let func_imports_len = 2;
 
     let mut code = CodeSection::new();
     let mut funcs = FunctionSection::new();
     let mut exports = ExportSection::new();
 
     let mut translation = ModuleTranslation {
-        jvm_functions: JvmFuncs { init_static: 0 },
+        jvm_functions: JvmFuncs { init_static: 0, _jit_routine_select_method: jit_routine_select_method },
         type_section: &mut types,
         function_signatures: &mut generated_function_signatures,
         object_recs: &mut generated_object_recs,
@@ -414,14 +423,56 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
         locals.wasm_locals.clone().into_iter().chain([ValType::I32, ValType::I64, ValType::Ref(RefType {
             nullable: true,
             heap_type: HeapType::Any,
-        }), ValType::I32])
+        }), ValType::I32, ValType::I32])
     );
 
     let analyzed_stack = analyze_stack(&code.instructions, class, module.thread);
+    let mut splices = HashMap::new();
+
+    for instruction in &code.instructions {
+        match instruction.bytecode {
+            Bytecode::Invokevirtual(constant_index) => {
+                let method_ref = class
+                    .constant_pool
+                    .constants
+                    .get(&constant_index)
+                    .unwrap()
+                    .as_ref()
+                    .unwrap();
+
+                let classpath = &**method_ref.class;
+
+                let method_ref_class = class.class_loader.find_class(module.thread, classpath)
+                    .unwrap();
+
+                let resolved_method = routine_resolve_method(&module.thread, &method_ref, &method_ref_class).unwrap();
+                let resolved_method_class = class.class_loader.find_class(module.thread, &method_ref.class).unwrap();
+
+                'walk: {
+                    if !resolved_method.is_signature_polymorphic(classpath) {
+                        //Invokevirtual needs an object, so it shouldn't ever be the first instruction, so this access is fine
+                        let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
+                        let target_length = stack_length - resolved_method.descriptor.args.len();
+
+                        for walk_index in (0..instruction.bytecode_index).rev() {
+                            let walk_stack_length = analyzed_stack[walk_index as usize].len();
+                            if walk_stack_length == target_length {
+                                assert!(splices.insert(walk_index + 1, SpliceType::Invokevirtual(resolved_method.identifier.clone(), resolved_method_class.clone())).is_none());
+                                break 'walk;
+                            }
+                        }
+                    } else {
+                        todo!()
+                    };
+
+                    panic!("Couldn't find splice target for Invokevirtual");
+                }
+            }
+            _ => {}
+        }
+    }
 
     let max_local = method_signature.params.len() as u32 + locals.wasm_locals.len() as u32;
-
-    console_log!("{locals:?}");
 
     let mut translating = MethodTranslation {
         byte_to_index_map: &byte_to_index_map,
@@ -431,6 +482,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
             i64_accumulator: max_local + 1,
             ref_accumulator: max_local + 2,
             cfg_flag: max_local + 3,
+            dynamic_dispatch_accumulator: max_local + 4
         },
         method_signature,
         flagged_jumps,
@@ -440,6 +492,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
         module,
         local_map: locals,
         analyzed_stack,
+        splices,
     };
 
     if loops_needing_fixed.len() > 0 {
@@ -466,6 +519,7 @@ struct MetaLocals {
     i32_accumulator: u32,
     i64_accumulator: u32,
     ref_accumulator: u32,
+    dynamic_dispatch_accumulator: u32,
     cfg_flag: u32
 }
 
@@ -476,7 +530,8 @@ struct FlaggedJump {
 }
 
 struct JvmFuncs {
-    init_static: u32
+    init_static: u32,
+    _jit_routine_select_method: u32
 }
 
 struct ModuleTranslation<'a> {
@@ -534,6 +589,11 @@ impl<'a> ModuleTranslation<'a> {
 
 }
 
+#[derive(Debug)]
+enum SpliceType {
+    Invokevirtual(Arc<String>, Arc<Class>)
+}
+
 // #[derive(Debug)]
 struct MethodTranslation<'method, 'module: 'method> {
     byte_to_index_map: &'method HashMap<u32, u32>,
@@ -546,7 +606,8 @@ struct MethodTranslation<'method, 'module: 'method> {
     method: &'method Method,
     module: &'method mut ModuleTranslation<'module>,
     local_map: LocalMap,
-    analyzed_stack: Vec<Vec<OperandType>>
+    analyzed_stack: Vec<Vec<OperandType>>,
+    splices: HashMap<u32, SpliceType>
 }
 
 impl<'method, 'module: 'method> MethodTranslation<'method, 'module> {
@@ -637,6 +698,33 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
 
     }
 
+    if let Some(splice) = t.splices.get(&instruction.bytecode_index) {
+
+        match splice {
+            SpliceType::Invokevirtual(method, class) => {
+                let jlo = t.module.jvm.is_class_linked("java/lang/Object", 0).unwrap();
+                let object_ty = t.module.get_object_type(&jlo);
+
+                i!(Instr::LocalTee(t.locals.ref_accumulator));
+                i!(Instr::RefCastNullable(HeapType::Concrete(object_ty)));
+                i!(Instr::StructGet {
+                    struct_type_index: object_ty,
+                    field_index: 0
+                });
+
+                let method_id = class.methods.iter().position(|c_method| c_method.get_identifier() == &**method).unwrap();
+
+                i!(Instr::LocalGet(t.method_signature.thread_local));
+                i!(Instr::I32Const(method_id as i32));
+                i!(Instr::I32Const(&**class as *const Class as i32));
+                i!(Instr::Call(t.module.jvm_functions._jit_routine_select_method));
+                i!(Instr::LocalSet(t.locals.dynamic_dispatch_accumulator));
+                i!(Instr::LocalGet(t.locals.ref_accumulator));
+            }
+        }
+
+    }
+
     match instruction.bytecode {
         Bytecode::Goto(offset) => {
             t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::Br(br));
@@ -685,6 +773,30 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
 
             i!(Instr::LocalTee(accumulator));
             i!(Instr::LocalGet(accumulator));
+        }
+        Bytecode::Invokevirtual(constant_index) => {
+            let method_ref = t.class
+                .constant_pool
+                .constants
+                .get(&constant_index)
+                .unwrap()
+                .as_ref()
+                .unwrap();
+
+            let classpath = &**method_ref.class;
+
+            let method_ref_class = t.class.class_loader.find_class(t.module.thread, classpath)
+                .unwrap();
+
+            let resolved_method = routine_resolve_method(&t.module.thread, &method_ref, &method_ref_class).unwrap();
+            let method_ty = t.module.get_method_descriptor_id(&resolved_method.descriptor, false);
+
+            i!(Instr::LocalGet(t.method_signature.thread_local));
+            i!(Instr::LocalGet(t.locals.dynamic_dispatch_accumulator));
+            i!(Instr::CallIndirect {
+                ty: method_ty,
+                table: 0
+            });
         }
         Bytecode::Invokespecial(constant_index) => {
             let ref_ = t.class

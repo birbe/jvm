@@ -4,7 +4,7 @@ use crate::classfile::resolved::{AccessFlags, Attribute, Class, ClassId, FieldTy
 use crate::env::{nothing, Compiler, Environment, ToAny};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::env::Object;
-use crate::linker::ClassLoader;
+use crate::linker::{routine_select_method, ClassLoader};
 use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
 use js_sys::{Function, WebAssembly};
 use parking_lot::{Mutex, RwLock};
@@ -59,6 +59,17 @@ struct ClassReflector {
 #[no_mangle]
 pub extern "C" fn init_static(class: &Class, thread: &mut Thread) {
     ThreadHandle::init_static(class, thread);
+}
+
+#[no_mangle]
+pub extern "C" fn _jit_routine_select_method(object_class: &Class, thread: &mut Thread, method_id: u32, class: &Class) -> u32 {
+    let method = &class.methods[method_id as usize];
+
+    let (selected_method, selected_class) = routine_select_method(method, class, object_class);
+
+    let env = (*thread.jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
+    let ptr = env.get_linked_function_ptr(selected_class, selected_method.get_identifier());
+    ptr
 }
 
 #[no_mangle]
@@ -298,7 +309,7 @@ impl WasmEnvironment {
         let meta_exports = wasm_bindgen::exports();
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
 
-        for cross_import in ["init_static"] {
+        for cross_import in ["init_static", "_jit_routine_select_method"] {
             let key: JsValue = cross_import.into();
 
             js_sys::Reflect::set(
@@ -456,7 +467,7 @@ impl Environment for WasmEnvironment {
             .enumerate()
             .for_each(|(index, method)| {
                 ptrs.insert(
-                    method.identifier.clone(),
+                    (*method.identifier).clone(),
                     index as u32 + stubbable_methods_offset
                 );
             });

@@ -140,9 +140,9 @@ pub fn routine_resolve_field<'a>(
 }
 
 //https://docs.oracle.com/javase/specs/jvms/se20/html/jvms-5.html#jvms-5.4.6
-pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_method_class: &Class, object_type: &'b Class) -> &'a Method {
+pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_method_class: &'a Class, object_type: &'b Class) -> (&'a Method, &'a Class) {
     if resolved_method.access_flags.contains(AccessFlags::PRIVATE) {
-        resolved_method
+        (resolved_method, resolved_method_class)
     } else {
         let mut out = None;
 
@@ -156,12 +156,12 @@ pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_m
         }
 
         if let Some((overrider, parent)) = out {
-            overrider
+            (overrider, parent)
         } else {
             for superinterface in object_type.superinterfaces().iter().map(|parent| &***parent) {
                 if let Some(maximally_specific) = superinterface.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string)
                     && !maximally_specific.access_flags.contains(AccessFlags::STATIC) && !maximally_specific.access_flags.contains(AccessFlags::PRIVATE) {
-                    return &**maximally_specific;
+                    return (&**maximally_specific, superinterface);
                 }
             }
 
