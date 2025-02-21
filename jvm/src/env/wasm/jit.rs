@@ -21,11 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::vec::Splice;
 use wasm_encoder::BlockType::FunctionType;
-use wasm_encoder::{
-    BlockType, CodeSection, CompositeType, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, HeapType, ImportSection, MemArg, MemoryType, Module, RefType, StorageType,
-    StructType, SubType, TableSection, TableType, TypeSection, ValType,
-};
+use wasm_encoder::{BlockType, CodeSection, CompositeType, ConstExpr, EntityType, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, MemArg, MemorySection, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
 use wasmparser::WasmFeatures;
 
 type Instr<'a> = wasm_encoder::Instruction<'a>;
@@ -42,6 +38,21 @@ pub fn jit_module<'m>(
     thread: &mut Thread,
 ) -> JitResult<'m> {
     let mut module = Module::new();
+
+    let mut globals = GlobalSection::new();
+    let mut memories = MemorySection::new();
+
+    globals.global(GlobalType {
+        val_type: ValType::I32,
+        mutable: true,
+    }, &ConstExpr::i32_const(-1));
+
+    memories.memory(MemoryType {
+        minimum: 1,
+        maximum: Some(1),
+        memory64: false,
+        shared: false,
+    });
 
     let mut types = TypeSection::new();
 
@@ -214,6 +225,8 @@ pub fn jit_module<'m>(
     module.section(&types);
     module.section(&imports);
     module.section(&funcs);
+    module.section(&memories);
+    module.section(&globals);
     module.section(&exports);
     module.section(&code);
 
@@ -650,8 +663,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
             i32_accumulator: max_local,
             i64_accumulator: max_local + 1,
             ref_accumulator: max_local + 2,
-            cfg_flag: max_local + 3,
-            dynamic_dispatch_accumulator: max_local + 4,
+            cfg_flag: max_local + 3
         },
         method_signature,
         flagged_jumps,
@@ -693,7 +705,6 @@ struct MetaLocals {
     i32_accumulator: u32,
     i64_accumulator: u32,
     ref_accumulator: u32,
-    dynamic_dispatch_accumulator: u32,
     cfg_flag: u32,
 }
 
@@ -934,7 +945,22 @@ fn translate_instructions<'method, 'module>(
                 i!(Instr::Call(
                     t.module.jvm_functions._jit_routine_select_method
                 ));
-                i!(Instr::LocalSet(t.locals.dynamic_dispatch_accumulator));
+                i!(Instr::LocalSet(t.locals.i32_accumulator));
+
+                i!(Instr::I32Const(1));
+                i!(Instr::GlobalGet(0));
+                i!(Instr::I32Add);
+                i!(Instr::GlobalSet(0));
+                i!(Instr::GlobalGet(0));
+                i!(Instr::I32Const(2));
+                i!(Instr::I32Shl);
+                i!(Instr::LocalGet(t.locals.i32_accumulator));
+                i!(Instr::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 1,
+                }));
+
                 i!(Instr::LocalGet(t.locals.ref_accumulator));
             }
             SpliceType::Arraystore(storage_type) => {
@@ -1046,7 +1072,22 @@ fn translate_instructions<'method, 'module>(
                 .get_method_descriptor_id(&resolved_method.descriptor, false);
 
             i!(Instr::LocalGet(t.method_signature.thread_local));
-            i!(Instr::LocalGet(t.locals.dynamic_dispatch_accumulator));
+
+            i!(Instr::GlobalGet(0));
+            i!(Instr::LocalTee(t.locals.i32_accumulator));
+            i!(Instr::I32Const(2));
+            i!(Instr::I32Shl);
+            i!(Instr::I32Load(MemArg {
+                align: 2,
+                offset: 0,
+                memory_index: 1
+            }));
+
+            i!(Instr::LocalGet(t.locals.i32_accumulator));
+            i!(Instr::I32Const(1));
+            i!(Instr::I32Sub);
+            i!(Instr::GlobalSet(0));
+
             i!(Instr::CallIndirect {
                 ty: method_ty,
                 table: 0

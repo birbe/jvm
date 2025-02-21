@@ -940,6 +940,15 @@ pub fn native_func(
 
             Operand::new_data(0)
         }
+        ("java/lang/Float", "floatToRawIntBits", "(F)I") => {
+            args[0].copy_data()
+        }
+        ("java/lang/Double", "doubleToRawLongBits", "(D)J") => {
+            args[0].copy_data()
+        }
+        ("java/lang/Double", "longBitsToDouble", "(J)D") => {
+            args[0].copy_data()
+        }
         ("java/io/FileDescriptor", "initIDs", "()V") => {
             let fd_class = jvm
                 .bootstrap_classloader
