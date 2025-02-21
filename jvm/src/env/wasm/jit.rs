@@ -1,33 +1,46 @@
+use crate::bytecode::{ArrayType, Bytecode};
+use crate::classfile::resolved::attribute::Instruction;
+use crate::classfile::resolved::{
+    AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, ReturnType,
+};
+use crate::env::wasm::jit::OperandType::{Class1, Class2, Ref};
+use crate::env::wasm::stub::stub::{create_base_object_type, sub_type_from_class, MethodSignature};
+use crate::env::wasm::WasmEnvironment;
+use crate::env::Environment;
+use crate::linker::{
+    routine_resolve_field, routine_resolve_method, routine_select_method, ClassLoader,
+};
+use crate::thread::{Operand, OperandTag, Thread};
+use crate::JVM;
+use petgraph::algo::{condensation, kosaraju_scc, tarjan_scc};
+use petgraph::graph::NodeIndex;
+use petgraph::prelude::EdgeRef;
+use petgraph::Graph;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::vec::Splice;
-use petgraph::algo::{condensation, kosaraju_scc, tarjan_scc};
-use petgraph::Graph;
-use petgraph::graph::NodeIndex;
-use petgraph::prelude::EdgeRef;
-use wasm_encoder::{BlockType, CodeSection, CompositeType, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType, ImportSection, MemArg, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
 use wasm_encoder::BlockType::FunctionType;
+use wasm_encoder::{
+    BlockType, CodeSection, CompositeType, EntityType, ExportKind, ExportSection, Function,
+    FunctionSection, HeapType, ImportSection, MemArg, MemoryType, Module, RefType, StorageType,
+    StructType, SubType, TableSection, TableType, TypeSection, ValType,
+};
 use wasmparser::WasmFeatures;
-use crate::bytecode::{ArrayType, Bytecode};
-use crate::classfile::resolved::attribute::Instruction;
-use crate::classfile::resolved::{AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, ReturnType};
-use crate::env::Environment;
-use crate::env::wasm::jit::OperandType::{Class1, Class2, Ref};
-use crate::env::wasm::stub::stub::{create_base_object_type, sub_type_from_class, MethodSignature};
-use crate::env::wasm::WasmEnvironment;
-use crate::JVM;
-use crate::linker::{routine_resolve_field, routine_resolve_method, routine_select_method, ClassLoader};
-use crate::thread::{Operand, OperandTag, Thread};
 
 type Instr<'a> = wasm_encoder::Instruction<'a>;
 
 pub struct JitResult<'m> {
     pub module: Module,
-    pub functions: Vec<(&'m Method, &'m Class, String)>
+    pub functions: Vec<(&'m Method, &'m Class, String)>,
 }
 
-pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, &Class)], thread: &mut Thread) -> JitResult<'m> {
+pub fn jit_module<'m>(
+    jvm: &JVM,
+    env: &WasmEnvironment,
+    methods: &'m [(&Method, &Class)],
+    thread: &mut Thread,
+) -> JitResult<'m> {
     let mut module = Module::new();
 
     let mut types = TypeSection::new();
@@ -42,10 +55,13 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     types.function([ValType::I32; 2], []);
 
     let ref_in_func_type = types.len();
-    types.function([ValType::Ref(RefType {
-        nullable: true,
-        heap_type: HeapType::Any,
-    })], []);
+    types.function(
+        [ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Any,
+        })],
+        [],
+    );
 
     let i64_in = types.len();
     types.function([ValType::I64], []);
@@ -56,31 +72,29 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     let object_type = create_base_object_type(&mut types);
 
     let array_type = types.len();
-    types.rec(
-        [SubType {
-            is_final: false,
-            supertype_idx: Some(object_type),
-            composite_type: CompositeType::Struct(StructType {
-                fields: Box::new([
-                    wasm_encoder::FieldType {
-                        element_type: StorageType::Val(ValType::I32),
-                        mutable: true,
-                    },
-                    wasm_encoder::FieldType {
-                        element_type: StorageType::Val(ValType::I64),
-                        mutable: true,
-                    },
-                    wasm_encoder::FieldType {
-                        element_type: StorageType::Val(ValType::Ref(RefType {
-                            nullable: false,
-                            heap_type: HeapType::Array,
-                        })),
-                        mutable: true,
-                    },
-                ]),
-            }),
-        }]
-    );
+    types.rec([SubType {
+        is_final: false,
+        supertype_idx: Some(object_type),
+        composite_type: CompositeType::Struct(StructType {
+            fields: Box::new([
+                wasm_encoder::FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: true,
+                },
+                wasm_encoder::FieldType {
+                    element_type: StorageType::Val(ValType::I64),
+                    mutable: true,
+                },
+                wasm_encoder::FieldType {
+                    element_type: StorageType::Val(ValType::Ref(RefType {
+                        nullable: false,
+                        heap_type: HeapType::Array,
+                    })),
+                    mutable: true,
+                },
+            ]),
+        }),
+    }]);
 
     let mut generated_function_signatures: HashMap<MethodDescriptor, u32> = HashMap::new();
     let mut array_storage_types: HashMap<StorageType, u32> = HashMap::new();
@@ -89,13 +103,16 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     generated_object_recs.insert("java/lang/Object".into(), object_type);
 
     for storage_type in [
-        StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct})),
+        StorageType::Val(ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Struct,
+        })),
         StorageType::I8,
         StorageType::I16,
         StorageType::Val(ValType::I32),
         StorageType::Val(ValType::I64),
         StorageType::Val(ValType::F32),
-        StorageType::Val(ValType::F64)
+        StorageType::Val(ValType::F64),
     ] {
         array_storage_types.insert(storage_type, types.len());
         types.array(&storage_type, true);
@@ -108,20 +125,28 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     let jit_routine_select_method;
 
     {
-        imports.import("jvm", "functions", TableType {
-            element_type: RefType::FUNCREF,
-            minimum: 0,
-            maximum: None,
-        });
-
-        imports.import("jvm", "objects", TableType {
-            element_type: RefType {
-                nullable: true,
-                heap_type: HeapType::Any,
+        imports.import(
+            "jvm",
+            "functions",
+            TableType {
+                element_type: RefType::FUNCREF,
+                minimum: 0,
+                maximum: None,
             },
-            minimum: 0,
-            maximum: None,
-        });
+        );
+
+        imports.import(
+            "jvm",
+            "objects",
+            TableType {
+                element_type: RefType {
+                    nullable: true,
+                    heap_type: HeapType::Any,
+                },
+                minimum: 0,
+                maximum: None,
+            },
+        );
 
         imports.import(
             "jvm",
@@ -136,7 +161,11 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
 
         imports.import("jvm", "init_static", EntityType::Function(init_static_type));
         jit_routine_select_method = 1;
-        imports.import("jvm", "_jit_routine_select_method", EntityType::Function(routine_select_method));
+        imports.import(
+            "jvm",
+            "_jit_routine_select_method",
+            EntityType::Function(routine_select_method),
+        );
     }
 
     let func_imports_len = 2;
@@ -146,7 +175,10 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     let mut exports = ExportSection::new();
 
     let mut translation = ModuleTranslation {
-        jvm_functions: JvmFuncs { init_static: 0, _jit_routine_select_method: jit_routine_select_method },
+        jvm_functions: JvmFuncs {
+            init_static: 0,
+            _jit_routine_select_method: jit_routine_select_method,
+        },
         type_section: &mut types,
         function_signatures: &mut generated_function_signatures,
         array_storage_types: &array_storage_types,
@@ -168,9 +200,11 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
         let key = format!("{}-{}", method.class, method.identifier);
         exports.export(&key, ExportKind::Func, funcs.len() + func_imports_len);
 
-        funcs.function(translation.get_method_descriptor_id(&method.descriptor, method.access_flags.contains(AccessFlags::STATIC)));
+        funcs.function(translation.get_method_descriptor_id(
+            &method.descriptor,
+            method.access_flags.contains(AccessFlags::STATIC),
+        ));
         code.function(&func);
-
 
         funcs_out.push((*method, *class, key));
     }
@@ -189,18 +223,18 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     }
 }
 
-pub fn get_instruction_edges(instruction: &Instruction, mapping: &HashMap<u32, u32>, last_index: u32) -> Vec<u32> {
+pub fn get_instruction_edges(
+    instruction: &Instruction,
+    mapping: &HashMap<u32, u32>,
+    last_index: u32,
+) -> Vec<u32> {
     match instruction.bytecode {
-        Bytecode::Goto_w(offset) => vec![
-            *mapping
-                .get(&((offset + instruction.bytes_index as i32) as u32))
-                .unwrap(),
-        ],
-        Bytecode::Goto(offset) => vec![
-            *mapping
-                .get(&(((offset as i32) + instruction.bytes_index as i32) as u32))
-                .unwrap(),
-        ],
+        Bytecode::Goto_w(offset) => vec![*mapping
+            .get(&((offset + instruction.bytes_index as i32) as u32))
+            .unwrap()],
+        Bytecode::Goto(offset) => vec![*mapping
+            .get(&(((offset as i32) + instruction.bytes_index as i32) as u32))
+            .unwrap()],
         Bytecode::If_acmpeq(offset)
         | Bytecode::If_acmpne(offset)
         | Bytecode::If_icmpeq(offset)
@@ -243,10 +277,14 @@ pub fn get_instruction_edges(instruction: &Instruction, mapping: &HashMap<u32, u
 
 #[derive(Debug, Clone)]
 pub enum CompilationError {
-    NoCode
+    NoCode,
 }
 
-pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, module: &'a mut ModuleTranslation<'b>) -> Result<Function, CompilationError> {
+pub fn translate_method_java_to_wasm<'a, 'b>(
+    method: &Method,
+    class: &Class,
+    module: &'a mut ModuleTranslation<'b>,
+) -> Result<Function, CompilationError> {
     let code = if let Attribute::Code(code) = method.attributes.get("Code").unwrap() {
         code
     } else {
@@ -255,13 +293,19 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
 
     let mut graph = Graph::<&Instruction, u32>::new();
 
-    let byte_to_index_map: HashMap<u32, u32> = code.instructions.iter().map(|instr| (instr.bytes_index, instr.bytecode_index)).collect();
+    let byte_to_index_map: HashMap<u32, u32> = code
+        .instructions
+        .iter()
+        .map(|instr| (instr.bytes_index, instr.bytecode_index))
+        .collect();
 
     let last_index = code.instructions.len() as u32 - 1;
 
-    let instruction_edge_ids: Vec<NodeIndex<u32>> = code.instructions.iter().map(|instruction| {
-        graph.add_node(instruction)
-    }).collect();
+    let instruction_edge_ids: Vec<NodeIndex<u32>> = code
+        .instructions
+        .iter()
+        .map(|instruction| graph.add_node(instruction))
+        .collect();
 
     for instruction in &code.instructions {
         let edges = get_instruction_edges(instruction, &byte_to_index_map, last_index);
@@ -288,26 +332,37 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
     for (edge_index, scc_edge) in scc_edges.into_iter().enumerate() {
         let target_loop = &scc_result[scc_edge.target().index()];
 
-        if target_loop.len() == 1 { continue; }
-        
+        if target_loop.len() == 1 {
+            continue;
+        }
+
         let header = target_loop.iter().min().unwrap();
 
         let instruction_edge = &graph.raw_edges()[edge_index];
 
         if scc_edge.source() == scc_edge.target() {
-            if instruction_edge.target() < instruction_edge.source() && &instruction_edge.target() != header {
+            if instruction_edge.target() < instruction_edge.source()
+                && &instruction_edge.target() != header
+            {
                 loops_needing_fixed.insert((scc_edge.target().index(), header));
-                backward_jumps_needing_fixed.insert((instruction_edge.target().index(), scc_edge.target(), header.index()));
+                backward_jumps_needing_fixed.insert((
+                    instruction_edge.target().index(),
+                    scc_edge.target(),
+                    header.index(),
+                ));
             }
         } else {
             //The condensation is by definition a directed acyclic graph so this is guaranteed to be a forward jump
             if instruction_edge.target().index() != header.index() {
                 loops_needing_fixed.insert((scc_edge.target().index(), header));
                 //Forward jump
-                forward_jumps_needing_fixed.push((instruction_edge.target().index(), scc_edge.target(), header.index()))
+                forward_jumps_needing_fixed.push((
+                    instruction_edge.target().index(),
+                    scc_edge.target(),
+                    header.index(),
+                ))
             }
         }
-
     }
 
     let mut index = 0;
@@ -317,16 +372,18 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
 
     for scc_index in 0..scc_result.len() {
         //Guarantee: none of these edges' targets are a loop header
-        for (target, scc_target, _) in forward_jumps_needing_fixed.iter().chain(backward_jumps_needing_fixed.iter()) {
-            if scc_target.index() != scc_index { continue; }
+        for (target, scc_target, _) in forward_jumps_needing_fixed
+            .iter()
+            .chain(backward_jumps_needing_fixed.iter())
+        {
+            if scc_target.index() != scc_index {
+                continue;
+            }
 
             let key = (*target, scc_target.index());
 
             if !loop_flags.contains_key(&key) {
-                loop_flags.insert(
-                    key,
-                    index
-                );
+                loop_flags.insert(key, index);
             }
         }
 
@@ -337,29 +394,25 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
 
     for edge in graph.raw_edges() {
         if edge.target().index() as i32 - edge.source().index() as i32 > 1 {
-            if let Some((_, _, header)) = forward_jumps_needing_fixed.iter().find(|(target, _, header)| *target == edge.target().index()) {
-                boundaries.push((
-                    edge.source().index() as u32,
-                    *header as u32
-                ));
+            if let Some((_, _, header)) = forward_jumps_needing_fixed
+                .iter()
+                .find(|(target, _, header)| *target == edge.target().index())
+            {
+                boundaries.push((edge.source().index() as u32, *header as u32));
             } else {
-                boundaries.push((
-                    edge.source().index() as u32,
-                    edge.target().index() as u32
-                ));
+                boundaries.push((edge.source().index() as u32, edge.target().index() as u32));
             }
         }
     }
 
     let mut block_ranges = vec![];
 
-    for (target, _, header) in forward_jumps_needing_fixed.iter().chain(backward_jumps_needing_fixed.iter()) {
-        boundaries.push(
-            (*header as u32, *target as u32 - 1)
-        );
-        block_ranges.push(
-            (*header as u32, *target as u32 - 1, BlockRangeType::Block)
-        );
+    for (target, _, header) in forward_jumps_needing_fixed
+        .iter()
+        .chain(backward_jumps_needing_fixed.iter())
+    {
+        boundaries.push((*header as u32, *target as u32 - 1));
+        block_ranges.push((*header as u32, *target as u32 - 1, BlockRangeType::Block));
     }
 
     for scc in &scc_result {
@@ -372,10 +425,16 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
     }
 
     'scc: for scc in &scc_result {
-
         for node in scc {
-            if graph.edges(*node).any(|edge| edge.target().index() < node.index()) {
-                block_ranges.push((scc.iter().min().unwrap().index() as u32, scc.iter().max().unwrap().index() as u32, BlockRangeType::Loop));
+            if graph
+                .edges(*node)
+                .any(|edge| edge.target().index() < node.index())
+            {
+                block_ranges.push((
+                    scc.iter().min().unwrap().index() as u32,
+                    scc.iter().max().unwrap().index() as u32,
+                    BlockRangeType::Loop,
+                ));
                 continue 'scc;
             }
         }
@@ -393,16 +452,16 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
                 //Loop through the forward jumps, find any jumps whose target is contained within the region
                 //between this instruction's index and this instruction's edge's target, then get the
                 //earliest edge source. If there are no intersections, the block begins at the instruction
-                let mut block_start= instruction.bytecode_index;
+                let mut block_start = instruction.bytecode_index;
 
                 loop {
                     let new_start = boundaries
                         .iter()
-                        .filter(|forward_edge|
+                        .filter(|forward_edge| {
                             forward_edge.1 > block_start
                                 && forward_edge.0 < block_start
                                 && forward_edge.1 < target
-                        )
+                        })
                         .map(|forward_edge| forward_edge.0)
                         .min()
                         .unwrap_or(block_start);
@@ -416,7 +475,10 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
 
                 let jump_target;
 
-                if let Some((_, _, header)) = forward_jumps_needing_fixed.iter().find(|(target_, _, _)| *target_ as u32 == target) {
+                if let Some((_, _, header)) = forward_jumps_needing_fixed
+                    .iter()
+                    .find(|(target_, _, _)| *target_ as u32 == target)
+                {
                     jump_target = (*header - 1) as u32;
                 } else {
                     jump_target = target - 1;
@@ -425,7 +487,11 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
                 let range = (block_start, jump_target, BlockRangeType::Block);
                 // console_log!("{}:{} -> {range:?}", instruction.bytecode_index, target);
 
-                if !block_ranges.iter().any(|existing| existing.0 == range.0 && existing.1 == range.1 && existing.2 != BlockRangeType::Loop) {
+                if !block_ranges.iter().any(|existing| {
+                    existing.0 == range.0
+                        && existing.1 == range.1
+                        && existing.2 != BlockRangeType::Loop
+                }) {
                     block_ranges.push(range);
                 }
             }
@@ -433,7 +499,9 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
     }
 
     block_ranges.sort_by(|(a_start, a_end, a_type), (b_start, b_end, b_type)| {
-        a_start.cmp(b_start).then(a_end.cmp(b_end).reverse().then(a_type.cmp(b_type)))
+        a_start
+            .cmp(b_start)
+            .then(a_end.cmp(b_end).reverse().then(a_type.cmp(b_type)))
     });
 
     let mut range_binding = &block_ranges[..];
@@ -454,35 +522,47 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
 
         flag_offsets_unsorted.sort_by(|(_, a), (_, b)| a.cmp(b));
 
-        loop_controllers.insert(loop_header.index() as u32, LoopController {
-            flag_offsets: flag_offsets_unsorted.iter().map(|(target_id, _)| *target_id).collect()
-        });
+        loop_controllers.insert(
+            loop_header.index() as u32,
+            LoopController {
+                flag_offsets: flag_offsets_unsorted
+                    .iter()
+                    .map(|(target_id, _)| *target_id)
+                    .collect(),
+            },
+        );
     }
 
     let mut flagged_jumps = HashMap::new();
 
-    for (target, scc_id, header) in forward_jumps_needing_fixed.into_iter().chain(backward_jumps_needing_fixed) {
-        let flag = *loop_flags.get(
-            &(target, scc_id.index())
-        ).unwrap();
+    for (target, scc_id, header) in forward_jumps_needing_fixed
+        .into_iter()
+        .chain(backward_jumps_needing_fixed)
+    {
+        let flag = *loop_flags.get(&(target, scc_id.index())).unwrap();
 
         flagged_jumps.insert(
             target as u32,
             FlaggedJump {
                 header: header as u32,
                 flag,
-            }
+            },
         );
     }
 
     let locals = analyze_locals(&method_signature, &code.instructions);
 
-    let mut function = Function::new_with_locals_types(
-        locals.wasm_locals.clone().into_iter().chain([ValType::I32, ValType::I64, ValType::Ref(RefType {
-            nullable: true,
-            heap_type: HeapType::Any,
-        }), ValType::I32, ValType::I32])
-    );
+    let mut function =
+        Function::new_with_locals_types(locals.wasm_locals.clone().into_iter().chain([
+            ValType::I32,
+            ValType::I64,
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Any,
+            }),
+            ValType::I32,
+            ValType::I32,
+        ]));
 
     let analyzed_stack = analyze_stack(&code.instructions, class, module.thread);
     let mut splices = HashMap::new();
@@ -500,22 +580,37 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
 
                 let classpath = &**method_ref.class;
 
-                let method_ref_class = class.class_loader.find_class(module.thread, classpath)
+                let method_ref_class = class
+                    .class_loader
+                    .find_class(module.thread, classpath)
                     .unwrap();
 
-                let resolved_method = routine_resolve_method(&module.thread, &method_ref, &method_ref_class).unwrap();
-                let resolved_method_class = class.class_loader.find_class(module.thread, &method_ref.class).unwrap();
+                let resolved_method =
+                    routine_resolve_method(&module.thread, &method_ref, &method_ref_class).unwrap();
+                let resolved_method_class = class
+                    .class_loader
+                    .find_class(module.thread, &method_ref.class)
+                    .unwrap();
 
                 'walk: {
                     if !resolved_method.is_signature_polymorphic(classpath) {
                         //Invokevirtual needs an object, so it shouldn't ever be the first instruction, so this access is fine
-                        let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
+                        let stack_length =
+                            analyzed_stack[instruction.bytecode_index as usize - 1].len();
                         let target_length = stack_length - resolved_method.descriptor.args.len();
 
                         for walk_index in (0..instruction.bytecode_index).rev() {
                             let walk_stack_length = analyzed_stack[walk_index as usize].len();
                             if walk_stack_length == target_length {
-                                assert!(splices.insert(walk_index + 1, SpliceType::Invokevirtual(resolved_method.identifier.clone(), resolved_method_class.clone())).is_none());
+                                assert!(splices
+                                    .insert(
+                                        walk_index + 1,
+                                        SpliceType::Invokevirtual(
+                                            resolved_method.identifier.clone(),
+                                            resolved_method_class.clone()
+                                        )
+                                    )
+                                    .is_none());
                                 break 'walk;
                             }
                         }
@@ -526,21 +621,21 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
                     panic!("Couldn't find splice target for Invokevirtual");
                 }
             }
-            Bytecode::Bastore => {
-                'walk: {
-                    let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
-                    let target_length = stack_length - 2;
+            Bytecode::Bastore => 'walk: {
+                let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
+                let target_length = stack_length - 2;
 
-                    for walk_index in (0..instruction.bytecode_index).rev() {
-                        let walk_stack_length = analyzed_stack[walk_index as usize].len();
-                        if walk_stack_length == target_length {
-                            assert!(splices.insert(walk_index + 1, SpliceType::Arraystore(StorageType::I8)).is_none());
-                            break 'walk;
-                        }
+                for walk_index in (0..instruction.bytecode_index).rev() {
+                    let walk_stack_length = analyzed_stack[walk_index as usize].len();
+                    if walk_stack_length == target_length {
+                        assert!(splices
+                            .insert(walk_index + 1, SpliceType::Arraystore(StorageType::I8))
+                            .is_none());
+                        break 'walk;
                     }
-
-                    panic!("Couldn't find splice target for Invokevirtual");
                 }
+
+                panic!("Couldn't find splice target for Invokevirtual");
             }
             _ => {}
         }
@@ -556,7 +651,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
             i64_accumulator: max_local + 1,
             ref_accumulator: max_local + 2,
             cfg_flag: max_local + 3,
-            dynamic_dispatch_accumulator: max_local + 4
+            dynamic_dispatch_accumulator: max_local + 4,
         },
         method_signature,
         flagged_jumps,
@@ -574,17 +669,22 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
         function.instruction(&Instr::LocalSet(translating.locals.cfg_flag));
     }
 
-    fold(&code.instructions[..], &mut range_binding, &mut function, 0, &mut translating);
+    fold(
+        &code.instructions[..],
+        &mut range_binding,
+        &mut function,
+        0,
+        &mut translating,
+    );
 
     function.instruction(&Instr::End);
 
     Ok(function)
-
 }
 
 #[derive(Debug)]
 struct LoopController {
-    flag_offsets: Vec<u32>
+    flag_offsets: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -594,18 +694,18 @@ struct MetaLocals {
     i64_accumulator: u32,
     ref_accumulator: u32,
     dynamic_dispatch_accumulator: u32,
-    cfg_flag: u32
+    cfg_flag: u32,
 }
 
 #[derive(Debug)]
 struct FlaggedJump {
     header: u32,
-    flag: u32
+    flag: u32,
 }
 
 struct JvmFuncs {
     init_static: u32,
-    _jit_routine_select_method: u32
+    _jit_routine_select_method: u32,
 }
 
 struct ModuleTranslation<'a> {
@@ -620,15 +720,18 @@ struct ModuleTranslation<'a> {
     object_recs: &'a mut HashMap<String, u32>,
     jvm: &'a JVM,
     env: &'a WasmEnvironment,
-    thread: &'a mut Thread
+    thread: &'a mut Thread,
 }
 
 impl<'a> ModuleTranslation<'a> {
-
-    pub fn get_method_descriptor_id(&mut self, method_descriptor: &MethodDescriptor, is_static: bool) -> u32 {
+    pub fn get_method_descriptor_id(
+        &mut self,
+        method_descriptor: &MethodDescriptor,
+        is_static: bool,
+    ) -> u32 {
         match self.function_signatures.get(method_descriptor) {
             None => {}
-            Some(id) => return *id
+            Some(id) => return *id,
         }
 
         let sig = MethodSignature::new_from_descriptor(method_descriptor, is_static);
@@ -636,12 +739,12 @@ impl<'a> ModuleTranslation<'a> {
         let func_id = self.type_section.len();
         self.type_section.function(sig.params, sig.return_type);
 
-        self.function_signatures.insert(method_descriptor.clone(), func_id);
+        self.function_signatures
+            .insert(method_descriptor.clone(), func_id);
         func_id
     }
 
     pub fn get_object_type(&mut self, class: &Class) -> u32 {
-
         if let Some(id) = self.object_recs.get(&*class.this_class) {
             return *id;
         }
@@ -655,13 +758,12 @@ impl<'a> ModuleTranslation<'a> {
 
         id
     }
-
 }
 
 #[derive(Debug)]
 enum SpliceType {
     Invokevirtual(Arc<String>, Arc<Class>),
-    Arraystore(StorageType)
+    Arraystore(StorageType),
 }
 
 // #[derive(Debug)]
@@ -677,13 +779,21 @@ struct MethodTranslation<'method, 'module: 'method> {
     module: &'method mut ModuleTranslation<'module>,
     local_map: LocalMap,
     analyzed_stack: Vec<Vec<OperandType>>,
-    splices: HashMap<u32, SpliceType>
+    splices: HashMap<u32, SpliceType>,
 }
 
 impl<'method, 'module: 'method> MethodTranslation<'method, 'module> {
-
-    pub fn branch(&self, from: u32, offset: i32, function: &mut Function, callback: fn(u32) -> Instr<'method>) {
-        let to = *self.byte_to_index_map.get(&((from as i32 + offset) as u32)).unwrap();
+    pub fn branch(
+        &self,
+        from: u32,
+        offset: i32,
+        function: &mut Function,
+        callback: fn(u32) -> Instr<'method>,
+    ) {
+        let to = *self
+            .byte_to_index_map
+            .get(&((from as i32 + offset) as u32))
+            .unwrap();
         let from = *self.byte_to_index_map.get(&from).unwrap();
 
         let target = if let Some(flagged) = self.flagged_jumps.get(&to) {
@@ -696,88 +806,113 @@ impl<'method, 'module: 'method> MethodTranslation<'method, 'module> {
         };
 
         let br = self.br_offset_absolute(from, target);
-        function.instruction(
-            &callback(br)
-        );
+        function.instruction(&callback(br));
     }
 
     pub fn br_offset_absolute(&self, from: u32, to: u32) -> u32 {
         if from < to {
-            (self.block_ranges.iter().filter(|range| {
-                from <= range.1 && to > range.1 && range.0 <= from
-            }).count() as u32).checked_sub(1).unwrap()
+            (self
+                .block_ranges
+                .iter()
+                .filter(|range| from <= range.1 && to > range.1 && range.0 <= from)
+                .count() as u32)
+                .checked_sub(1)
+                .unwrap()
         } else {
-            let (loop_block, _) = self.block_ranges.iter().enumerate()
+            let (loop_block, _) = self
+                .block_ranges
+                .iter()
+                .enumerate()
                 .filter(|(_, block)| block.0 == to && block.2 == BlockRangeType::Loop)
                 .last()
                 .unwrap();
 
-            self.block_ranges.iter().enumerate().filter(|(index, range)| {
-                range.0 <= from && range.0 >= to && range.1 >= from && *index > loop_block
-            }).count() as u32
+            self.block_ranges
+                .iter()
+                .enumerate()
+                .filter(|(index, range)| {
+                    range.0 <= from && range.0 >= to && range.1 >= from && *index > loop_block
+                })
+                .count() as u32
         }
     }
-
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockRangeType {
     Block,
-    Loop
+    Loop,
 }
 
 #[derive(Debug, Clone)]
 enum Capsule<'a> {
     Java(Bytecode),
-    FlaggedControlFlow {
-        bytecode: Bytecode,
-        flag: u32
-    },
+    FlaggedControlFlow { bytecode: Bytecode, flag: u32 },
     WASM(Instr<'a>),
-    SetFlag(u32)
+    SetFlag(u32),
 }
 
 fn get_class_recursive_member_field_count(class: &Class) -> u32 {
-    let field_id_offset = class.parents().iter().map(
-        |parent| parent.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
-    ).flatten().count() as u32 + 2;
+    let field_id_offset = class
+        .parents()
+        .iter()
+        .map(|parent| {
+            parent
+                .fields
+                .iter()
+                .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
+        })
+        .flatten()
+        .count() as u32
+        + 2;
 
-    class.fields.iter()
+    class
+        .fields
+        .iter()
         .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
-        .count() as u32 + field_id_offset
+        .count() as u32
+        + field_id_offset
 }
 
-fn translate_instructions<'method, 'module>(instruction: &Instruction, function: &mut Function, t: &mut MethodTranslation<'method, 'module>) {
-
+fn translate_instructions<'method, 'module>(
+    instruction: &Instruction,
+    function: &mut Function,
+    t: &mut MethodTranslation<'method, 'module>,
+) {
     // match instruction.bytecode {
     //     _ => unimplemented!("{:?} unimplemented in JIT compiler", instruction.bytecode)
     // }
 
     macro_rules! i {
-        ($i:expr) => { function.instruction(&$i); }
+        ($i:expr) => {
+            function.instruction(&$i);
+        };
     }
 
     if let Some(controller) = t.loop_controllers.get(&instruction.bytecode_index) {
-
         i!(Instr::Block(BlockType::Empty));
         i!(Instr::LocalGet(t.locals.cfg_flag));
         i!(Instr::I32Const(-1));
         i!(Instr::LocalSet(t.locals.cfg_flag));
 
-        let table: Vec<u32> = controller.flag_offsets.iter().map(|target| {
-            t.br_offset_absolute(instruction.bytecode_index, *target) + 1
-        }).collect();
+        let table: Vec<u32> = controller
+            .flag_offsets
+            .iter()
+            .map(|target| t.br_offset_absolute(instruction.bytecode_index, *target) + 1)
+            .collect();
 
         i!(Instr::BrTable(Cow::Owned(table), 0));
         i!(Instr::End);
-
     }
 
     if let Some(splice) = t.splices.get(&instruction.bytecode_index) {
-
         match splice {
             SpliceType::Invokevirtual(method, class) => {
-                let jlo = t.module.jvm.fetch_linked_class("java/lang/Object", 0).unwrap();
+                let jlo = t
+                    .module
+                    .jvm
+                    .fetch_linked_class("java/lang/Object", 0)
+                    .unwrap();
                 let object_ty = t.module.get_object_type(&jlo);
 
                 i!(Instr::LocalTee(t.locals.ref_accumulator));
@@ -787,19 +922,27 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                     field_index: 0
                 });
 
-                let method_id = class.methods.iter().position(|c_method| c_method.get_identifier() == &**method).unwrap();
+                let method_id = class
+                    .methods
+                    .iter()
+                    .position(|c_method| c_method.get_identifier() == &**method)
+                    .unwrap();
 
                 i!(Instr::LocalGet(t.method_signature.thread_local));
                 i!(Instr::I32Const(method_id as i32));
                 i!(Instr::I32Const(&**class as *const Class as i32));
-                i!(Instr::Call(t.module.jvm_functions._jit_routine_select_method));
+                i!(Instr::Call(
+                    t.module.jvm_functions._jit_routine_select_method
+                ));
                 i!(Instr::LocalSet(t.locals.dynamic_dispatch_accumulator));
                 i!(Instr::LocalGet(t.locals.ref_accumulator));
             }
             SpliceType::Arraystore(storage_type) => {
                 let &array_type = t.module.array_storage_types.get(&storage_type).unwrap();
-                
-                i!(Instr::RefCastNullable(HeapType::Concrete(t.module.array_object_type)));
+
+                i!(Instr::RefCastNullable(HeapType::Concrete(
+                    t.module.array_object_type
+                )));
                 i!(Instr::StructGet {
                     struct_type_index: t.module.array_object_type,
                     field_index: 2
@@ -807,31 +950,42 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 i!(Instr::RefCastNullable(HeapType::Concrete(array_type)));
             }
         }
-
     }
 
     match instruction.bytecode {
         Bytecode::Goto(offset) => {
-            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::Br(br));
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::Br(br)
+            });
         }
         Bytecode::Ifne(offset) => {
-            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
         }
         Bytecode::Ifeq(offset) => {
             i!(Instr::I32Eqz);
-            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
         }
         Bytecode::If_icmpge(offset) => {
             i!(Instr::I32GeS);
-            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
         }
         Bytecode::If_icmple(offset) => {
             i!(Instr::I32LeS);
-            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
         }
         Bytecode::If_icmpne(offset) => {
             i!(Instr::I32Ne);
-            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
         }
         Bytecode::Irem => {
             i!(Instr::I32RemS);
@@ -846,10 +1000,14 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             i!(Instr::I32Mul);
         }
         Bytecode::Iinc(index, amount) => {
-            i!(Instr::LocalGet(t.local_map.get(index as u32, LocalType::I32)));
+            i!(Instr::LocalGet(
+                t.local_map.get(index as u32, LocalType::I32)
+            ));
             i!(Instr::I32Const(amount as i32));
             i!(Instr::I32Add);
-            i!(Instr::LocalSet(t.local_map.get(index as u32, LocalType::I32)));
+            i!(Instr::LocalSet(
+                t.local_map.get(index as u32, LocalType::I32)
+            ));
         }
         Bytecode::Dup => {
             let operand_type = &t.analyzed_stack[instruction.bytecode_index as usize - 1];
@@ -857,14 +1015,15 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             let accumulator = match operand_type.last().unwrap() {
                 Ref => t.locals.ref_accumulator,
                 Class1 => t.locals.i32_accumulator,
-                Class2 => t.locals.i64_accumulator
+                Class2 => t.locals.i64_accumulator,
             };
 
             i!(Instr::LocalTee(accumulator));
             i!(Instr::LocalGet(accumulator));
         }
         Bytecode::Invokevirtual(constant_index) => {
-            let method_ref = t.class
+            let method_ref = t
+                .class
                 .constant_pool
                 .constants
                 .get(&constant_index)
@@ -874,11 +1033,17 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
 
             let classpath = &**method_ref.class;
 
-            let method_ref_class = t.class.class_loader.find_class(t.module.thread, classpath)
+            let method_ref_class = t
+                .class
+                .class_loader
+                .find_class(t.module.thread, classpath)
                 .unwrap();
 
-            let resolved_method = routine_resolve_method(&t.module.thread, &method_ref, &method_ref_class).unwrap();
-            let method_ty = t.module.get_method_descriptor_id(&resolved_method.descriptor, false);
+            let resolved_method =
+                routine_resolve_method(&t.module.thread, &method_ref, &method_ref_class).unwrap();
+            let method_ty = t
+                .module
+                .get_method_descriptor_id(&resolved_method.descriptor, false);
 
             i!(Instr::LocalGet(t.method_signature.thread_local));
             i!(Instr::LocalGet(t.locals.dynamic_dispatch_accumulator));
@@ -888,7 +1053,8 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             });
         }
         Bytecode::Invokespecial(constant_index) => {
-            let ref_ = t.class
+            let ref_ = t
+                .class
                 .constant_pool
                 .constants
                 .get(&constant_index)
@@ -897,7 +1063,11 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 .unwrap();
 
             let classpath = &ref_.class;
-            let target_class = t.class.class_loader.find_class(t.module.thread, classpath).unwrap();
+            let target_class = t
+                .class
+                .class_loader
+                .find_class(t.module.thread, classpath)
+                .unwrap();
 
             let method = target_class.get_method(&ref_.name_and_type).unwrap();
 
@@ -927,20 +1097,23 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 todo!()
             }
 
-            let ty = t.module.get_method_descriptor_id(&method.descriptor, method.access_flags.contains(AccessFlags::STATIC));
+            let ty = t.module.get_method_descriptor_id(
+                &method.descriptor,
+                method.access_flags.contains(AccessFlags::STATIC),
+            );
 
             if method.access_flags.contains(AccessFlags::NATIVE) {
                 todo!()
             }
 
-            let func_id = t.module.env.get_linked_function_ptr(&c, method.get_identifier());
+            let func_id = t
+                .module
+                .env
+                .get_linked_function_ptr(&c, method.get_identifier());
 
             i!(Instr::LocalGet(t.method_signature.thread_local));
             i!(Instr::I32Const(func_id as i32));
-            i!(Instr::CallIndirect {
-                ty,
-                table: 0,
-            });
+            i!(Instr::CallIndirect { ty, table: 0 });
         }
         Bytecode::Newarray(array_type) => {
             let (storage_type, classpath) = match array_type {
@@ -951,7 +1124,7 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 ArrayType::Byte => (StorageType::I8, "[B"),
                 ArrayType::Short => (StorageType::I16, "[S"),
                 ArrayType::Int => (StorageType::Val(ValType::I32), "[I"),
-                ArrayType::Long => (StorageType::Val(ValType::I64), "[J")
+                ArrayType::Long => (StorageType::Val(ValType::I64), "[J"),
             };
 
             let array_type_index = t.module.array_storage_types.get(&storage_type).unwrap();
@@ -962,12 +1135,19 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
 
             i!(Instr::I32Const(&*array_class as *const Class as i32));
 
-            let env = (*t.module.jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
+            let env = (*t.module.jvm.environment)
+                .to_any()
+                .downcast_ref::<WasmEnvironment>()
+                .unwrap();
             let object_id_ptr = env.object_id.as_ptr();
 
             i!(Instr::I32Const(object_id_ptr as i32));
             i!(Instr::I64Const(1));
-            i!(Instr::I64AtomicRmwAdd(MemArg {offset: 0,align: 3,memory_index: 0}));
+            i!(Instr::I64AtomicRmwAdd(MemArg {
+                offset: 0,
+                align: 3,
+                memory_index: 0
+            }));
 
             i!(Instr::LocalGet(t.locals.ref_accumulator));
             i!(Instr::RefCastNonNull(HeapType::Array));
@@ -976,7 +1156,7 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
         }
         Bytecode::Baload => {
             let byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
-            
+
             i!(Instr::LocalGet(t.locals.i32_accumulator));
             i!(Instr::ArrayGet(*byte_array));
         }
@@ -986,11 +1166,17 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             i!(Instr::ArraySet(byte_array));
         }
         Bytecode::New(constant_index) => {
-            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+            let constant = t
+                .class
+                .constant_pool
+                .constants
+                .get(&constant_index)
+                .unwrap();
 
             if let Constant::Class { path, .. } = constant {
-
-                let target_class = t.module.jvm
+                let target_class = t
+                    .module
+                    .jvm
                     .retrieve_class(path, &*t.class.class_loader, t.module.thread)
                     .unwrap();
 
@@ -1017,22 +1203,41 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             }
         }
         Bytecode::Putfield(constant_index) => {
-            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+            let constant = t
+                .class
+                .constant_pool
+                .constants
+                .get(&constant_index)
+                .unwrap();
 
             let field_ref = constant.as_ref().unwrap();
 
             let classpath = &field_ref.class;
-            let target_class = t.module.jvm
+            let target_class = t
+                .module
+                .jvm
                 .retrieve_class(classpath, &*t.class.class_loader, t.module.thread)
                 .unwrap();
 
-            let (field, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+            let (field, field_class) =
+                routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
-            let field_id_offset = field_class.parents().iter().map(
-                |parent| parent.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
-            ).flatten().count() as u32 + 2;
+            let field_id_offset = field_class
+                .parents()
+                .iter()
+                .map(|parent| {
+                    parent
+                        .fields
+                        .iter()
+                        .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
+                })
+                .flatten()
+                .count() as u32
+                + 2;
 
-            let (field_id, _) = field_class.fields.iter()
+            let (field_id, _) = field_class
+                .fields
+                .iter()
                 .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
                 .enumerate()
                 .find(|(_, test_field)| test_field.name == field.name)
@@ -1041,11 +1246,10 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             let struct_type = t.module.get_object_type(field_class);
 
             let accumulator = match &field.descriptor {
-                FieldType::Array { .. }
-                | FieldType::Class(_) => t.locals.ref_accumulator,
+                FieldType::Array { .. } | FieldType::Class(_) => t.locals.ref_accumulator,
                 FieldType::Double => todo!(),
                 FieldType::Long => t.locals.i64_accumulator,
-                _ => t.locals.i32_accumulator
+                _ => t.locals.i32_accumulator,
             };
 
             i!(Instr::LocalSet(accumulator));
@@ -1058,22 +1262,41 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             });
         }
         Bytecode::Getfield(constant_index) => {
-            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+            let constant = t
+                .class
+                .constant_pool
+                .constants
+                .get(&constant_index)
+                .unwrap();
 
             let field_ref = constant.as_ref().unwrap();
 
             let classpath = &field_ref.class;
-            let target_class = t.module.jvm
+            let target_class = t
+                .module
+                .jvm
                 .retrieve_class(classpath, &*t.class.class_loader, t.module.thread)
                 .unwrap();
 
-            let (field, field_class) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+            let (field, field_class) =
+                routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
-            let field_id_offset = field_class.parents().iter().map(
-                |parent| parent.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
-            ).flatten().count() as u32 + 2;
+            let field_id_offset = field_class
+                .parents()
+                .iter()
+                .map(|parent| {
+                    parent
+                        .fields
+                        .iter()
+                        .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
+                })
+                .flatten()
+                .count() as u32
+                + 2;
 
-            let (field_id, _) = field_class.fields.iter()
+            let (field_id, _) = field_class
+                .fields
+                .iter()
                 .filter(|field| !field.access_flags.contains(AccessFlags::STATIC))
                 .enumerate()
                 .find(|(_, test_field)| test_field.name == field.name)
@@ -1089,7 +1312,8 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             });
         }
         Bytecode::Invokestatic(constant_index) => {
-            let ref_ = t.class
+            let ref_ = t
+                .class
                 .constant_pool
                 .constants
                 .get(&constant_index)
@@ -1097,7 +1321,11 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 .as_ref()
                 .unwrap();
 
-            let method_class = t.class.class_loader.find_class(t.module.thread, &ref_.class).unwrap();
+            let method_class = t
+                .class
+                .class_loader
+                .find_class(t.module.thread, &ref_.class)
+                .unwrap();
 
             if !t.class.is_initialized() {
                 i!(Instr::I32Const(t.class as *const Class as i32));
@@ -1112,17 +1340,18 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 todo!()
             }
 
-            let func_id = t.module.env.get_linked_function_ptr(&method_class, method.get_identifier());
+            let func_id = t
+                .module
+                .env
+                .get_linked_function_ptr(&method_class, method.get_identifier());
 
             i!(Instr::LocalGet(t.method_signature.thread_local));
             i!(Instr::I32Const(func_id as i32));
-            i!(Instr::CallIndirect {
-                ty,
-                table: 0,
-            });
+            i!(Instr::CallIndirect { ty, table: 0 });
         }
         Bytecode::Ldc(constant_index) => {
-            let constant = t.class
+            let constant = t
+                .class
                 .constant_pool
                 .constants
                 .get(&(constant_index as u16))
@@ -1132,21 +1361,29 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 Constant::Integer(int) => {
                     i!(Instr::I32Const(*int));
                 }
-                Constant::Class {
-                    path, depth
-                } => {
+                Constant::Class { path, depth } => {
                     if *depth == 0 {
-                        let class = t.class.class_loader.find_class(t.module.thread, path).unwrap();
+                        let class = t
+                            .class
+                            .class_loader
+                            .find_class(t.module.thread, path)
+                            .unwrap();
                         let ptr = class.class_instance.get().unwrap().ptr;
 
                         let table_index = ptr as u32;
 
                         i!(Instr::I32Const(table_index as i32));
                         i!(Instr::TableGet(1));
-
                     } else {
-                        let class = t.class.class_loader.find_class(t.module.thread, path).unwrap();
-                        let class = t.module.jvm.find_array_class(t.module.thread, class, *depth);
+                        let class = t
+                            .class
+                            .class_loader
+                            .find_class(t.module.thread, path)
+                            .unwrap();
+                        let class = t
+                            .module
+                            .jvm
+                            .find_array_class(t.module.thread, class, *depth);
                         let object = class.class_instance.get().unwrap().ptr as u32;
 
                         i!(Instr::I32Const(object as i32));
@@ -1167,25 +1404,25 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
         Bytecode::Iconst_n_m1(int) => {
             i!(Instr::I32Const(int as i32));
         }
-        Bytecode::Sipush(short) => { i!(Instr::I32Const(short as i32)); },
-        Bytecode::Bipush(byte) => { i!(Instr::I32Const(byte as i32)); },
-        Bytecode::Istore(index)
-        | Bytecode::Istore_n(index) => {
+        Bytecode::Sipush(short) => {
+            i!(Instr::I32Const(short as i32));
+        }
+        Bytecode::Bipush(byte) => {
+            i!(Instr::I32Const(byte as i32));
+        }
+        Bytecode::Istore(index) | Bytecode::Istore_n(index) => {
             let local = t.local_map.get(index as u32, LocalType::I32);
             i!(Instr::LocalSet(local));
         }
-        Bytecode::Astore(index)
-        | Bytecode::Astore_n(index) => {
+        Bytecode::Astore(index) | Bytecode::Astore_n(index) => {
             let local = t.local_map.get(index as u32, LocalType::Ref);
             i!(Instr::LocalSet(local));
         }
-        Bytecode::Iload(index)
-        | Bytecode::Iload_n(index) => {
+        Bytecode::Iload(index) | Bytecode::Iload_n(index) => {
             let local = t.local_map.get(index as u32, LocalType::I32);
             i!(Instr::LocalGet(local));
         }
-        Bytecode::Aload(index)
-        | Bytecode::Aload_n(index) => {
+        Bytecode::Aload(index) | Bytecode::Aload_n(index) => {
             let local = t.local_map.get(index as u32, LocalType::Ref);
             i!(Instr::LocalGet(local));
         }
@@ -1196,23 +1433,23 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
             i!(Instr::Return);
         }
         // _ => { i!(Instr::Nop); }
-        _ => unimplemented!("{:?}", instruction.bytecode)
+        _ => unimplemented!("{:?}", instruction.bytecode),
     }
-
 }
 
 #[derive(Debug)]
 struct LocalMap {
     java_to_wasm_locals: HashMap<(u32, LocalType), u32>,
-    wasm_locals: Vec<ValType>
+    wasm_locals: Vec<ValType>,
 }
 
 impl LocalMap {
-
     fn get(&self, java_local: u32, local_type: LocalType) -> u32 {
-        self.java_to_wasm_locals.get(&(java_local, local_type)).copied().unwrap()
+        self.java_to_wasm_locals
+            .get(&(java_local, local_type))
+            .copied()
+            .unwrap()
     }
-
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -1221,7 +1458,7 @@ enum LocalType {
     I64,
     F32,
     F64,
-    Ref
+    Ref,
 }
 
 fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instruction]) -> LocalMap {
@@ -1236,56 +1473,76 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
             ValType::F32 => LocalType::F32,
             ValType::F64 => LocalType::F64,
             ValType::Ref(_) => LocalType::Ref,
-            _ => unreachable!()
+            _ => unreachable!(),
         };
         locals.insert((index as u32, local_type), arg);
     }
 
     for instruction in instructions {
         match instruction.bytecode {
-            Bytecode::Iload(index) | Bytecode::Iload_n(index)
-            | Bytecode::Istore(index) | Bytecode::Istore_n(index) => {
-                if locals.iter().any(|((e_index, local), _)| *e_index == index as u32 && *local != LocalType::I32) {
+            Bytecode::Iload(index)
+            | Bytecode::Iload_n(index)
+            | Bytecode::Istore(index)
+            | Bytecode::Istore_n(index) => {
+                if locals.iter().any(|((e_index, local), _)| {
+                    *e_index == index as u32 && *local != LocalType::I32
+                }) {
                     rewrites.insert((index as u32, LocalType::I32));
                 } else {
                     locals.insert((index as u32, LocalType::I32), ValType::I32);
                 }
-            },
+            }
             Bytecode::Lload(index) | Bytecode::Lload_n(index) => {
-                if locals.iter().any(|((e_index, local), _)| *e_index == index as u32 && *local != LocalType::I64) {
+                if locals.iter().any(|((e_index, local), _)| {
+                    *e_index == index as u32 && *local != LocalType::I64
+                }) {
                     rewrites.insert((index as u32, LocalType::I64));
                 } else {
                     locals.insert((index as u32, LocalType::I64), ValType::I64);
                 }
-            },
-            Bytecode::Aload(index) | Bytecode::Aload_n(index)
-            | Bytecode::Astore(index) | Bytecode::Astore_n(index) => {
-                if locals.iter().any(|((e_index, local), _)| *e_index == index as u32 && *local != LocalType::Ref) {
+            }
+            Bytecode::Aload(index)
+            | Bytecode::Aload_n(index)
+            | Bytecode::Astore(index)
+            | Bytecode::Astore_n(index) => {
+                if locals.iter().any(|((e_index, local), _)| {
+                    *e_index == index as u32 && *local != LocalType::Ref
+                }) {
                     rewrites.insert((index as u32, LocalType::Ref));
                 } else {
-                    locals.insert((index as u32, LocalType::Ref), ValType::Ref(RefType { nullable: true, heap_type: HeapType::Any }));
+                    locals.insert(
+                        (index as u32, LocalType::Ref),
+                        ValType::Ref(RefType {
+                            nullable: true,
+                            heap_type: HeapType::Any,
+                        }),
+                    );
                 }
-            },
+            }
             Bytecode::Fstore(index) | Bytecode::Fstore_n(index) => {
-                if locals.iter().any(|((e_index, local), _)| *e_index == index as u32 && *local != LocalType::F32) {
+                if locals.iter().any(|((e_index, local), _)| {
+                    *e_index == index as u32 && *local != LocalType::F32
+                }) {
                     rewrites.insert((index as u32, LocalType::F32));
                 } else {
                     locals.insert((index as u32, LocalType::F32), ValType::F32);
                 }
-            },
+            }
             Bytecode::Dstore(index) | Bytecode::Dstore_n(index) => {
-                if locals.iter().any(|((e_index, local), _)| *e_index == index as u32 && *local != LocalType::F64) {
+                if locals.iter().any(|((e_index, local), _)| {
+                    *e_index == index as u32 && *local != LocalType::F64
+                }) {
                     rewrites.insert((index as u32, LocalType::F64));
                 } else {
                     locals.insert((index as u32, LocalType::F64), ValType::F64);
                 }
-            },
+            }
             _ => {}
         }
     }
 
     let mut java_locals: Vec<((u32, LocalType), ValType)> = locals.into_iter().collect();
-    java_locals.sort_by_key(|local| local.0.0);
+    java_locals.sort_by_key(|local| local.0 .0);
 
     let mut map = HashMap::new();
 
@@ -1296,7 +1553,10 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
     for (java_local, _) in java_locals.iter() {
         if java_local.0 >= thread_local_index as u32 {
             //Dealing with a local that isn't part of the original method descriptor
-            map.insert(*java_local, method_signature.params.len() as u32 + non_argument_local_index);
+            map.insert(
+                *java_local,
+                method_signature.params.len() as u32 + non_argument_local_index,
+            );
             non_argument_local_index += 1;
         } else {
             //A local from the method signature
@@ -1316,24 +1576,34 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
             LocalType::I64 => ValType::I64,
             LocalType::F32 => ValType::F32,
             LocalType::F64 => ValType::F64,
-            LocalType::Ref => ValType::Ref(RefType { nullable: true, heap_type: HeapType::Any })
+            LocalType::Ref => ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Any,
+            }),
         });
         rewrite_index += 1;
     }
 
-    let wasm_locals = java_locals.iter().filter(|((index, _), _)| *index >= thread_local_index as u32)
+    let wasm_locals = java_locals
+        .iter()
+        .filter(|((index, _), _)| *index >= thread_local_index as u32)
         .map(|(_, val_type)| *val_type)
         .chain(rewritten)
         .collect();
 
     LocalMap {
         java_to_wasm_locals: map,
-        wasm_locals
+        wasm_locals,
     }
 }
 
-fn fold<'method, 'module: 'method, 'a, 'b: 'a>(instructions: &'method [Instruction], ranges: &'a mut &'b [(u32, u32, BlockRangeType)], function: &mut Function, absolute_offset: usize, translating: &mut MethodTranslation<'method, 'module>) -> usize {
-
+fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
+    instructions: &'method [Instruction],
+    ranges: &'a mut &'b [(u32, u32, BlockRangeType)],
+    function: &mut Function,
+    absolute_offset: usize,
+    translating: &mut MethodTranslation<'method, 'module>,
+) -> usize {
     if instructions.len() == 0 {
         return 0;
     }
@@ -1360,13 +1630,17 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(instructions: &'method [Instructi
                 }
 
                 range
-            },
+            }
         };
 
         let instrs_to_write = next_block_start as usize - absolute_offset - consumed_instructions;
 
         for index in 0..instrs_to_write {
-            translate_instructions(&instructions[index + consumed_instructions], function, translating);
+            translate_instructions(
+                &instructions[index + consumed_instructions],
+                function,
+                translating,
+            );
         }
 
         // console_log!("written: {instrs_to_write}, next_block_start: {next_block_start}, absolute: {absolute_offset}, n-a: {}, consumed: {consumed_instructions}", next_block_start as usize - absolute_offset);
@@ -1375,54 +1649,75 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(instructions: &'method [Instructi
 
         match block_type {
             BlockRangeType::Block => {
-                 let block_type = if let Some(instr) = instructions.get(next_block_start as usize - absolute_offset).map(|instr| &instr.bytecode) {
+                let block_type = if let Some(instr) = instructions
+                    .get(next_block_start as usize - absolute_offset)
+                    .map(|instr| &instr.bytecode)
+                {
                     match instr {
-                        Bytecode::Ifeq(_) | Bytecode::Ifne(_)
-                        | Bytecode::Ifge(_) | Bytecode::Ifgt(_)
-                        | Bytecode::Ifle(_) | Bytecode::Iflt(_) => BlockType::FunctionType(translating.module.i32_in_func_type),
-                        Bytecode::If_icmpge(_) | Bytecode::If_icmpeq(_)
-                        | Bytecode::If_icmpgt(_) | Bytecode::If_icmple(_)
-                        | Bytecode::If_icmpne(_) | Bytecode::If_icmplt(_) => BlockType::FunctionType(translating.module._2_i32_in_func_type),
-                        Bytecode::If_acmpne(_) | Bytecode::If_acmpeq(_) => BlockType::FunctionType(translating.module.ref_in_func_type),
-                        _ => BlockType::Empty
+                        Bytecode::Ifeq(_)
+                        | Bytecode::Ifne(_)
+                        | Bytecode::Ifge(_)
+                        | Bytecode::Ifgt(_)
+                        | Bytecode::Ifle(_)
+                        | Bytecode::Iflt(_) => {
+                            BlockType::FunctionType(translating.module.i32_in_func_type)
+                        }
+                        Bytecode::If_icmpge(_)
+                        | Bytecode::If_icmpeq(_)
+                        | Bytecode::If_icmpgt(_)
+                        | Bytecode::If_icmple(_)
+                        | Bytecode::If_icmpne(_)
+                        | Bytecode::If_icmplt(_) => {
+                            BlockType::FunctionType(translating.module._2_i32_in_func_type)
+                        }
+                        Bytecode::If_acmpne(_) | Bytecode::If_acmpeq(_) => {
+                            BlockType::FunctionType(translating.module.ref_in_func_type)
+                        }
+                        _ => BlockType::Empty,
                     }
-                } else { BlockType::Empty };
+                } else {
+                    BlockType::Empty
+                };
 
                 function.instruction(&Instr::Block(block_type));
-            },
-            BlockRangeType::Loop => { function.instruction(&Instr::Loop(BlockType::Empty)); }
+            }
+            BlockRangeType::Loop => {
+                function.instruction(&Instr::Loop(BlockType::Empty));
+            }
         }
 
         *ranges = &ranges[1..];
 
         consumed_instructions += fold(
-            &instructions[next_block_start as usize - absolute_offset..next_block_end as usize - absolute_offset + 1],
+            &instructions[next_block_start as usize - absolute_offset
+                ..next_block_end as usize - absolute_offset + 1],
             ranges,
             function,
             next_block_start as usize,
-            translating
+            translating,
         );
 
         function.instruction(&Instr::End);
     }
-
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 enum OperandType {
     Ref,
     Class1, //anything 32-bits or smaller
-    Class2 //longs and doubles
+    Class2, //longs and doubles
 }
 
-fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -> Vec<Vec<OperandType>> {
-
+fn analyze_stack(
+    bytecode: &[Instruction],
+    class: &Class,
+    thread: &mut Thread,
+) -> Vec<Vec<OperandType>> {
     let mut stack_size = 0isize;
     let mut stack = vec![];
     let mut out = vec![];
 
     bytecode.into_iter().for_each(|instr| {
-
         let (change, res): (isize, &[OperandType]) = match &instr.bytecode {
             Bytecode::Aaload => (-2, &[Ref]),
             Bytecode::Aastore => (-3, &[]),
@@ -1460,9 +1755,7 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
             Bytecode::Dstore(_) => (-1, &[]),
             Bytecode::Dstore_n(_) => (-1, &[]),
             Bytecode::Dsub => (-2, &[Class2]),
-            Bytecode::Dup => {
-                (-2, &[*stack.last().unwrap(), *stack.last().unwrap()])
-            },
+            Bytecode::Dup => (-2, &[*stack.last().unwrap(), *stack.last().unwrap()]),
             Bytecode::Dup_x2 => todo!(),
             Bytecode::Dup2 => todo!(),
             Bytecode::Dup2_x1 => todo!(),
@@ -1493,17 +1786,16 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
 
                 let classpath = &field_ref.class;
                 let target_class = class.class_loader.find_class(thread, classpath).unwrap();
-                let (field, _) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+                let (field, _) =
+                    routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
                 let res = match field.descriptor {
-                    FieldType::Array { .. }
-                    | FieldType::Class(_) => &[Ref],
-                    FieldType::Double
-                    | FieldType::Long => &[Class2],
-                    _ => &[Class1]
+                    FieldType::Array { .. } | FieldType::Class(_) => &[Ref],
+                    FieldType::Double | FieldType::Long => &[Class2],
+                    _ => &[Class1],
                 };
 
                 (-1, &res[..])
-            },
+            }
             Bytecode::Getstatic(constant_index) => {
                 let constant = class.constant_pool.constants.get(constant_index).unwrap();
 
@@ -1511,17 +1803,16 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
                 let classpath = &field_ref.class;
                 let target_class = class.class_loader.find_class(thread, classpath).unwrap();
 
-                let (field, _) = routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+                let (field, _) =
+                    routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
                 let res = match field.descriptor {
-                    FieldType::Array { .. }
-                    | FieldType::Class(_) => &[Ref],
-                    FieldType::Double
-                    | FieldType::Long => &[Class2],
-                    _ => &[Class1]
+                    FieldType::Array { .. } | FieldType::Class(_) => &[Ref],
+                    FieldType::Double | FieldType::Long => &[Class2],
+                    _ => &[Class1],
                 };
 
                 (0, &res[..])
-            },
+            }
             Bytecode::I2b => (-1, &[Class1]),
             Bytecode::I2c => (-1, &[Class1]),
             Bytecode::I2d => (-1, &[Class1]),
@@ -1543,18 +1834,17 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
             | Bytecode::If_icmpgt(_)
             | Bytecode::If_icmple(_) => (-2, &[]),
             Bytecode::Ifeq(_)
-            |Bytecode::Ifne(_)
-            |Bytecode::Iflt(_)
-            |Bytecode::Ifge(_)
-            |Bytecode::Ifgt(_)
-            |Bytecode::Ifle(_)
+            | Bytecode::Ifne(_)
+            | Bytecode::Iflt(_)
+            | Bytecode::Ifge(_)
+            | Bytecode::Ifgt(_)
+            | Bytecode::Ifle(_)
             | Bytecode::Ifnonnull(_)
             | Bytecode::Ifnull(_) => (-1, &[]),
-            Bytecode::Goto(_)
-            | Bytecode::Goto_w(_) => {
+            Bytecode::Goto(_) | Bytecode::Goto_w(_) => {
                 stack.clear();
                 (0, &[])
-            },
+            }
 
             Bytecode::Iinc(_, _) => (0, &[]),
             Bytecode::Iload(_) => (0, &[Class1]),
@@ -1575,7 +1865,8 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
                     .as_ref()
                     .unwrap();
 
-                let descriptor = MethodDescriptor::try_from(&**method.name_and_type.descriptor).unwrap();
+                let descriptor =
+                    MethodDescriptor::try_from(&**method.name_and_type.descriptor).unwrap();
 
                 let res = match descriptor.return_type {
                     ReturnType::FieldType(FieldType::Array { .. })
@@ -1583,7 +1874,7 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
                     ReturnType::FieldType(FieldType::Double)
                     | ReturnType::FieldType(FieldType::Long) => &[Class2],
                     ReturnType::FieldType(_) => &[Class1],
-                    ReturnType::Void => &[][..]
+                    ReturnType::Void => &[][..],
                 };
 
                 let input = if matches!(instr.bytecode, Bytecode::Invokestatic(_)) {
@@ -1623,17 +1914,14 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
                     .unwrap();
 
                 let res = match constant {
-                    Constant::Class { .. }
-                    | Constant::String(_) => &[Ref],
-                    Constant::Integer(_)
-                    | Constant::Float(_) => &[Class1],
-                    Constant::Long(_)
-                    | Constant::Double(_) => &[Class2],
-                    _ => unimplemented!()
+                    Constant::Class { .. } | Constant::String(_) => &[Ref],
+                    Constant::Integer(_) | Constant::Float(_) => &[Class1],
+                    Constant::Long(_) | Constant::Double(_) => &[Class2],
+                    _ => unimplemented!(),
                 };
 
                 (1, res)
-            },
+            }
             Bytecode::Ldc_w(constant_index) => todo!(),
             Bytecode::Ldc2_w(_) => todo!(),
             Bytecode::Ldiv => (-2, &[Class2]),
@@ -1645,7 +1933,7 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
                 stack.clear();
 
                 (0, &[])
-            },
+            }
             Bytecode::Lor => (-1, &[Class2]),
             Bytecode::Lrem => (-2, &[Class2]),
             Bytecode::Lreturn => (-1, &[]),
@@ -1658,7 +1946,7 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
             Bytecode::Lxor => (-2, &[Class2]),
             Bytecode::Monitorenter => todo!(),
             Bytecode::Monitorexit => todo!(),
-            Bytecode::Multianewarray(_, dimensions) => (1-(*dimensions as isize), &[Ref]),
+            Bytecode::Multianewarray(_, dimensions) => (1 - (*dimensions as isize), &[Ref]),
             Bytecode::New(_) => (0, &[Ref]),
             Bytecode::Newarray(_) => (-1, &[Ref]),
             Bytecode::Nop => (0, &[]),
@@ -1676,17 +1964,16 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
                 let b = stack.pop().unwrap();
 
                 (-2, &[a, b])
-            },
+            }
             Bytecode::Tableswitch { .. } => {
                 stack.clear();
                 (0, &[])
-            },
+            }
             Bytecode::Wide(_) => todo!(),
             Bytecode::Dup_x1 => todo!(),
         };
 
         if change < 0 {
-
             for _ in 0..change.abs() as usize {
                 stack.pop();
             }
@@ -1700,5 +1987,4 @@ fn analyze_stack(bytecode: &[Instruction], class: &Class, thread: &mut Thread) -
     });
 
     out
-
 }

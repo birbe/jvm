@@ -1,6 +1,10 @@
-use std::borrow::Cow;
-use wasm_encoder::{BlockType, CodeSection, CompositeType, EntityType, ExportKind, ExportSection, FieldType, Function, FunctionSection, HeapType, ImportSection, Instruction, Module, RefType, StorageType, StructType, SubType, TableType, TypeSection, ValType};
 use crate::classfile::resolved;
+use std::borrow::Cow;
+use wasm_encoder::{
+    BlockType, CodeSection, CompositeType, EntityType, ExportKind, ExportSection, FieldType,
+    Function, FunctionSection, HeapType, ImportSection, Instruction, Module, RefType, StorageType,
+    StructType, SubType, TableType, TypeSection, ValType,
+};
 
 pub mod stub;
 
@@ -16,57 +20,64 @@ pub fn generate_helper_wasm() -> Module {
     let mut code = CodeSection::new();
     let mut funcs = FunctionSection::new();
     let mut exports = ExportSection::new();
-    
-    types.rec(
-        [SubType {
-            is_final: false,
-            supertype_idx: None,
-            composite_type: CompositeType::Struct(StructType {
-                fields: Box::new([
-                    FieldType {
-                        element_type: StorageType::Val(ValType::I32),
-                        mutable: true,
-                    },
-                    FieldType {
-                        element_type: StorageType::Val(ValType::I64),
-                        mutable: true,
-                    }
-                ]),
-            }),
-        }]
-    );
 
-    types.rec(
-        [SubType {
-            is_final: false,
-            supertype_idx: Some(0),
-            composite_type: CompositeType::Struct(StructType {
-                fields: Box::new([
-                    FieldType {
-                        element_type: StorageType::Val(ValType::I32),
-                        mutable: true,
-                    },
-                    FieldType {
-                        element_type: StorageType::Val(ValType::I64),
-                        mutable: true,
-                    },
-                    FieldType {
-                        element_type: StorageType::Val(ValType::Ref(RefType {
-                            nullable: false,
-                            heap_type: HeapType::Array,
-                        })),
-                        mutable: true,
-                    },
-                ]),
-            }),
-        }]
-    );
+    types.rec([SubType {
+        is_final: false,
+        supertype_idx: None,
+        composite_type: CompositeType::Struct(StructType {
+            fields: Box::new([
+                FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: true,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ValType::I64),
+                    mutable: true,
+                },
+            ]),
+        }),
+    }]);
+
+    types.rec([SubType {
+        is_final: false,
+        supertype_idx: Some(0),
+        composite_type: CompositeType::Struct(StructType {
+            fields: Box::new([
+                FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: true,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ValType::I64),
+                    mutable: true,
+                },
+                FieldType {
+                    element_type: StorageType::Val(ValType::Ref(RefType {
+                        nullable: false,
+                        heap_type: HeapType::Array,
+                    })),
+                    mutable: true,
+                },
+            ]),
+        }),
+    }]);
 
     //Excluding object arrays
     let storage_type_start = types.len();
     let primitive_array_type_start = types.len() + 1;
 
-    for storage_type in [StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct})), StorageType::I8, StorageType::I16, StorageType::Val(ValType::I32), StorageType::Val(ValType::I64), StorageType::Val(ValType::F32), StorageType::Val(ValType::F64)] {
+    for storage_type in [
+        StorageType::Val(ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Struct,
+        })),
+        StorageType::I8,
+        StorageType::I16,
+        StorageType::Val(ValType::I32),
+        StorageType::Val(ValType::I64),
+        StorageType::Val(ValType::F32),
+        StorageType::Val(ValType::F64),
+    ] {
         types.array(&storage_type, true);
     }
 
@@ -76,11 +87,18 @@ pub fn generate_helper_wasm() -> Module {
     let dealloc_signature = types.len();
     types.function([ValType::I32], []);
 
-    imports.import("jvm", "objects", EntityType::Table(TableType {
-        element_type: RefType { nullable: true, heap_type: HeapType::Any },
-        minimum: 0,
-        maximum: None,
-    }));
+    imports.import(
+        "jvm",
+        "objects",
+        EntityType::Table(TableType {
+            element_type: RefType {
+                nullable: true,
+                heap_type: HeapType::Any,
+            },
+            minimum: 0,
+            maximum: None,
+        }),
+    );
 
     let object_class_signature = types.len();
     types.function([ValType::I32], [ValType::I32]);
@@ -91,24 +109,33 @@ pub fn generate_helper_wasm() -> Module {
     let aastore_signature = types.len();
     types.function([ValType::I32; 3], []);
     let new_array_signature = types.len();
-    types.function([ValType::I32, ValType::I32, ValType::I32, ValType::I64], [ValType::I32]);
+    types.function(
+        [ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+        [ValType::I32],
+    );
     let hash_signature = types.len();
     types.function([ValType::I32], [ValType::I64]);
     let i32_in = types.len();
     types.function([ValType::I32], []);
 
     imports.import("jvm", "alloc_ref", EntityType::Function(alloc_signature));
-    imports.import("jvm", "dealloc_ref", EntityType::Function(dealloc_signature));
+    imports.import(
+        "jvm",
+        "dealloc_ref",
+        EntityType::Function(dealloc_signature),
+    );
 
     {
-
         funcs.function(object_class_signature);
 
         let mut func = Function::new([]);
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 0 });
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: 0,
+            field_index: 0,
+        });
         func.instruction(&Instruction::End);
         code.function(&func);
 
@@ -146,8 +173,13 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 2 });
-        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(storage_type_start)));
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: 1,
+            field_index: 2,
+        });
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
+            storage_type_start,
+        )));
 
         func.instruction(&Instruction::LocalGet(1));
 
@@ -177,45 +209,53 @@ pub fn generate_helper_wasm() -> Module {
     ];
 
     {
-
         funcs.function(new_array_signature);
 
         let mut func = Function::new([(1, ValType::I32)]);
 
-        (0..array_types.len() - 1).for_each(|_| { func.instruction(&Instruction::Block(BlockType::Empty)); });
+        (0..array_types.len() - 1).for_each(|_| {
+            func.instruction(&Instruction::Block(BlockType::Empty));
+        });
 
         func.instruction(&Instruction::Block(BlockType::Empty));
 
         func.instruction(&Instruction::LocalGet(0));
 
-        func.instruction(&Instruction::BrTable(Cow::Owned(vec![0, 1, 2, 3, 4, 5, 6, 7]), 0));
+        func.instruction(&Instruction::BrTable(
+            Cow::Owned(vec![0, 1, 2, 3, 4, 5, 6, 7]),
+            0,
+        ));
 
         func.instruction(&Instruction::End);
 
-        array_types.iter().enumerate().for_each(|(index, (type_index, name, ..))| {
-            func.instruction(&Instruction::Call(0));
-            func.instruction(&Instruction::LocalTee(4));
+        array_types
+            .iter()
+            .enumerate()
+            .for_each(|(index, (type_index, name, ..))| {
+                func.instruction(&Instruction::Call(0));
+                func.instruction(&Instruction::LocalTee(4));
 
-            func.instruction(&Instruction::LocalGet(2));
+                func.instruction(&Instruction::LocalGet(2));
 
-            func.instruction(&Instruction::LocalGet(3));
+                func.instruction(&Instruction::LocalGet(3));
 
-            func.instruction(&Instruction::LocalGet(1));
-            func.instruction(&Instruction::ArrayNewDefault(type_index + primitive_array_type_start));
-            func.instruction(&Instruction::StructNew(1));
+                func.instruction(&Instruction::LocalGet(1));
+                func.instruction(&Instruction::ArrayNewDefault(
+                    type_index + primitive_array_type_start,
+                ));
+                func.instruction(&Instruction::StructNew(1));
 
-            func.instruction(&Instruction::TableSet(0));
+                func.instruction(&Instruction::TableSet(0));
 
-            func.instruction(&Instruction::LocalGet(4));
-            func.instruction(&Instruction::Return);
+                func.instruction(&Instruction::LocalGet(4));
+                func.instruction(&Instruction::Return);
 
-            func.instruction(&Instruction::End);
-        });
+                func.instruction(&Instruction::End);
+            });
 
         code.function(&func);
 
         exports.export("new_array", ExportKind::Func, 5);
-
     }
 
     {
@@ -226,7 +266,10 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 2 });
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: 1,
+            field_index: 2,
+        });
         func.instruction(&Instruction::RefCastNullable(HeapType::Array));
         func.instruction(&Instruction::ArrayLen);
         func.instruction(&Instruction::End);
@@ -248,8 +291,13 @@ pub fn generate_helper_wasm() -> Module {
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 2 });
-        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(storage_type_start)));
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: 1,
+            field_index: 2,
+        });
+        func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
+            storage_type_start,
+        )));
 
         func.instruction(&Instruction::LocalGet(1));
         func.instruction(&Instruction::ArrayGet(storage_type_start));
@@ -322,14 +370,16 @@ pub fn generate_helper_wasm() -> Module {
     }
 
     {
-
         funcs.function(hash_signature);
 
         let mut func = Function::new([]);
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::TableGet(0));
         func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(0)));
-        func.instruction(&Instruction::StructGet { struct_type_index: 0, field_index: 1 });
+        func.instruction(&Instruction::StructGet {
+            struct_type_index: 0,
+            field_index: 1,
+        });
         func.instruction(&Instruction::End);
         code.function(&func);
 
@@ -337,7 +387,6 @@ pub fn generate_helper_wasm() -> Module {
     }
 
     {
-
         funcs.function(i32_in);
 
         let mut func = Function::new([]);
@@ -351,81 +400,116 @@ pub fn generate_helper_wasm() -> Module {
     }
 
     {
-        array_types.iter().enumerate().for_each(|(index, (type_index, name, val_type))| {
-            funcs.function(types.len());
-            types.function(vec![ValType::I32, ValType::I32, *val_type], []);
+        array_types
+            .iter()
+            .enumerate()
+            .for_each(|(index, (type_index, name, val_type))| {
+                funcs.function(types.len());
+                types.function(vec![ValType::I32, ValType::I32, *val_type], []);
 
-            let mut func = Function::new([]);
+                let mut func = Function::new([]);
 
-            func.instruction(&Instruction::LocalGet(0));
-            func.instruction(&Instruction::TableGet(0));
-            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
-            func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 2 });
-            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(type_index + primitive_array_type_start)));
-            func.instruction(&Instruction::LocalGet(1));
-            func.instruction(&Instruction::LocalGet(2));
-            func.instruction(&Instruction::ArraySet(type_index + primitive_array_type_start));
+                func.instruction(&Instruction::LocalGet(0));
+                func.instruction(&Instruction::TableGet(0));
+                func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: 1,
+                    field_index: 2,
+                });
+                func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
+                    type_index + primitive_array_type_start,
+                )));
+                func.instruction(&Instruction::LocalGet(1));
+                func.instruction(&Instruction::LocalGet(2));
+                func.instruction(&Instruction::ArraySet(
+                    type_index + primitive_array_type_start,
+                ));
 
-            func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
 
-            code.function(&func);
+                code.function(&func);
 
-            exports.export(&format!("{}_array_store", name), ExportKind::Func, index as u32 + 13);
-        });
-
+                exports.export(
+                    &format!("{}_array_store", name),
+                    ExportKind::Func,
+                    index as u32 + 13,
+                );
+            });
     }
 
     {
-        array_types.iter().enumerate().for_each(|(index, (type_index, name, val_type))| {
-            funcs.function(types.len());
-            types.function(vec![ValType::I32, ValType::I32], [ValType::I64]);
+        array_types
+            .iter()
+            .enumerate()
+            .for_each(|(index, (type_index, name, val_type))| {
+                funcs.function(types.len());
+                types.function(vec![ValType::I32, ValType::I32], [ValType::I64]);
 
-            let mut func = Function::new([]);
+                let mut func = Function::new([]);
 
-            func.instruction(&Instruction::LocalGet(0));
-            func.instruction(&Instruction::TableGet(0));
-            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
-            func.instruction(&Instruction::StructGet { struct_type_index: 1, field_index: 2 });
-            func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(type_index + primitive_array_type_start)));
-            func.instruction(&Instruction::LocalGet(1));
+                func.instruction(&Instruction::LocalGet(0));
+                func.instruction(&Instruction::TableGet(0));
+                func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(1)));
+                func.instruction(&Instruction::StructGet {
+                    struct_type_index: 1,
+                    field_index: 2,
+                });
+                func.instruction(&Instruction::RefCastNullable(HeapType::Concrete(
+                    type_index + primitive_array_type_start,
+                )));
+                func.instruction(&Instruction::LocalGet(1));
 
-            match &name[..] {
-                "byte" | "bool" | "char" => {
-                    func.instruction(&Instruction::ArrayGetU(type_index + primitive_array_type_start));
-                    func.instruction(&Instruction::I64ExtendI32U);
-                },
-                "short" => {
-                    func.instruction(&Instruction::ArrayGetS(type_index + primitive_array_type_start));
-                    func.instruction(&Instruction::I64ExtendI32U);
-                },
-                "float" => {
-                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
-                    func.instruction(&Instruction::I32ReinterpretF32);
-                    func.instruction(&Instruction::I64ExtendI32U);
-                }
-                "double" => {
-                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
-                    func.instruction(&Instruction::I64ReinterpretF64);
-                }
-                "int" => {
-                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
-                    func.instruction(&Instruction::I64ExtendI32U);
-                }
-                "long" => {
-                    func.instruction(&Instruction::ArrayGet(type_index + primitive_array_type_start));
-                }
-                _ => unreachable!("{name}")
-            };
+                match &name[..] {
+                    "byte" | "bool" | "char" => {
+                        func.instruction(&Instruction::ArrayGetU(
+                            type_index + primitive_array_type_start,
+                        ));
+                        func.instruction(&Instruction::I64ExtendI32U);
+                    }
+                    "short" => {
+                        func.instruction(&Instruction::ArrayGetS(
+                            type_index + primitive_array_type_start,
+                        ));
+                        func.instruction(&Instruction::I64ExtendI32U);
+                    }
+                    "float" => {
+                        func.instruction(&Instruction::ArrayGet(
+                            type_index + primitive_array_type_start,
+                        ));
+                        func.instruction(&Instruction::I32ReinterpretF32);
+                        func.instruction(&Instruction::I64ExtendI32U);
+                    }
+                    "double" => {
+                        func.instruction(&Instruction::ArrayGet(
+                            type_index + primitive_array_type_start,
+                        ));
+                        func.instruction(&Instruction::I64ReinterpretF64);
+                    }
+                    "int" => {
+                        func.instruction(&Instruction::ArrayGet(
+                            type_index + primitive_array_type_start,
+                        ));
+                        func.instruction(&Instruction::I64ExtendI32U);
+                    }
+                    "long" => {
+                        func.instruction(&Instruction::ArrayGet(
+                            type_index + primitive_array_type_start,
+                        ));
+                    }
+                    _ => unreachable!("{name}"),
+                };
 
-            func.instruction(&Instruction::End);
+                func.instruction(&Instruction::End);
 
-            code.function(&func);
+                code.function(&func);
 
-            exports.export(&format!("{}_array_load", name), ExportKind::Func, exports.len() + 2);
-        });
-
+                exports.export(
+                    &format!("{}_array_load", name),
+                    ExportKind::Func,
+                    exports.len() + 2,
+                );
+            });
     }
-
 
     module.section(&types);
     module.section(&imports);
@@ -434,5 +518,4 @@ pub fn generate_helper_wasm() -> Module {
     module.section(&code);
 
     module
-
 }

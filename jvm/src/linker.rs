@@ -1,19 +1,18 @@
-use std::cell::RefCell;
 use crate::classfile::resolved::{AccessFlags, Class, Field, FieldType, Method, NameAndType, Ref};
+use std::cell::RefCell;
 
-use std::fmt::{Debug, Formatter};
-use std::hash::Hasher;
-use std::io::Write;
-use std::sync::Arc;
-use highway::HighwayHasher;
+use crate::classfile::ClassFile;
 use crate::env::Object;
 use crate::execution::MethodHandle;
 use crate::thread::{Operand, Thread};
 use crate::{ClassLoadError, ResolveMethodError};
-use crate::classfile::ClassFile;
+use highway::HighwayHasher;
+use std::fmt::{Debug, Formatter};
+use std::hash::Hasher;
+use std::io::Write;
+use std::sync::Arc;
 
 pub trait BootstrapLoader: ClassLoader {
-
     fn get_classfile(&self, classpath: &str) -> Option<ClassFile>;
 
     fn has_class(&self, classpath: &str) -> bool;
@@ -21,13 +20,13 @@ pub trait BootstrapLoader: ClassLoader {
     ///This method checks the JVM method area to see if the class has been defined already;
     /// if not, then it will retrieve the bytes defining the classfile through some implementation-dependent manner
     /// and call JVM::generate_class. This method will not generate a corresponding Class<?> instance
-    fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError>;
-
+    fn get_class(&self, thread: &mut Thread, classpath: &str)
+        -> Result<Arc<Class>, ClassLoadError>;
 }
 
 pub struct ClassLoaderThreadedContext<'a> {
     pub loader: &'a dyn ClassLoader,
-    pub context: RefCell<&'a mut Thread>
+    pub context: RefCell<&'a mut Thread>,
 }
 
 // impl<'a> ClassContext for ClassLoaderThreadedContext<'a> {
@@ -47,19 +46,21 @@ pub struct ClassLoaderObject {
     pub instance: Object,
     pub loader_classpath: String,
     pub find_class: Arc<MethodHandle>,
-    pub id: u32
+    pub id: u32,
 }
 
 unsafe impl Send for ClassLoaderObject {}
 
 pub trait ClassLoader {
-
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError>;
+    fn find_class(
+        &self,
+        thread: &mut Thread,
+        classpath: &str,
+    ) -> Result<Arc<Class>, ClassLoadError>;
 
     fn get_class_loader_object_handle(&self) -> &Object;
 
     fn get_id(&self) -> u32;
-
 }
 
 impl Debug for dyn ClassLoader {
@@ -69,7 +70,11 @@ impl Debug for dyn ClassLoader {
 }
 
 impl ClassLoader for Arc<ClassLoaderObject> {
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+    fn find_class(
+        &self,
+        thread: &mut Thread,
+        classpath: &str,
+    ) -> Result<Arc<Class>, ClassLoadError> {
         let jvm = thread.jvm.clone();
         let classpath_string: Object = jvm.new_string(classpath, thread);
 
@@ -80,24 +85,29 @@ impl ClassLoader for Arc<ClassLoaderObject> {
             hasher.write_all(classpath.as_bytes()).unwrap();
             hasher.write_u32(self.get_id());
             let hash_key = hasher.finish();
-            
+
             match loaded_classes.get(&hash_key) {
                 None => {}
-                Some(class) => return Ok(class.clone())
+                Some(class) => return Ok(class.clone()),
             }
         }
 
         //defineClass should be called by the ClassLoader when invoked
         let operands = Box::new([
-            thread.jvm.environment.clone_reference(&self.instance).consume(),
-            classpath_string.consume()
+            thread
+                .jvm
+                .environment
+                .clone_reference(&self.instance)
+                .consume(),
+            classpath_string.consume(),
         ]);
-        
+
         let object = unsafe {
-            jvm.environment.object_from_operand(thread.invoke(&self.find_class, operands).unwrap())
+            jvm.environment
+                .object_from_operand(thread.invoke(&self.find_class, operands).unwrap())
         };
         let class = jvm.retrieve_class(classpath, self, thread)?;
-        
+
         Ok(class)
     }
 
@@ -140,7 +150,11 @@ pub fn routine_resolve_field<'a>(
 }
 
 //https://docs.oracle.com/javase/specs/jvms/se20/html/jvms-5.html#jvms-5.4.6
-pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_method_class: &'a Class, object_type: &'b Class) -> (&'a Method, &'a Class) {
+pub fn routine_select_method<'a, 'b: 'a>(
+    resolved_method: &'a Method,
+    resolved_method_class: &'a Class,
+    object_type: &'b Class,
+) -> (&'a Method, &'a Class) {
     if resolved_method.access_flags.contains(AccessFlags::PRIVATE) {
         (resolved_method, resolved_method_class)
     } else {
@@ -148,8 +162,16 @@ pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_m
 
         let classes = object_type.parents();
 
-        for parent in [object_type].into_iter().chain(classes.iter().map(|parent| &***parent)) {
-            if let Some(overrider) = parent.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string) && parent.find_overriding_method(&resolved_method, resolved_method_class).is_some() {
+        for parent in [object_type]
+            .into_iter()
+            .chain(classes.iter().map(|parent| &***parent))
+        {
+            if let Some(overrider) =
+                parent.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string)
+                && parent
+                    .find_overriding_method(&resolved_method, resolved_method_class)
+                    .is_some()
+            {
                 out = Some((&**overrider, parent));
                 break;
             }
@@ -158,9 +180,20 @@ pub fn routine_select_method<'a, 'b: 'a>(resolved_method: &'a Method, resolved_m
         if let Some((overrider, parent)) = out {
             (overrider, parent)
         } else {
-            for superinterface in object_type.superinterfaces().iter().map(|parent| &***parent) {
-                if let Some(maximally_specific) = superinterface.get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string)
-                    && !maximally_specific.access_flags.contains(AccessFlags::STATIC) && !maximally_specific.access_flags.contains(AccessFlags::PRIVATE) {
+            for superinterface in object_type
+                .superinterfaces()
+                .iter()
+                .map(|parent| &***parent)
+            {
+                if let Some(maximally_specific) = superinterface
+                    .get_method_by_name(&resolved_method.name, &resolved_method.descriptor.string)
+                    && !maximally_specific
+                        .access_flags
+                        .contains(AccessFlags::STATIC)
+                    && !maximally_specific
+                        .access_flags
+                        .contains(AccessFlags::PRIVATE)
+                {
                     return (&**maximally_specific, superinterface);
                 }
             }
@@ -191,15 +224,13 @@ pub fn routine_resolve_method<'class>(
 
             for arg in &resolved_method.descriptor.args {
                 match arg {
-                    FieldType::Array { type_, dimensions } => {
-                        match &**type_ {
-                            FieldType::Class(classpath) => {
-                                todo!()
-                            },
-                            _ => {}
+                    FieldType::Array { type_, dimensions } => match &**type_ {
+                        FieldType::Class(classpath) => {
+                            todo!()
                         }
-                    }
-                    FieldType::Class(_) => {},
+                        _ => {}
+                    },
+                    FieldType::Class(_) => {}
                     _ => {}
                 }
             }

@@ -1,7 +1,7 @@
 use crate::classfile::resolved::{Class, FieldType};
+use crate::env::Object;
 use std::fmt::Debug;
 use std::sync::atomic::AtomicU8;
-use crate::env::Object;
 
 pub unsafe trait ObjectInternal {}
 pub unsafe trait NonArrayObject {}

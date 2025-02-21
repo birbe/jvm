@@ -1,30 +1,30 @@
+use crate::classfile::resolved::{Class, Method, Ref};
+use crate::classfile::ClassFile;
+use crate::env::wasm::jit::{jit_module, translate_method_java_to_wasm};
+use crate::env::wasm::native::native_func;
+use crate::env::{Object, ToAny};
+use crate::execution::MethodHandle;
+use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
+use crate::thread::Thread;
+use crate::{ClassContext, ClassInstance, ClassLoadError, JVM};
+use arc_swap::ArcSwap;
+use async_channel::{Receiver, Sender, TrySendError};
+use highway::HighwayHash;
+use highway::{HighwayHasher, Key};
+use js_sys::{ArrayBuffer, Uint8Array};
+use jvm_types::JParse;
+use once_cell::sync::Lazy;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::Hasher;
 use std::io::{Cursor, Write};
-use std::sync::Arc;
 use std::sync::mpsc::channel;
-use arc_swap::ArcSwap;
-use async_channel::{Receiver, Sender, TrySendError};
-use highway::{HighwayHasher, Key};
-use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use wasm_bindgen::prelude::wasm_bindgen;
-use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
-use crate::{ClassContext, ClassInstance, ClassLoadError, JVM};
-use crate::classfile::resolved::{Class, Method, Ref};
-use crate::execution::MethodHandle;
-use highway::HighwayHash;
-use js_sys::{ArrayBuffer, Uint8Array};
-use once_cell::sync::Lazy;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response, Worker, WorkerGlobalScope};
-use jvm_types::JParse;
-use crate::classfile::ClassFile;
-use crate::env::{Object, ToAny};
-use crate::env::wasm::jit::{jit_module, translate_method_java_to_wasm};
-use crate::env::wasm::native::native_func;
-use crate::thread::Thread;
 
 static CHANNEL: Lazy<(Sender<String>, Mutex<Receiver<String>>)> = Lazy::new(|| {
     console_log!("initializing lazy");
@@ -32,7 +32,8 @@ static CHANNEL: Lazy<(Sender<String>, Mutex<Receiver<String>>)> = Lazy::new(|| {
     let (sender, recv) = async_channel::bounded(1);
     (sender, Mutex::new(recv))
 });
-static CLASSES: Lazy<ArcSwap<HashMap<String, Arc<Vec<u8>>>>> = Lazy::new(|| ArcSwap::new(Arc::new(HashMap::new())));
+static CLASSES: Lazy<ArcSwap<HashMap<String, Arc<Vec<u8>>>>> =
+    Lazy::new(|| ArcSwap::new(Arc::new(HashMap::new())));
 
 struct NativeClassLoader {}
 
@@ -45,7 +46,6 @@ impl Debug for NativeClassLoader {
 }
 
 impl NativeClassLoader {
-
     fn get_bytes(&self, classpath: &str) -> Option<Vec<u8>> {
         loop {
             match CHANNEL.0.try_send(classpath.into()) {
@@ -58,13 +58,10 @@ impl NativeClassLoader {
             let classes = CLASSES.load();
             match classes.get(classpath) {
                 None => {}
-                Some(data) => {
-                    return Some((**data).clone())
-                }
+                Some(data) => return Some((**data).clone()),
             }
         }
     }
-
 }
 
 impl BootstrapLoader for Arc<NativeClassLoader> {
@@ -76,12 +73,21 @@ impl BootstrapLoader for Arc<NativeClassLoader> {
         classpath.starts_with("java/")
     }
 
-    fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+    fn get_class(
+        &self,
+        thread: &mut Thread,
+        classpath: &str,
+    ) -> Result<Arc<Class>, ClassLoadError> {
         let classfile = self.get_classfile(classpath).unwrap();
 
         match thread.jvm.fetch_linked_class(classpath, self.get_id()) {
-            None => thread.jvm.clone().generate_class(classpath, &classfile, Arc::new(self.clone()), thread),
-            Some(class) => Ok(class)
+            None => thread.jvm.clone().generate_class(
+                classpath,
+                &classfile,
+                Arc::new(self.clone()),
+                thread,
+            ),
+            Some(class) => Ok(class),
         }
     }
 }
@@ -89,7 +95,11 @@ impl BootstrapLoader for Arc<NativeClassLoader> {
 const THE_NULL: &Object = &Object::NULL;
 
 impl ClassLoader for Arc<NativeClassLoader> {
-    fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
+    fn find_class(
+        &self,
+        thread: &mut Thread,
+        classpath: &str,
+    ) -> Result<Arc<Class>, ClassLoadError> {
         if let Some(class) = thread.jvm.fetch_linked_class(classpath, self.get_id()) {
             return Ok(class);
         }
@@ -98,7 +108,9 @@ impl ClassLoader for Arc<NativeClassLoader> {
         let jvm = thread.jvm.clone();
         let class = jvm.generate_class(classpath, &classfile, Arc::new(self.clone()), thread)?;
 
-        if classpath != "java/lang/Class" { jvm.generate_class_object(class.clone(), self, thread)? };
+        if classpath != "java/lang/Class" {
+            jvm.generate_class_object(class.clone(), self, thread)?
+        };
 
         Ok(class)
     }
@@ -141,7 +153,6 @@ impl ClassLoader for Arc<NativeClassLoader> {
 //     }
 // }
 
-
 struct StdoutWrapper;
 
 impl Write for StdoutWrapper {
@@ -180,12 +191,12 @@ pub async fn listen() {
 
     let request = Request::new_with_str_and_init(&url, &opts).unwrap();
 
-    request
-        .headers()
-        .set("Accept", "*/*").unwrap();
+    request.headers().set("Accept", "*/*").unwrap();
 
     let scope: WorkerGlobalScope = js_sys::global().dyn_into().unwrap();
-    let resp_value = JsFuture::from(scope.fetch_with_request(&request)).await.unwrap();
+    let resp_value = JsFuture::from(scope.fetch_with_request(&request))
+        .await
+        .unwrap();
 
     // `resp_value` is a `Response` object.
     assert!(resp_value.is_instance_of::<Response>());
@@ -214,19 +225,30 @@ pub fn wasm_test() {
     let jvm = JVM::new(
         Mutex::new(Box::new(StdoutWrapper)),
         Box::new(WasmEnvironment::new()),
-        native_bootstrapper.clone()
+        native_bootstrapper.clone(),
     );
 
     let mut main_thread = jvm.create_thread(native_bootstrapper.clone());
 
-    let class = main_thread.class_loader.clone().find_class(&mut main_thread, "Main").unwrap();
-    let string = main_thread.class_loader.clone().find_class(&mut main_thread, "java/lang/String").unwrap();
+    let class = main_thread
+        .class_loader
+        .clone()
+        .find_class(&mut main_thread, "Main")
+        .unwrap();
+    let string = main_thread
+        .class_loader
+        .clone()
+        .find_class(&mut main_thread, "java/lang/String")
+        .unwrap();
 
     // let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
     let method = class.get_method_by_name("jitTest", "()I").unwrap();
     let method2 = class.get_method_by_name("<init>", "()V").unwrap();
 
-    let env = (*jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
+    let env = (*jvm.environment)
+        .to_any()
+        .downcast_ref::<WasmEnvironment>()
+        .unwrap();
 
     // let to_jit: [(&Method, &Class); 2] = [(method, &class), (method2, &class)];
     let to_jit: [(&Method, &Class); 1] = [(method, &class)];
@@ -244,5 +266,4 @@ pub fn wasm_test() {
     let handle = jvm.get_method("Main", "main", "()I", 0);
     //
     console_log!("{:?}", main_thread.invoke(&handle, Box::new([])));
-
 }

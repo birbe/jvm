@@ -1,27 +1,37 @@
-use std::sync::Arc;
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::env::{Environment, Object};
 use crate::execution::MethodHandle;
 use crate::linker::ClassLoaderObject;
 use crate::thread::{Operand, Thread};
+use std::sync::Arc;
 
 pub mod heap;
 
 struct JVMBinding;
 
-struct NativeEnvironment {
-}
+struct NativeEnvironment {}
 
 impl Environment for NativeEnvironment {
     fn link_class(&self, class: Arc<Class>) {
         todo!()
     }
 
-    fn invoke_handle(&self, thread: &mut Thread, method_handle: &MethodHandle, args: Box<[Operand]>) -> Option<Operand> {
+    fn invoke_handle(
+        &self,
+        thread: &mut Thread,
+        method_handle: &MethodHandle,
+        args: Box<[Operand]>,
+    ) -> Option<Operand> {
         todo!()
     }
 
-    fn create_method_handle(&self, class_loader: &dyn ClassLoaderObject, ref_: Arc<Ref>, method: Arc<Method>, class: Arc<Class>) -> MethodHandle {
+    fn create_method_handle(
+        &self,
+        class_loader: &dyn ClassLoaderObject,
+        ref_: Arc<Ref>,
+        method: Arc<Method>,
+        class: Arc<Class>,
+    ) -> MethodHandle {
         todo!()
     }
 
@@ -57,8 +67,12 @@ impl Environment for NativeEnvironment {
         todo!()
     }
 
-    fn new_string(&self, contents: &str, class_loader: &dyn ClassLoaderObject, thread: &mut Thread) -> Object {
+    fn new_string(
+        &self,
+        contents: &str,
+        class_loader: &dyn ClassLoaderObject,
+        thread: &mut Thread,
+    ) -> Object {
         todo!()
     }
-    
 }

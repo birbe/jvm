@@ -6,7 +6,10 @@
 #![feature(let_chains)]
 extern crate core;
 
-use crate::classfile::resolved::{AccessFlags, Class, ClassDeserializationError, ConstantPool, Method, MethodDescriptor, NameAndType, Ref};
+use crate::classfile::resolved::{
+    AccessFlags, Class, ClassDeserializationError, ConstantPool, Method, MethodDescriptor,
+    NameAndType, Ref,
+};
 use crate::classfile::ClassFile;
 use crate::thread::{FrameStack, Operand, Thread, ThreadHandle};
 
@@ -16,16 +19,16 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
-use std::io::Write;
-use std::iter;
+use crate::bytecode::ArrayType;
 use crate::env::{Compiler, Environment, Object};
 use crate::execution::MethodHandle;
 use crate::linker::{BootstrapLoader, ClassLoader};
 use highway::{HighwayHash, HighwayHasher};
+use once_cell::sync::OnceCell;
+use std::io::Write;
+use std::iter;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use once_cell::sync::OnceCell;
-use crate::bytecode::ArrayType;
 
 #[cfg(target_arch = "wasm32")]
 macro_rules! console_log {
@@ -34,7 +37,9 @@ macro_rules! console_log {
 
 #[cfg(not(target_arch = "wasm32"))]
 macro_rules! console_log {
-    ($($t:tt)*) => (println!($t))
+    ($($t:tt)*) => {
+        println!($t)
+    };
 }
 
 pub mod classfile;
@@ -68,15 +73,14 @@ pub enum RuntimeError {
 
 pub struct ClassInstance {
     pub class: Arc<Class>,
-    pub class_object: Object
+    pub class_object: Object,
 }
 
 pub trait ClassContext {
-
-    fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError>;
+    fn get_class(&self, thread: &mut Thread, classpath: &str)
+        -> Result<Arc<Class>, ClassLoadError>;
 
     fn id(&self) -> u32;
-
 }
 
 pub struct JVM {
@@ -92,7 +96,11 @@ pub struct JVM {
 }
 
 impl JVM {
-    pub fn new(stdout: Mutex<Box<dyn Write>>, environment: Box<dyn Environment>, bootstrap_classloader: Arc<dyn BootstrapLoader>) -> Arc<Self> {
+    pub fn new(
+        stdout: Mutex<Box<dyn Write>>,
+        environment: Box<dyn Environment>,
+        bootstrap_classloader: Arc<dyn BootstrapLoader>,
+    ) -> Arc<Self> {
         let jvm = Arc::new(Self {
             stdout,
             threads: RwLock::new(vec![]),
@@ -105,16 +113,27 @@ impl JVM {
             thread_ids: AtomicU64::new(0),
         });
 
-
         let mut temp_thread = jvm.create_thread(jvm.bootstrap_classloader.clone());
-        let java_lang_class = jvm.bootstrap_classloader.find_class(&mut temp_thread, "java/lang/Class").unwrap();
+        let java_lang_class = jvm
+            .bootstrap_classloader
+            .find_class(&mut temp_thread, "java/lang/Class")
+            .unwrap();
 
         let classes = jvm.loaded_classes.read().clone();
 
-        jvm.generate_class_object(java_lang_class, &*jvm.bootstrap_classloader, &mut temp_thread).unwrap();
+        jvm.generate_class_object(
+            java_lang_class,
+            &*jvm.bootstrap_classloader,
+            &mut temp_thread,
+        )
+        .unwrap();
 
-        for (_, class) in classes.iter().filter(|(_, class)| &*class.this_class != "java/lang/Class") {
-            jvm.generate_class_object(class.clone(), &*jvm.bootstrap_classloader, &mut temp_thread).unwrap();
+        for (_, class) in classes
+            .iter()
+            .filter(|(_, class)| &*class.this_class != "java/lang/Class")
+        {
+            jvm.generate_class_object(class.clone(), &*jvm.bootstrap_classloader, &mut temp_thread)
+                .unwrap();
         }
 
         let primitives: HashMap<ArrayType, Arc<Class>> = [
@@ -125,42 +144,67 @@ impl JVM {
             (ArrayType::Int, "I"),
             (ArrayType::Long, "J"),
             (ArrayType::Short, "S"),
-            (ArrayType::Bool, "Z")
-        ].into_iter().map(|(array_type, primitive)| {
+            (ArrayType::Bool, "Z"),
+        ]
+        .into_iter()
+        .map(|(array_type, primitive)| {
             let primitive = jvm.generate_primitive_class(&mut temp_thread, primitive);
             jvm.link_class(primitive.clone(), &*jvm.bootstrap_classloader);
-            jvm.generate_class_object(primitive.clone(), &*jvm.bootstrap_classloader, &mut temp_thread).unwrap();
+            jvm.generate_class_object(
+                primitive.clone(),
+                &*jvm.bootstrap_classloader,
+                &mut temp_thread,
+            )
+            .unwrap();
             let primitive_array = jvm.find_array_class(&mut temp_thread, primitive, 1);
 
             (array_type, primitive_array)
-        }).collect();
+        })
+        .collect();
 
         jvm.environment.store_primitive_classes(primitives);
 
         jvm.init_thread_object(&mut temp_thread);
 
-        jvm.bootstrap_classloader.find_class(&mut temp_thread, "java/lang/System").unwrap();
+        jvm.bootstrap_classloader
+            .find_class(&mut temp_thread, "java/lang/System")
+            .unwrap();
 
-        let ref_class = jvm.bootstrap_classloader.find_class(&mut temp_thread, "java/lang/ref/Reference").unwrap();
+        let ref_class = jvm
+            .bootstrap_classloader
+            .find_class(&mut temp_thread, "java/lang/ref/Reference")
+            .unwrap();
         ThreadHandle::init_static(&ref_class, &mut temp_thread);
 
         // temp_thread.call("java/lang/System", "initPhase1", "()V", Box::new([])).unwrap();
-        
+
         jvm
     }
 
     fn init_thread_object(&self, thread: &mut Thread) {
-        let java_lang_thread = self.bootstrap_classloader.find_class(thread, "java/lang/Thread").unwrap();
+        let java_lang_thread = self
+            .bootstrap_classloader
+            .find_class(thread, "java/lang/Thread")
+            .unwrap();
         let thread_obj = self.environment.new_object(&java_lang_thread);
 
-        thread.thread_obj.set(self.environment.clone_reference(&thread_obj)).unwrap();
+        thread
+            .thread_obj
+            .set(self.environment.clone_reference(&thread_obj))
+            .unwrap();
 
-        let java_lang_thread_group = self.bootstrap_classloader.find_class(thread, "java/lang/ThreadGroup").unwrap();
+        let java_lang_thread_group = self
+            .bootstrap_classloader
+            .find_class(thread, "java/lang/ThreadGroup")
+            .unwrap();
         let thread_group = self.environment.new_object(&java_lang_thread_group);
 
         let init_thread_group = self.get_method("java/lang/ThreadGroup", "<init>", "()V", 0);
 
-        drop(thread.invoke(&init_thread_group, Box::new([self.environment.clone_reference(&thread_group).consume()])));
+        drop(thread.invoke(
+            &init_thread_group,
+            Box::new([self.environment.clone_reference(&thread_group).consume()]),
+        ));
 
         let init_thread = self.get_method(
             "java/lang/Thread",
@@ -168,19 +212,21 @@ impl JVM {
             "(Ljava/lang/ThreadGroup;Ljava/lang/String;ILjava/lang/Runnable;JLjava/security/AccessControlContext;)V",
             0
         );
-        
-        let thread_name = self.new_string("", thread);
-        
-        drop(thread.invoke(&init_thread, Box::new([
-            thread_obj.consume(),
-            thread_group.consume(),
-            thread_name.consume(),
-            0b100i32.into(),
-            Object::NULL.consume(),
-            256.into(),
-            Object::NULL.consume(),
-        ])));
 
+        let thread_name = self.new_string("", thread);
+
+        drop(thread.invoke(
+            &init_thread,
+            Box::new([
+                thread_obj.consume(),
+                thread_group.consume(),
+                thread_name.consume(),
+                0b100i32.into(),
+                Object::NULL.consume(),
+                256.into(),
+                Object::NULL.consume(),
+            ]),
+        ));
     }
 
     ///This is not an instanceof check. This returns if the provided child class is specifically *below* the parent class in the inheritance tree.
@@ -205,7 +251,13 @@ impl JVM {
         }
     }
 
-    pub fn generate_class(&self, classpath: &str, class_file: &ClassFile, class_loader: Arc<dyn ClassLoader>, thread: &mut Thread) -> Result<Arc<Class>, ClassLoadError> {
+    pub fn generate_class(
+        &self,
+        classpath: &str,
+        class_file: &ClassFile,
+        class_loader: Arc<dyn ClassLoader>,
+        thread: &mut Thread,
+    ) -> Result<Arc<Class>, ClassLoadError> {
         let class = Arc::new(
             Class::init(
                 &class_file,
@@ -213,7 +265,7 @@ impl JVM {
                 class_loader.clone(),
                 self.class_ids.fetch_add(1, Ordering::Relaxed),
             )
-                .map_err(|e| ClassLoadError::MalformedClassDef(classpath.to_string(), e))?,
+            .map_err(|e| ClassLoadError::MalformedClassDef(classpath.to_string(), e))?,
         );
 
         let mut loaded_classes = self.loaded_classes.write();
@@ -233,39 +285,64 @@ impl JVM {
 
         Ok(class)
     }
-    
+
     pub fn fetch_linked_class(&self, classpath: &str, loader: u32) -> Option<Arc<Class>> {
         let mut hasher = HighwayHasher::default();
         hasher.write_all(classpath.as_bytes()).unwrap();
         hasher.write_u32(loader);
         let hash_key = hasher.finish();
-        
+
         self.loaded_classes.read().get(&hash_key).cloned()
     }
 
     ///This method creates an instance of java.lang.Class<?> for a given Class
-    pub fn generate_class_object(&self, class: Arc<Class>, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Result<(), ClassLoadError> {
-        if self.fetch_linked_class("java/lang/Class", 0).is_none() { return Ok(()); }
-        
-        let java_lang_class = self.bootstrap_classloader.get_class(thread, "java/lang/Class")?;
+    pub fn generate_class_object(
+        &self,
+        class: Arc<Class>,
+        class_loader: &dyn ClassLoader,
+        thread: &mut Thread,
+    ) -> Result<(), ClassLoadError> {
+        if self.fetch_linked_class("java/lang/Class", 0).is_none() {
+            return Ok(());
+        }
+
+        let java_lang_class = self
+            .bootstrap_classloader
+            .get_class(thread, "java/lang/Class")?;
 
         // ThreadHandle::init_static(&java_lang_class, thread);
         let class_object = self.environment.new_object(&java_lang_class);
 
-        let handle = self.get_method("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;Ljava/lang/Class;)V", 0);
-        
+        let handle = self.get_method(
+            "java/lang/Class",
+            "<init>",
+            "(Ljava/lang/ClassLoader;Ljava/lang/Class;)V",
+            0,
+        );
+
         let class_loader_object = class_loader.get_class_loader_object_handle();
 
         let op = self.environment.clone_reference(&class_object).consume();
 
-        thread.invoke(&handle, Box::new([
-            op,
-            self.environment.clone_reference(&class_loader_object).consume(),
-            Object::NULL.consume()
-        ]));
+        thread.invoke(
+            &handle,
+            Box::new([
+                op,
+                self.environment
+                    .clone_reference(&class_loader_object)
+                    .consume(),
+                Object::NULL.consume(),
+            ]),
+        );
 
         unsafe {
-            self.environment.set_object_field(&class_object, &java_lang_class, "__jvm_internal_id", "I", Operand::new_data(&*class as *const Class as u32));
+            self.environment.set_object_field(
+                &class_object,
+                &java_lang_class,
+                "__jvm_internal_id",
+                "I",
+                Operand::new_data(&*class as *const Class as u32),
+            );
         }
 
         if let Err(err) = class.class_instance.set(class_object) {
@@ -275,17 +352,28 @@ impl JVM {
         Ok(())
     }
 
-    pub fn find_array_class(&self, thread: &mut Thread, component: Arc<Class>, depth: u8) -> Arc<Class> {
+    pub fn find_array_class(
+        &self,
+        thread: &mut Thread,
+        component: Arc<Class>,
+        depth: u8,
+    ) -> Arc<Class> {
         if depth == 0 {
             return component;
         }
 
-        let classpath = format!("{}{}", iter::repeat_n("[", depth as usize).collect::<String>(), component.internal_identifier);
+        let classpath = format!(
+            "{}{}",
+            iter::repeat_n("[", depth as usize).collect::<String>(),
+            component.internal_identifier
+        );
 
         let internal = {
             match self.fetch_linked_class(&classpath, component.class_loader.get_id()) {
                 Some(class) => return class,
-                None => self.generate_internal_array_class(thread, &classpath, component.clone(), depth)
+                None => {
+                    self.generate_internal_array_class(thread, &classpath, component.clone(), depth)
+                }
             }
         };
 
@@ -302,7 +390,11 @@ impl JVM {
             class_loader: self.bootstrap_classloader.clone(),
             access_flags: AccessFlags::PUBLIC,
             this_class: this_class.clone(),
-            super_class: Some(self.bootstrap_classloader.find_class(thread, "java/lang/Object").unwrap()),
+            super_class: Some(
+                self.bootstrap_classloader
+                    .find_class(thread, "java/lang/Object")
+                    .unwrap(),
+            ),
             interfaces: vec![],
             fields: vec![],
             methods: vec![],
@@ -329,7 +421,13 @@ impl JVM {
         class
     }
 
-    fn generate_internal_array_class(&self, thread: &mut Thread, classpath: &str, component: Arc<Class>, depth: u8) -> Arc<Class> {
+    fn generate_internal_array_class(
+        &self,
+        thread: &mut Thread,
+        classpath: &str,
+        component: Arc<Class>,
+        depth: u8,
+    ) -> Arc<Class> {
         let inner_component = if depth == 0 {
             component.clone()
         } else {
@@ -346,21 +444,21 @@ impl JVM {
             access_flags: AccessFlags::PUBLIC,
             this_class: this_class.clone(),
             internal_identifier: (*this_class).clone(),
-            super_class: Some(self.bootstrap_classloader.find_class(thread, "java/lang/Object").unwrap()),
+            super_class: Some(
+                self.bootstrap_classloader
+                    .find_class(thread, "java/lang/Object")
+                    .unwrap(),
+            ),
             interfaces: vec![],
             fields: vec![],
-            methods: vec![
-                Arc::new(
-                    Method {
-                        access_flags: AccessFlags::PUBLIC | AccessFlags::NATIVE,
-                        class: this_class,
-                        descriptor: MethodDescriptor::try_from(&*format!("(){}", classpath)).unwrap(),
-                        name: Arc::new("clone".into()),
-                        attributes: HashMap::new(),
-                        identifier: Arc::new(format!("clone(){}", classpath))
-                    }
-                )
-            ],
+            methods: vec![Arc::new(Method {
+                access_flags: AccessFlags::PUBLIC | AccessFlags::NATIVE,
+                class: this_class,
+                descriptor: MethodDescriptor::try_from(&*format!("(){}", classpath)).unwrap(),
+                name: Arc::new("clone".into()),
+                attributes: HashMap::new(),
+                identifier: Arc::new(format!("clone(){}", classpath)),
+            })],
             attributes: vec![],
             class_instance: OnceCell::new(),
             statics: Box::into_raw(Box::new([])),
@@ -379,19 +477,40 @@ impl JVM {
             self.loaded_classes.write().insert(hash_key, class.clone());
         }
 
-        let java_lang_class = self.bootstrap_classloader.find_class(thread, "java/lang/Class").unwrap();
-        let class_object= self.environment.new_object(&java_lang_class);
+        let java_lang_class = self
+            .bootstrap_classloader
+            .find_class(thread, "java/lang/Class")
+            .unwrap();
+        let class_object = self.environment.new_object(&java_lang_class);
 
-        let handle = self.get_method("java/lang/Class", "<init>", "(Ljava/lang/ClassLoader;Ljava/lang/Class;)V", 0);
+        let handle = self.get_method(
+            "java/lang/Class",
+            "<init>",
+            "(Ljava/lang/ClassLoader;Ljava/lang/Class;)V",
+            0,
+        );
 
-        thread.invoke(&handle, Box::new([
-            self.environment.clone_reference(&class_object).consume(),
-            self.environment.clone_reference(component.class_loader.get_class_loader_object_handle()).consume(),
-            self.environment.clone_reference(inner_component.class_instance.get().unwrap()).consume(),
-        ]));
+        thread.invoke(
+            &handle,
+            Box::new([
+                self.environment.clone_reference(&class_object).consume(),
+                self.environment
+                    .clone_reference(component.class_loader.get_class_loader_object_handle())
+                    .consume(),
+                self.environment
+                    .clone_reference(inner_component.class_instance.get().unwrap())
+                    .consume(),
+            ]),
+        );
 
         unsafe {
-            self.environment.set_object_field(&class_object, &java_lang_class, "__jvm_internal_id", "I", Operand::new_data(&*class as *const Class as u32));
+            self.environment.set_object_field(
+                &class_object,
+                &java_lang_class,
+                "__jvm_internal_id",
+                "I",
+                Operand::new_data(&*class as *const Class as u32),
+            );
         }
 
         class.class_instance.set(class_object).unwrap();
@@ -399,7 +518,13 @@ impl JVM {
         class
     }
 
-    pub fn get_method(&self, classpath: &str, method_name: &str, method_descriptor: &str, class_loader: u32) -> Arc<MethodHandle> {
+    pub fn get_method(
+        &self,
+        classpath: &str,
+        method_name: &str,
+        method_descriptor: &str,
+        class_loader: u32,
+    ) -> Arc<MethodHandle> {
         let mut hasher = HighwayHasher::default();
         hasher.write_all(classpath.as_bytes()).unwrap();
         hasher.write_all(method_name.as_bytes()).unwrap();
@@ -419,7 +544,7 @@ impl JVM {
         &self,
         classpath: &str,
         class_loader: &dyn ClassLoader,
-        thread: &mut Thread
+        thread: &mut Thread,
     ) -> Result<Arc<Class>, ClassLoadError> {
         let loaded_classes = self.loaded_classes.read();
 
@@ -430,7 +555,7 @@ impl JVM {
 
         match loaded_classes.get(&hash_key) {
             None => {}
-            Some(class) => return Ok(class.clone())
+            Some(class) => return Ok(class.clone()),
         }
 
         drop(loaded_classes);
@@ -483,8 +608,12 @@ impl JVM {
                 }),
             });
 
-            let method_handle = self.environment
-                    .create_method_handle(ref_.clone(), method.clone(), class.clone(), loader);
+            let method_handle = self.environment.create_method_handle(
+                ref_.clone(),
+                method.clone(),
+                class.clone(),
+                loader,
+            );
 
             let mut key = HighwayHasher::default();
             key.write_all(class.this_class.as_bytes()).unwrap();
@@ -497,19 +626,39 @@ impl JVM {
     }
 
     fn new_string(&self, contents: &str, thread: &mut Thread) -> Object {
-        let string_class = self.bootstrap_classloader.find_class(thread,"java/lang/String").unwrap();
+        let string_class = self
+            .bootstrap_classloader
+            .find_class(thread, "java/lang/String")
+            .unwrap();
 
         ThreadHandle::init_static(&string_class, thread);
 
         let string_object = self.environment.new_object(&string_class);
 
-        let char_array = self.environment.new_array(ArrayType::Byte, contents.as_bytes().len() as i32);
+        let char_array = self
+            .environment
+            .new_array(ArrayType::Byte, contents.as_bytes().len() as i32);
 
         for (index, byte) in contents.as_bytes().iter().enumerate() {
-            unsafe { self.environment.set_array_element(ArrayType::Byte, &char_array, index as i32, Operand::new_data(*byte as u32)) };
+            unsafe {
+                self.environment.set_array_element(
+                    ArrayType::Byte,
+                    &char_array,
+                    index as i32,
+                    Operand::new_data(*byte as u32),
+                )
+            };
         }
 
-        unsafe { self.environment.set_object_field(&string_object, &string_class, "value", "[B", char_array.consume()); }
+        unsafe {
+            self.environment.set_object_field(
+                &string_object,
+                &string_class,
+                "value",
+                "[B",
+                char_array.consume(),
+            );
+        }
 
         string_object
     }
@@ -518,22 +667,26 @@ impl JVM {
         let object_class = self.environment.get_object_class(string_object);
         assert_eq!(&*object_class.this_class, "java/lang/String");
 
-        let value = unsafe { self.environment.get_object_field(string_object, object_class, "value", "[B") };
+        let value = unsafe {
+            self.environment
+                .get_object_field(string_object, object_class, "value", "[B")
+        };
         let byte_array = unsafe { self.environment.object_from_operand(value) };
 
         let bytes_len = self.environment.get_array_length(&byte_array);
-        let bytes: Vec<u8> = (0..bytes_len).map(|index| {
-            unsafe { self.environment.get_array_element(ArrayType::Byte, &byte_array, index).data() as u8 }
-        }).collect();
+        let bytes: Vec<u8> = (0..bytes_len)
+            .map(|index| unsafe {
+                self.environment
+                    .get_array_element(ArrayType::Byte, &byte_array, index)
+                    .data() as u8
+            })
+            .collect();
 
         String::from_utf8(bytes).unwrap()
     }
-
-
 }
 
 #[derive(Debug, Clone)]
 pub enum ResolveMethodError {
     IncompatibleClassChangeError,
 }
-

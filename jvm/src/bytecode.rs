@@ -17,7 +17,7 @@ pub enum ArrayType {
     Byte = 8,
     Short = 9,
     Int = 10,
-    Long = 11
+    Long = 11,
 }
 
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
@@ -90,7 +90,7 @@ pub enum Bytecode {
     Dastore,                             //0x52
     Dcmpg,                               //0x98
     Dcmpl,                               //0x97
-    Dconst_n(f64),                        //0xe - 0xf
+    Dconst_n(f64),                       //0xe - 0xf
     Ddiv,                                //0x6f
     Dload(u8),                           //0x18
     Dload_n(u8),                         //0x26 - 0x29
@@ -199,39 +199,39 @@ pub enum Bytecode {
     Lmul,                                //0x69
     Lneg,                                //0x75
     Lookupswitch(i32, Vec<LookupEntry>), //0xab
-    Lor,                     //0x81
-    Lrem,                    //0x71
-    Lreturn,                 //0xad
-    Lshl,                    //0x79
-    Lshr,                    //0x7b
-    Lstore(u8),                  //0x37
-    Lstore_n(u8),            //0x3f - 0x42
-    Lsub,                    //0x65
-    Lushr,                   //0x7d
-    Lxor,                    //0x83
-    Monitorenter,            //0xc2
-    Monitorexit,             //0xc3
-    Multianewarray(u16, u8), //0xc5
-    New(u16),                //0xbb
-    Newarray(ArrayType),            //0xbc
-    Nop,                     //0x0
-    Pop,                     //0x57
-    Pop2,                    //0x58
-    Putfield(u16),           //0xb5
-    Putstatic(u16),          //0xb3
-    Ret,                     //0xa9
-    Return,                  //0xb1
-    Saload,                  //0x35
-    Sastore,                 //0x56
-    Sipush(i16),             //0x11
-    Swap,                    //0x5f
+    Lor,                                 //0x81
+    Lrem,                                //0x71
+    Lreturn,                             //0xad
+    Lshl,                                //0x79
+    Lshr,                                //0x7b
+    Lstore(u8),                          //0x37
+    Lstore_n(u8),                        //0x3f - 0x42
+    Lsub,                                //0x65
+    Lushr,                               //0x7d
+    Lxor,                                //0x83
+    Monitorenter,                        //0xc2
+    Monitorexit,                         //0xc3
+    Multianewarray(u16, u8),             //0xc5
+    New(u16),                            //0xbb
+    Newarray(ArrayType),                 //0xbc
+    Nop,                                 //0x0
+    Pop,                                 //0x57
+    Pop2,                                //0x58
+    Putfield(u16),                       //0xb5
+    Putstatic(u16),                      //0xb3
+    Ret,                                 //0xa9
+    Return,                              //0xb1
+    Saload,                              //0x35
+    Sastore,                             //0x56
+    Sipush(i16),                         //0x11
+    Swap,                                //0x5f
     Tableswitch {
         default: i32,
         low: i32,
         high: i32,
-        offsets: Vec<i32>
-    },             //0xaa
-    Wide(Vec<u8>),           //0xc4
+        offsets: Vec<i32>,
+    }, //0xaa
+    Wide(Vec<u8>),                       //0xc4
 }
 
 impl Display for Bytecode {
@@ -351,13 +351,13 @@ impl Bytecode {
                 reader.read_u16::<BigEndian>()?;
                 out
             }
-            0xb9 => { 
+            0xb9 => {
                 let out = Self::Invokeinterface(reader.read_u16::<BigEndian>()?, reader.read_u8()?);
-                
+
                 assert_eq!(reader.read_u8()?, 0);
-                
+
                 out
-            },
+            }
             0xb7 => Self::Invokespecial(reader.read_u16::<BigEndian>()?),
             0xb8 => Self::Invokestatic(reader.read_u16::<BigEndian>()?),
             0xb6 => Self::Invokevirtual(reader.read_u16::<BigEndian>()?),
@@ -394,7 +394,7 @@ impl Bytecode {
                 #[derive(JParse)]
                 struct LookupEntries {
                     #[prefix = 4]
-                    entries: Vec<LookupEntry>
+                    entries: Vec<LookupEntry>,
                 }
 
                 let position = reader.stream_position()?;
@@ -405,7 +405,7 @@ impl Bytecode {
                 let entries = LookupEntries::from_bytes(&mut reader)?.entries;
 
                 Self::Lookupswitch(default, entries)
-            },
+            }
             0x81 => Self::Lor,
             0x71 => Self::Lrem,
             0xad => Self::Lreturn,
@@ -432,7 +432,7 @@ impl Bytecode {
                     9 => ArrayType::Short,
                     10 => ArrayType::Int,
                     11 => ArrayType::Long,
-                    _ => unreachable!("Invalid array type {byte}")
+                    _ => unreachable!("Invalid array type {byte}"),
                 }
             }),
             0x0 => Self::Nop,
@@ -470,9 +470,14 @@ impl Bytecode {
                     high,
                     offsets,
                 }
-            },
+            }
             0xc4 => Self::Wide(todo!()),
-            _ => return Err(BytecodeParseError::InvalidOpcode(opcode, reader.stream_position()?)),
+            _ => {
+                return Err(BytecodeParseError::InvalidOpcode(
+                    opcode,
+                    reader.stream_position()?,
+                ))
+            }
         };
 
         Ok(bytecode)

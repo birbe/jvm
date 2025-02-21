@@ -1,11 +1,11 @@
-use std::any::Any;
-use std::collections::HashMap;
+use crate::bytecode::ArrayType;
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::execution::MethodHandle;
 use crate::linker::ClassLoader;
 use crate::thread::{Operand, Thread};
+use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
-use crate::bytecode::ArrayType;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
@@ -13,9 +13,7 @@ pub mod native;
 pub mod wasm;
 
 trait ToAny: 'static {
-    
     fn to_any(&self) -> &dyn Any;
-    
 }
 
 impl<T: 'static> ToAny for T {
@@ -25,9 +23,8 @@ impl<T: 'static> ToAny for T {
 }
 
 pub trait Environment: ToAny {
-
     fn get_object_hash(&self, object: &Object) -> i32;
-    
+
     fn store_primitive_classes(&self, primitives: HashMap<ArrayType, Arc<Class>>);
 
     fn link_class(&self, class: Arc<Class>);
@@ -44,28 +41,52 @@ pub trait Environment: ToAny {
         ref_: Arc<Ref>,
         method: Arc<Method>,
         class: Arc<Class>,
-        class_loader: &dyn ClassLoader
+        class_loader: &dyn ClassLoader,
     ) -> MethodHandle;
 
     fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class;
 
-    unsafe fn get_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str) -> Operand;
+    unsafe fn get_object_field(
+        &self,
+        object: &Object,
+        class: &Class,
+        field_name: &str,
+        field_descriptor: &str,
+    ) -> Operand;
 
-    unsafe fn set_object_field(&self, object: &Object, class: &Class, field_name: &str, field_descriptor: &str, value: Operand);
+    unsafe fn set_object_field(
+        &self,
+        object: &Object,
+        class: &Class,
+        field_name: &str,
+        field_descriptor: &str,
+        value: Operand,
+    );
 
     fn new_object_array(&self, class: &Class, size: i32) -> Object;
 
     fn clone_reference(&self, object: &Object) -> Object;
 
     fn is_null(&self, object: &Object) -> bool;
-    
+
     fn new_array(&self, type_: ArrayType, size: i32) -> Object;
 
     fn get_array_length(&self, array: &Object) -> i32;
 
-    unsafe fn set_array_element(&self, array_type: ArrayType, array: &Object, index: i32, value: Operand);
+    unsafe fn set_array_element(
+        &self,
+        array_type: ArrayType,
+        array: &Object,
+        index: i32,
+        value: Operand,
+    );
 
-    unsafe fn get_array_element(&self, array_type: ArrayType, array: &Object, index: i32) -> Operand;
+    unsafe fn get_array_element(
+        &self,
+        array_type: ArrayType,
+        array: &Object,
+        index: i32,
+    ) -> Operand;
 
     unsafe fn set_object_array_element(&self, array: &Object, index: i32, value: Operand);
 
@@ -75,9 +96,8 @@ pub trait Environment: ToAny {
 
     unsafe fn object_from_operand(&self, operand: Operand) -> Object;
     unsafe fn object_ref_from_operand(&self, operand: &Operand) -> &Object;
-    
-    fn object_ref_eq(&self, a: &Object, b: &Object) -> bool;
 
+    fn object_ref_eq(&self, a: &Object, b: &Object) -> bool;
 }
 
 pub trait Compiler {}
@@ -87,7 +107,7 @@ pub trait Compiler {}
 pub struct Object {
     pub ptr: *mut (),
     padding: [u64; 0],
-    drop: extern "C" fn(*mut ())
+    drop: extern "C" fn(*mut ()),
 }
 
 impl Into<Operand> for Object {
@@ -125,12 +145,12 @@ impl Object {
 
     pub fn consume(self) -> Operand {
         let ptr = self.ptr;
-        
+
         std::mem::forget(self);
-        
+
         Operand::new_ref(ptr)
     }
-    
+
     pub unsafe fn from_raw(ptr: *mut (), drop: extern "C" fn(*mut ())) -> Self {
         Self {
             ptr,
@@ -138,5 +158,4 @@ impl Object {
             drop,
         }
     }
-
 }
