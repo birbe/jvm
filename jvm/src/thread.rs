@@ -536,19 +536,19 @@ impl ThreadHandle {
             let instr_count = thread.instructions_executed.load(Ordering::Acquire);
 
             // if instr_count > 69000 {
-                let mut stdout = thread.jvm.stdout.lock();
-                write!(&mut stdout, "{}",
-                       format!(
-                           "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
-                           format!("{:?}", bytecode),
-                           class.this_class,
-                           method.identifier,
-                           pc,
-                           locals.join(", "),
-                           stack.join(", "),
-                           instr_count,
-                       )
-                ).unwrap();
+            //     let mut stdout = thread.jvm.stdout.lock();
+            //     write!(&mut stdout, "{}",
+            //            format!(
+            //                "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
+            //                format!("{:?}", bytecode),
+            //                class.this_class,
+            //                method.identifier,
+            //                pc,
+            //                locals.join(", "),
+            //                stack.join(", "),
+            //                instr_count,
+            //            )
+            //     ).unwrap();
             // }
         }
 

@@ -52,7 +52,7 @@ pub fn generate_helper_wasm() -> Module {
                     },
                     FieldType {
                         element_type: StorageType::Val(ValType::Ref(RefType {
-                            nullable: true,
+                            nullable: false,
                             heap_type: HeapType::Array,
                         })),
                         mutable: true,

@@ -234,7 +234,7 @@ impl JVM {
         Ok(class)
     }
     
-    pub fn is_class_linked(&self, classpath: &str, loader: u32) -> Option<Arc<Class>> {
+    pub fn fetch_linked_class(&self, classpath: &str, loader: u32) -> Option<Arc<Class>> {
         let mut hasher = HighwayHasher::default();
         hasher.write_all(classpath.as_bytes()).unwrap();
         hasher.write_u32(loader);
@@ -245,7 +245,7 @@ impl JVM {
 
     ///This method creates an instance of java.lang.Class<?> for a given Class
     pub fn generate_class_object(&self, class: Arc<Class>, class_loader: &dyn ClassLoader, thread: &mut Thread) -> Result<(), ClassLoadError> {
-        if self.is_class_linked("java/lang/Class", 0).is_none() { return Ok(()); }
+        if self.fetch_linked_class("java/lang/Class", 0).is_none() { return Ok(()); }
         
         let java_lang_class = self.bootstrap_classloader.get_class(thread, "java/lang/Class")?;
 
@@ -283,7 +283,7 @@ impl JVM {
         let classpath = format!("{}{}", iter::repeat_n("[", depth as usize).collect::<String>(), component.internal_identifier);
 
         let internal = {
-            match self.is_class_linked(&classpath, component.class_loader.get_id()) {
+            match self.fetch_linked_class(&classpath, component.class_loader.get_id()) {
                 Some(class) => return class,
                 None => self.generate_internal_array_class(thread, &classpath, component.clone(), depth)
             }
@@ -453,7 +453,7 @@ impl JVM {
             thread_obj: OnceCell::new(),
         };
 
-        if let Some(thread_class) = self.is_class_linked("java/lang/Thread", 0) {
+        if let Some(thread_class) = self.fetch_linked_class("java/lang/Thread", 0) {
             let thread_obj = self.environment.new_object(&thread_class);
             // let characteristics = 0b100; //native thread, no parent
             thread.thread_obj.set(thread_obj).unwrap();

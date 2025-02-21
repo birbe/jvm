@@ -160,7 +160,7 @@ pub struct WasmEnvironment {
 
     primitive_arrays: OnceCell<HashMap<ArrayType, Arc<Class>>>,
 
-    object_id: AtomicU64
+    object_id: Box<AtomicU64>
 }
 
 impl WasmEnvironment {
@@ -293,7 +293,7 @@ impl WasmEnvironment {
             fn_null_slot,
             fn_ref_eq: unsafe { std::mem::transmute(get_object_class_indirect_index + 12) },
             primitive_arrays: OnceCell::new(),
-            object_id: AtomicU64::new(1),
+            object_id: Box::new(AtomicU64::new(1)),
         }
     }
 
@@ -322,6 +322,7 @@ impl WasmEnvironment {
 
         js_sys::Reflect::set(&jvm_import_object, &"functions".into(), &wasm_bindgen::function_table()).unwrap();
         js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &self.object_table).unwrap();
+        js_sys::Reflect::set(&jvm_import_object, &"memory".into(), &wasm_bindgen::memory()).unwrap();
 
         let imports = js_sys::Object::new();
 

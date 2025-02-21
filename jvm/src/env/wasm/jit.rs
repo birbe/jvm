@@ -6,10 +6,10 @@ use petgraph::algo::{condensation, kosaraju_scc, tarjan_scc};
 use petgraph::Graph;
 use petgraph::graph::NodeIndex;
 use petgraph::prelude::EdgeRef;
-use wasm_encoder::{BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType, ImportSection, Module, RefType, TableSection, TableType, TypeSection, ValType};
+use wasm_encoder::{BlockType, CodeSection, CompositeType, EntityType, ExportKind, ExportSection, Function, FunctionSection, HeapType, ImportSection, MemArg, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
 use wasm_encoder::BlockType::FunctionType;
 use wasmparser::WasmFeatures;
-use crate::bytecode::Bytecode;
+use crate::bytecode::{ArrayType, Bytecode};
 use crate::classfile::resolved::attribute::Instruction;
 use crate::classfile::resolved::{AccessFlags, Attribute, Class, Constant, FieldType, Method, MethodDescriptor, ReturnType};
 use crate::env::Environment;
@@ -53,8 +53,53 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
     let routine_select_method = types.len();
     types.function([ValType::I32; 4], [ValType::I32]);
 
+    let object_type = create_base_object_type(&mut types);
+
+    let array_type = types.len();
+    types.rec(
+        [SubType {
+            is_final: false,
+            supertype_idx: Some(object_type),
+            composite_type: CompositeType::Struct(StructType {
+                fields: Box::new([
+                    wasm_encoder::FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: true,
+                    },
+                    wasm_encoder::FieldType {
+                        element_type: StorageType::Val(ValType::I64),
+                        mutable: true,
+                    },
+                    wasm_encoder::FieldType {
+                        element_type: StorageType::Val(ValType::Ref(RefType {
+                            nullable: false,
+                            heap_type: HeapType::Array,
+                        })),
+                        mutable: true,
+                    },
+                ]),
+            }),
+        }]
+    );
+
     let mut generated_function_signatures: HashMap<MethodDescriptor, u32> = HashMap::new();
+    let mut array_storage_types: HashMap<StorageType, u32> = HashMap::new();
     let mut generated_object_recs: HashMap<String, u32> = HashMap::new();
+
+    generated_object_recs.insert("java/lang/Object".into(), object_type);
+
+    for storage_type in [
+        StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct})),
+        StorageType::I8,
+        StorageType::I16,
+        StorageType::Val(ValType::I32),
+        StorageType::Val(ValType::I64),
+        StorageType::Val(ValType::F32),
+        StorageType::Val(ValType::F64)
+    ] {
+        array_storage_types.insert(storage_type, types.len());
+        types.array(&storage_type, true);
+    }
 
     let mut imports = ImportSection::new();
 
@@ -78,6 +123,17 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
             maximum: None,
         });
 
+        imports.import(
+            "jvm",
+            "memory",
+            EntityType::Memory(MemoryType {
+                minimum: 1,
+                maximum: Some(16384),
+                memory64: false,
+                shared: true,
+            }),
+        );
+
         imports.import("jvm", "init_static", EntityType::Function(init_static_type));
         jit_routine_select_method = 1;
         imports.import("jvm", "_jit_routine_select_method", EntityType::Function(routine_select_method));
@@ -93,12 +149,14 @@ pub fn jit_module<'m>(jvm: &JVM, env: &WasmEnvironment, methods: &'m [(&Method, 
         jvm_functions: JvmFuncs { init_static: 0, _jit_routine_select_method: jit_routine_select_method },
         type_section: &mut types,
         function_signatures: &mut generated_function_signatures,
+        array_storage_types: &array_storage_types,
         object_recs: &mut generated_object_recs,
         jvm,
         env,
         i32_in_func_type,
         _2_i32_in_func_type,
         ref_in_func_type,
+        array_object_type: array_type,
         thread,
     };
 
@@ -468,6 +526,22 @@ pub fn translate_method_java_to_wasm<'a, 'b>(method: &Method, class: &Class, mod
                     panic!("Couldn't find splice target for Invokevirtual");
                 }
             }
+            Bytecode::Bastore => {
+                'walk: {
+                    let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
+                    let target_length = stack_length - 2;
+
+                    for walk_index in (0..instruction.bytecode_index).rev() {
+                        let walk_stack_length = analyzed_stack[walk_index as usize].len();
+                        if walk_stack_length == target_length {
+                            assert!(splices.insert(walk_index + 1, SpliceType::Arraystore(StorageType::I8)).is_none());
+                            break 'walk;
+                        }
+                    }
+
+                    panic!("Couldn't find splice target for Invokevirtual");
+                }
+            }
             _ => {}
         }
     }
@@ -540,7 +614,9 @@ struct ModuleTranslation<'a> {
     i32_in_func_type: u32,
     _2_i32_in_func_type: u32,
     ref_in_func_type: u32,
+    array_object_type: u32,
     function_signatures: &'a mut HashMap<MethodDescriptor, u32>,
+    array_storage_types: &'a HashMap<StorageType, u32>,
     object_recs: &'a mut HashMap<String, u32>,
     jvm: &'a JVM,
     env: &'a WasmEnvironment,
@@ -570,28 +646,22 @@ impl<'a> ModuleTranslation<'a> {
             return *id;
         }
 
-        if &*class.this_class == "java/lang/Object" {
-            let id = create_base_object_type(self.type_section);
-            self.object_recs.insert((*class.this_class).clone(), id);
-            id
-        } else {
-            let super_id = self.get_object_type(class.super_class.as_ref().unwrap());
-            let id = self.type_section.len();
-            let sub_type = sub_type_from_class(super_id, &class.fields);
-            self.type_section.rec([sub_type]);
+        let super_id = self.get_object_type(class.super_class.as_ref().unwrap());
+        let id = self.type_section.len();
+        let sub_type = sub_type_from_class(super_id, &class.fields);
+        self.type_section.rec([sub_type]);
 
-            self.object_recs.insert((*class.this_class).clone(), id);
+        self.object_recs.insert((*class.this_class).clone(), id);
 
-            id
-        }
-
+        id
     }
 
 }
 
 #[derive(Debug)]
 enum SpliceType {
-    Invokevirtual(Arc<String>, Arc<Class>)
+    Invokevirtual(Arc<String>, Arc<Class>),
+    Arraystore(StorageType)
 }
 
 // #[derive(Debug)]
@@ -637,8 +707,13 @@ impl<'method, 'module: 'method> MethodTranslation<'method, 'module> {
                 from <= range.1 && to > range.1 && range.0 <= from
             }).count() as u32).checked_sub(1).unwrap()
         } else {
-            self.block_ranges.iter().filter(|range| {
-                range.0 <= from && range.0 > to && range.1 >= from
+            let (loop_block, _) = self.block_ranges.iter().enumerate()
+                .filter(|(_, block)| block.0 == to && block.2 == BlockRangeType::Loop)
+                .last()
+                .unwrap();
+
+            self.block_ranges.iter().enumerate().filter(|(index, range)| {
+                range.0 <= from && range.0 >= to && range.1 >= from && *index > loop_block
             }).count() as u32
         }
     }
@@ -702,7 +777,7 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
 
         match splice {
             SpliceType::Invokevirtual(method, class) => {
-                let jlo = t.module.jvm.is_class_linked("java/lang/Object", 0).unwrap();
+                let jlo = t.module.jvm.fetch_linked_class("java/lang/Object", 0).unwrap();
                 let object_ty = t.module.get_object_type(&jlo);
 
                 i!(Instr::LocalTee(t.locals.ref_accumulator));
@@ -720,6 +795,16 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 i!(Instr::Call(t.module.jvm_functions._jit_routine_select_method));
                 i!(Instr::LocalSet(t.locals.dynamic_dispatch_accumulator));
                 i!(Instr::LocalGet(t.locals.ref_accumulator));
+            }
+            SpliceType::Arraystore(storage_type) => {
+                let &array_type = t.module.array_storage_types.get(&storage_type).unwrap();
+                
+                i!(Instr::RefCastNullable(HeapType::Concrete(t.module.array_object_type)));
+                i!(Instr::StructGet {
+                    struct_type_index: t.module.array_object_type,
+                    field_index: 2
+                });
+                i!(Instr::RefCastNullable(HeapType::Concrete(array_type)));
             }
         }
 
@@ -742,6 +827,10 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
         }
         Bytecode::If_icmple(offset) => {
             i!(Instr::I32LeS);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
+        }
+        Bytecode::If_icmpne(offset) => {
+            i!(Instr::I32Ne);
             t.branch(instruction.bytes_index, offset as i32, function, |br| Instr::BrIf(br));
         }
         Bytecode::Irem => {
@@ -852,6 +941,49 @@ fn translate_instructions<'method, 'module>(instruction: &Instruction, function:
                 ty,
                 table: 0,
             });
+        }
+        Bytecode::Newarray(array_type) => {
+            let (storage_type, classpath) = match array_type {
+                ArrayType::Bool => (StorageType::I8, "[Z"),
+                ArrayType::Char => (StorageType::I16, "[C"),
+                ArrayType::Float => (StorageType::Val(ValType::F32), "[F"),
+                ArrayType::Double => (StorageType::Val(ValType::F64), "[D"),
+                ArrayType::Byte => (StorageType::I8, "[B"),
+                ArrayType::Short => (StorageType::I16, "[S"),
+                ArrayType::Int => (StorageType::Val(ValType::I32), "[I"),
+                ArrayType::Long => (StorageType::Val(ValType::I64), "[J")
+            };
+
+            let array_type_index = t.module.array_storage_types.get(&storage_type).unwrap();
+
+            let array_class = t.module.jvm.fetch_linked_class(classpath, 0).unwrap();
+            i!(Instr::ArrayNewDefault(*array_type_index));
+            i!(Instr::LocalSet(t.locals.ref_accumulator));
+
+            i!(Instr::I32Const(&*array_class as *const Class as i32));
+
+            let env = (*t.module.jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
+            let object_id_ptr = env.object_id.as_ptr();
+
+            i!(Instr::I32Const(object_id_ptr as i32));
+            i!(Instr::I64Const(1));
+            i!(Instr::I64AtomicRmwAdd(MemArg {offset: 0,align: 3,memory_index: 0}));
+
+            i!(Instr::LocalGet(t.locals.ref_accumulator));
+            i!(Instr::RefCastNonNull(HeapType::Array));
+
+            i!(Instr::StructNew(t.module.array_object_type));
+        }
+        Bytecode::Baload => {
+            let byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
+            
+            i!(Instr::LocalGet(t.locals.i32_accumulator));
+            i!(Instr::ArrayGet(*byte_array));
+        }
+        Bytecode::Bastore => {
+            let &byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
+
+            i!(Instr::ArraySet(byte_array));
         }
         Bytecode::New(constant_index) => {
             let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();

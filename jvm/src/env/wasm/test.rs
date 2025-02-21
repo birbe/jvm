@@ -79,7 +79,7 @@ impl BootstrapLoader for Arc<NativeClassLoader> {
     fn get_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
         let classfile = self.get_classfile(classpath).unwrap();
 
-        match thread.jvm.is_class_linked(classpath, self.get_id()) {
+        match thread.jvm.fetch_linked_class(classpath, self.get_id()) {
             None => thread.jvm.clone().generate_class(classpath, &classfile, Arc::new(self.clone()), thread),
             Some(class) => Ok(class)
         }
@@ -90,7 +90,7 @@ const THE_NULL: &Object = &Object::NULL;
 
 impl ClassLoader for Arc<NativeClassLoader> {
     fn find_class(&self, thread: &mut Thread, classpath: &str) -> Result<Arc<Class>, ClassLoadError> {
-        if let Some(class) = thread.jvm.is_class_linked(classpath, self.get_id()) {
+        if let Some(class) = thread.jvm.fetch_linked_class(classpath, self.get_id()) {
             return Ok(class);
         }
 
@@ -224,11 +224,12 @@ pub fn wasm_test() {
 
     // let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
     let method = class.get_method_by_name("jitTest", "()I").unwrap();
+    let method2 = class.get_method_by_name("<init>", "()V").unwrap();
 
     let env = (*jvm.environment).to_any().downcast_ref::<WasmEnvironment>().unwrap();
 
+    // let to_jit: [(&Method, &Class); 2] = [(method, &class), (method2, &class)];
     let to_jit: [(&Method, &Class); 1] = [(method, &class)];
-
 
     let time = js_sys::Date::now();
 
