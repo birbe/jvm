@@ -641,15 +641,21 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
                     panic!("Couldn't find splice target for Invokevirtual");
                 }
             }
-            Bytecode::Bastore => 'walk: {
+            Bytecode::Bastore | Bytecode::Iastore => 'walk: {
                 let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
                 let target_length = stack_length - 2;
+
+                let storage_type = match instruction.bytecode {
+                    Bytecode::Bastore => StorageType::I8,
+                    Bytecode::Iastore => StorageType::Val(ValType::I32),
+                    _ => unreachable!()
+                };
 
                 for walk_index in (0..instruction.bytecode_index).rev() {
                     let walk_stack_length = analyzed_stack[walk_index as usize].len();
                     if walk_stack_length == target_length {
                         assert!(splices
-                            .insert(walk_index + 1, SpliceType::Arraystore(StorageType::I8))
+                            .insert(walk_index + 1, SpliceType::Arraystore(storage_type))
                             .is_none());
                         break 'walk;
                     }
@@ -1315,20 +1321,42 @@ fn translate_instructions<'method, 'module>(
 
             i!(Instr::StructNew(t.module.array_object_type));
         }
-        Bytecode::Baload => {
-            let byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
+        Bytecode::Baload | Bytecode::Iaload => {
+            let array_object_type = t.module.array_object_type;
+
+            let storage_type = match instruction.bytecode {
+                Bytecode::Baload => StorageType::I8,
+                Bytecode::Iaload => StorageType::Val(ValType::I32),
+                _ => unreachable!()
+            };
+
+            let array_type = *t.module.array_storage_types.get(&storage_type).unwrap();
 
             //TODO use a splice
             i!(Instr::LocalSet(t.locals.i32_accumulator));
-            i!(Instr::RefCastNullable(HeapType::Concrete(*byte_array)));
+            i!(Instr::RefCastNullable(HeapType::Concrete(array_object_type)));
+            i!(Instr::StructGet {
+                struct_type_index: array_object_type,
+                field_index: 2
+            });
+            i!(Instr::RefCastNullable(HeapType::Concrete(array_type)));
             i!(Instr::LocalGet(t.locals.i32_accumulator));
 
-            i!(Instr::ArrayGetU(*byte_array));
+            match instruction.bytecode {
+                Bytecode::Baload => { i!(Instr::ArrayGetU(array_type)); },
+                Bytecode::Iaload => { i!(Instr::ArrayGet(array_type)); },
+                _ => unreachable!()
+            };
         }
         Bytecode::Bastore => {
             let &byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
 
             i!(Instr::ArraySet(byte_array));
+        }
+        Bytecode::Iastore => {
+            let &int_array = t.module.array_storage_types.get(&StorageType::Val(ValType::I32)).unwrap();
+
+            i!(Instr::ArraySet(int_array));
         }
         Bytecode::New(constant_index) => {
             let constant = t
