@@ -65,136 +65,136 @@ impl From<std::io::Error> for BytecodeParseError {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(non_camel_case_types)]
 pub enum Bytecode {
-    Aaload,                              //0x32
-    Aastore,                             //0x53
-    Aconst_null,                         //0x1
-    Aload(u16),                           //0x19
+    Aaload,      //0x32
+    Aastore,     //0x53
+    Aconst_null, //0x1
+    Aload(u16),  //0x19
     // Aload_n(u8),                         //0x2a - 0x2d
-    Anewarray(u16),                      //0xbd
-    Areturn,                             //0xb0
-    Arraylength,                         //0xbe
-    Astore(u16),                          //0x3a
+    Anewarray(u16), //0xbd
+    Areturn,        //0xb0
+    Arraylength,    //0xbe
+    Astore(u16),    //0x3a
     // Astore_n(u8),                        //0x4b - 0x4e
-    Athrow,                              //0xbf
-    Baload,                              //0x33
-    Bastore,                             //0x54
-    Bipush(i8),                          //0x10
-    Caload,                              //0x34
-    Castore,                             //0x55
-    Checkcast(u16),                      //0xc0
-    D2f,                                 //0x90
-    D2i,                                 //0x8e
-    D2l,                                 //0x8f
-    Dadd,                                //0x63
-    Daload,                              //0x31
-    Dastore,                             //0x52
-    Dcmpg,                               //0x98
-    Dcmpl,                               //0x97
-    Dconst_n(f64),                       //0xe - 0xf
-    Ddiv,                                //0x6f
-    Dload(u16),                           //0x18
+    Athrow,         //0xbf
+    Baload,         //0x33
+    Bastore,        //0x54
+    Bipush(i8),     //0x10
+    Caload,         //0x34
+    Castore,        //0x55
+    Checkcast(u16), //0xc0
+    D2f,            //0x90
+    D2i,            //0x8e
+    D2l,            //0x8f
+    Dadd,           //0x63
+    Daload,         //0x31
+    Dastore,        //0x52
+    Dcmpg,          //0x98
+    Dcmpl,          //0x97
+    Dconst_n(f64),  //0xe - 0xf
+    Ddiv,           //0x6f
+    Dload(u16),     //0x18
     // Dload_n(u8),                         //0x26 - 0x29
-    Dmul,                                //0x6b
-    Dneg,                                //0x77
-    Drem,                                //0x73
-    Dreturn,                             //0xaf
-    Dstore(u16),                          //0x39
+    Dmul,        //0x6b
+    Dneg,        //0x77
+    Drem,        //0x73
+    Dreturn,     //0xaf
+    Dstore(u16), //0x39
     // Dstore_n(u8),                        //0x47 - 0x4a
-    Dsub,                                //0x67
-    Dup,                                 //0x59
-    Dup_x1,                              //0x5a
-    Dup_x2,                              //0x5b
-    Dup2,                                //0x5c
-    Dup2_x1,                             //0x5d
-    Dup2_x2,                             //0x5e
-    F2d,                                 //0x8d
-    F2i,                                 //0x8b
-    F2l,                                 //0x8c
-    Fadd,                                //0x62
-    Faload,                              //0x30
-    Fastore,                             //0x51
-    Fcmpg,                               //0x96
-    Fcmpl,                               //0x95
-    Fconst_n(u8),                        //0xb - 0xd
-    Fdiv,                                //0x6e
-    Fload(u16),                           //0x17
+    Dsub,         //0x67
+    Dup,          //0x59
+    Dup_x1,       //0x5a
+    Dup_x2,       //0x5b
+    Dup2,         //0x5c
+    Dup2_x1,      //0x5d
+    Dup2_x2,      //0x5e
+    F2d,          //0x8d
+    F2i,          //0x8b
+    F2l,          //0x8c
+    Fadd,         //0x62
+    Faload,       //0x30
+    Fastore,      //0x51
+    Fcmpg,        //0x96
+    Fcmpl,        //0x95
+    Fconst_n(u8), //0xb - 0xd
+    Fdiv,         //0x6e
+    Fload(u16),   //0x17
     // Fload_n(u8),                         //0x22 - 0x25
-    Fmul,                                //0x6a
-    Fneg,                                //0x76
-    Frem,                                //0x72
-    Freturn,                             //0xae
-    Fstore(u16),                          //0x38
+    Fmul,        //0x6a
+    Fneg,        //0x76
+    Frem,        //0x72
+    Freturn,     //0xae
+    Fstore(u16), //0x38
     // Fstore_n(u8),                        //0x43 - 0x46
-    Fsub,                                //0x66
-    Getfield(u16),                       //0xb4
-    Getstatic(u16),                      //0xb2
-    Goto(i16),                           //0xa7
-    Goto_w(i32),                         //0xc8
-    I2b,                                 //0x91
-    I2c,                                 //0x92
-    I2d,                                 //0x87
-    I2f,                                 //0x86
-    I2l,                                 //0x85
-    I2s,                                 //0x93
-    Iadd,                                //0x60
-    Iaload,                              //0x2e
-    Iand,                                //0x7e
-    Iastore,                             //0x4f
-    Iconst_n_m1(i8),                     //0x2 - 0x8 (minus 1)
-    Idiv,                                //0x6c
-    If_acmpeq(i16),                      //0xa5
-    If_acmpne(i16),                      //0xa6
-    If_icmpeq(i16),                      //0x9f
-    If_icmpne(i16),                      //0xa0
-    If_icmplt(i16),                      //0xa1
-    If_icmpge(i16),                      //0xa2
-    If_icmpgt(i16),                      //0xa3
-    If_icmple(i16),                      //0xa4
-    Ifeq(i16),                           //0x99
-    Ifne(i16),                           //0x9a
-    Iflt(i16),                           //0x9b
-    Ifge(i16),                           //0x9c
-    Ifgt(i16),                           //0x9d
-    Ifle(i16),                           //0x9e
-    Ifnonnull(i16),                      //0xc7
-    Ifnull(i16),                         //0xc6
-    Iinc(u16, i16),                        //0x84
-    Iload(u16),                           //0x15
+    Fsub,            //0x66
+    Getfield(u16),   //0xb4
+    Getstatic(u16),  //0xb2
+    Goto(i16),       //0xa7
+    Goto_w(i32),     //0xc8
+    I2b,             //0x91
+    I2c,             //0x92
+    I2d,             //0x87
+    I2f,             //0x86
+    I2l,             //0x85
+    I2s,             //0x93
+    Iadd,            //0x60
+    Iaload,          //0x2e
+    Iand,            //0x7e
+    Iastore,         //0x4f
+    Iconst_n_m1(i8), //0x2 - 0x8 (minus 1)
+    Idiv,            //0x6c
+    If_acmpeq(i16),  //0xa5
+    If_acmpne(i16),  //0xa6
+    If_icmpeq(i16),  //0x9f
+    If_icmpne(i16),  //0xa0
+    If_icmplt(i16),  //0xa1
+    If_icmpge(i16),  //0xa2
+    If_icmpgt(i16),  //0xa3
+    If_icmple(i16),  //0xa4
+    Ifeq(i16),       //0x99
+    Ifne(i16),       //0x9a
+    Iflt(i16),       //0x9b
+    Ifge(i16),       //0x9c
+    Ifgt(i16),       //0x9d
+    Ifle(i16),       //0x9e
+    Ifnonnull(i16),  //0xc7
+    Ifnull(i16),     //0xc6
+    Iinc(u16, i16),  //0x84
+    Iload(u16),      //0x15
     // Iload_n(u8),                         //0x1a - 0x1d
-    Imul,                                //0x68
-    Ineg,                                //0x74
-    Instanceof(u16),                     //0xc1
-    Invokedynamic(u16),                  //0xba
-    Invokeinterface(u16, u8),            //0xb9
-    Invokespecial(u16),                  //0xb7
-    Invokestatic(u16),                   //0xb8
-    Invokevirtual(u16),                  //0xb6
-    Ior,                                 //0x80
-    Irem,                                //0x70
-    Ireturn,                             //0xac
-    Ishl,                                //0x78
-    Ishr,                                //0x7a
-    Istore(u16),                          //0x36
+    Imul,                     //0x68
+    Ineg,                     //0x74
+    Instanceof(u16),          //0xc1
+    Invokedynamic(u16),       //0xba
+    Invokeinterface(u16, u8), //0xb9
+    Invokespecial(u16),       //0xb7
+    Invokestatic(u16),        //0xb8
+    Invokevirtual(u16),       //0xb6
+    Ior,                      //0x80
+    Irem,                     //0x70
+    Ireturn,                  //0xac
+    Ishl,                     //0x78
+    Ishr,                     //0x7a
+    Istore(u16),              //0x36
     // Istore_n(u8),                        //0x3b - 0x3e
-    Isub,                                //0x64
-    Iushr,                               //0x7c
-    Ixor,                                //0x82
-    Jsr(u16),                            //0xa8
-    Jsr_w(u32),                          //0xc9
-    L2d,                                 //0x8a
-    L2f,                                 //0x89
-    L2i,                                 //0x88
-    Ladd,                                //0x61
-    Laload,                              //0x2f
-    Land,                                //0x7f
-    Lastore,                             //0x50
-    Lcmp,                                //0x94
-    Lconst_n(u8),                        //0x9 - 0xa
-    Ldc(u8),                             //0x12
-    Ldc_w(u16),                          //0x13
-    Ldc2_w(u16),                         //0x14
-    Ldiv,                                //0x6d
-    Lload(u16),                           //0x16
+    Isub,         //0x64
+    Iushr,        //0x7c
+    Ixor,         //0x82
+    Jsr(u16),     //0xa8
+    Jsr_w(u32),   //0xc9
+    L2d,          //0x8a
+    L2f,          //0x89
+    L2i,          //0x88
+    Ladd,         //0x61
+    Laload,       //0x2f
+    Land,         //0x7f
+    Lastore,      //0x50
+    Lcmp,         //0x94
+    Lconst_n(u8), //0x9 - 0xa
+    Ldc(u8),      //0x12
+    Ldc_w(u16),   //0x13
+    Ldc2_w(u16),  //0x14
+    Ldiv,         //0x6d
+    Lload(u16),   //0x16
     // Lload_n(u8),                         //0x1e - 0x21
     Lmul,                                //0x69
     Lneg,                                //0x75
@@ -204,27 +204,27 @@ pub enum Bytecode {
     Lreturn,                             //0xad
     Lshl,                                //0x79
     Lshr,                                //0x7b
-    Lstore(u16),                          //0x37
+    Lstore(u16),                         //0x37
     // Lstore_n(u8),                        //0x3f - 0x42
-    Lsub,                                //0x65
-    Lushr,                               //0x7d
-    Lxor,                                //0x83
-    Monitorenter,                        //0xc2
-    Monitorexit,                         //0xc3
-    Multianewarray(u16, u8),             //0xc5
-    New(u16),                            //0xbb
-    Newarray(ArrayType),                 //0xbc
-    Nop,                                 //0x0
-    Pop,                                 //0x57
-    Pop2,                                //0x58
-    Putfield(u16),                       //0xb5
-    Putstatic(u16),                      //0xb3
-    Ret(u16),                            //0xa9
-    Return,                              //0xb1
-    Saload,                              //0x35
-    Sastore,                             //0x56
-    Sipush(i16),                         //0x11
-    Swap,                                //0x5f
+    Lsub,                    //0x65
+    Lushr,                   //0x7d
+    Lxor,                    //0x83
+    Monitorenter,            //0xc2
+    Monitorexit,             //0xc3
+    Multianewarray(u16, u8), //0xc5
+    New(u16),                //0xbb
+    Newarray(ArrayType),     //0xbc
+    Nop,                     //0x0
+    Pop,                     //0x57
+    Pop2,                    //0x58
+    Putfield(u16),           //0xb5
+    Putstatic(u16),          //0xb3
+    Ret(u16),                //0xa9
+    Return,                  //0xb1
+    Saload,                  //0x35
+    Sastore,                 //0x56
+    Sipush(i16),             //0x11
+    Swap,                    //0x5f
     Tableswitch {
         default: i32,
         low: i32,
@@ -484,10 +484,13 @@ impl Bytecode {
                     0x37 => Self::Lstore(reader.read_u16::<BigEndian>()?),
                     0x39 => Self::Dstore(reader.read_u16::<BigEndian>()?),
                     0xa9 => Self::Ret(reader.read_u8()? as u16),
-                    0x84 => Self::Iinc(reader.read_u16::<BigEndian>()?, reader.read_i16::<BigEndian>()?),
+                    0x84 => Self::Iinc(
+                        reader.read_u16::<BigEndian>()?,
+                        reader.read_i16::<BigEndian>()?,
+                    ),
                     _ => unreachable!("Invalid wide opcode {opcode}"),
                 }
-            },
+            }
             _ => {
                 return Err(BytecodeParseError::InvalidOpcode(
                     opcode,

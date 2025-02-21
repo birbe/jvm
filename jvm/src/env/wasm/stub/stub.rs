@@ -354,11 +354,7 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
     );
 
     let native = 5;
-    imports.import(
-        "jvm",
-        "native",
-        EntityType::Function(interpret_func_type),
-    );
+    imports.import("jvm", "native", EntityType::Function(interpret_func_type));
 
     let push_frame = 6;
     imports.import("jvm", "push_frame", EntityType::Function(push_frame_type));
@@ -534,7 +530,7 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
         let max_locals = if !method.access_flags.contains(AccessFlags::NATIVE) {
             match method.attributes.get("Code") {
                 Some(Attribute::Code(code)) => code.max_locals,
-                _ => panic!("{method:#?}")
+                _ => panic!("{method:#?}"),
             }
         } else {
             256

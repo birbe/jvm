@@ -21,7 +21,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::vec::Splice;
 use wasm_encoder::BlockType::FunctionType;
-use wasm_encoder::{BlockType, CodeSection, CompositeType, ConstExpr, EntityType, ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, MemArg, MemorySection, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection, TableType, TypeSection, ValType};
+use wasm_encoder::{
+    BlockType, CodeSection, CompositeType, ConstExpr, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, MemArg,
+    MemorySection, MemoryType, Module, RefType, StorageType, StructType, SubType, TableSection,
+    TableType, TypeSection, ValType,
+};
 use wasmparser::WasmFeatures;
 
 type Instr<'a> = wasm_encoder::Instruction<'a>;
@@ -42,10 +47,13 @@ pub fn jit_module<'m>(
     let mut globals = GlobalSection::new();
     let mut memories = MemorySection::new();
 
-    globals.global(GlobalType {
-        val_type: ValType::I32,
-        mutable: true,
-    }, &ConstExpr::i32_const(-1));
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: true,
+        },
+        &ConstExpr::i32_const(-1),
+    );
 
     memories.memory(MemoryType {
         minimum: 1,
@@ -662,7 +670,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
             i32_accumulator: max_local,
             i64_accumulator: max_local + 1,
             ref_accumulator: max_local + 2,
-            cfg_flag: max_local + 3
+            cfg_flag: max_local + 3,
         },
         method_signature,
         flagged_jumps,
@@ -1195,7 +1203,9 @@ fn translate_instructions<'method, 'module>(
             i!(Instr::CallIndirect { ty, table: 0 });
         }
         Bytecode::Arraylength => {
-            i!(Instr::RefCastNullable(HeapType::Concrete(t.module.array_object_type)));
+            i!(Instr::RefCastNullable(HeapType::Concrete(
+                t.module.array_object_type
+            )));
             i!(Instr::StructGet {
                 struct_type_index: t.module.array_object_type,
                 field_index: 2
@@ -1203,19 +1213,26 @@ fn translate_instructions<'method, 'module>(
             i!(Instr::ArrayLen);
         }
         Bytecode::Getstatic(constant_index) => {
-            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+            let constant = t
+                .class
+                .constant_pool
+                .constants
+                .get(&constant_index)
+                .unwrap();
 
             let field_ref = constant.as_ref().unwrap();
             let classpath = &field_ref.class;
-            let target_class = t.class.class_loader.find_class(t.module.thread, classpath).unwrap();
+            let target_class = t
+                .class
+                .class_loader
+                .find_class(t.module.thread, classpath)
+                .unwrap();
 
             let (_, resolved_class) =
                 routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
 
             if resolved_class.this_class != t.class.this_class {
-                if !resolved_class.is_initialized() {
-
-                }
+                if !resolved_class.is_initialized() {}
             }
 
             let (index, field) = resolved_class
@@ -1227,10 +1244,15 @@ fn translate_instructions<'method, 'module>(
                 .unwrap();
 
             unsafe {
-                i!(Instr::I32Const(resolved_class.statics.as_mut_ptr().add(index) as i32));
+                i!(Instr::I32Const(
+                    resolved_class.statics.as_mut_ptr().add(index) as i32
+                ));
             }
 
-            if matches!(field.descriptor, FieldType::Array { .. } | FieldType::Class(_)) {
+            if matches!(
+                field.descriptor,
+                FieldType::Array { .. } | FieldType::Class(_)
+            ) {
                 i!(Instr::I32Load(MemArg {
                     memory_index: 0,
                     offset: 0,
@@ -1630,8 +1652,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
 
     for instruction in instructions {
         match instruction.bytecode {
-            Bytecode::Iload(index)
-            | Bytecode::Istore(index) => {
+            Bytecode::Iload(index) | Bytecode::Istore(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::I32
                 }) {
@@ -1649,8 +1670,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
                     locals.insert((index as u32, LocalType::I64), ValType::I64);
                 }
             }
-            Bytecode::Aload(index)
-            | Bytecode::Astore(index) => {
+            Bytecode::Aload(index) | Bytecode::Astore(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::Ref
                 }) {

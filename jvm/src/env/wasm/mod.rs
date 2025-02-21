@@ -3,6 +3,7 @@ use crate::classfile::resolved::{
     AccessFlags, Attribute, Class, ClassId, FieldType, Method, Ref, ReturnType,
 };
 use crate::env::wasm::jit::JitResult;
+use crate::env::wasm::native::native;
 use crate::env::wasm::stub::generate_helper_wasm;
 use crate::env::wasm::stub::stub::create_stub_module;
 use crate::env::Object;
@@ -24,7 +25,6 @@ use std::sync::Arc;
 use wasm_bindgen::JsValue;
 use wasm_encoder::Module;
 use wasmparser::WasmFeatures;
-use crate::env::wasm::native::native;
 
 pub static OBJECT_REF_SLOTS: OnceCell<Mutex<RefSlots>> = OnceCell::new();
 pub static NULL_TABLE_SLOT: OnceCell<unsafe extern "C" fn(i32)> = OnceCell::new();
@@ -544,7 +544,7 @@ impl Environment for WasmEnvironment {
             "debug_framestack",
             "push_frame",
             "debug",
-            "native"
+            "native",
         ] {
             let key: JsValue = cross_import.into();
 
@@ -632,10 +632,15 @@ impl Environment for WasmEnvironment {
         let operand = match &method_handle.context {
             ExecutionContext::Interpret(_) => unreachable!(), //Unused on WASM
             ExecutionContext::Compiled | ExecutionContext::Native => {
-                let (max_locals, max_stack) = if let Some(Attribute::Code(code)) = method_handle.method.attributes.get("Code") {
+                let (max_locals, max_stack) = if let Some(Attribute::Code(code)) =
+                    method_handle.method.attributes.get("Code")
+                {
                     (code.max_locals as usize, code.max_stack as usize)
                 } else {
-                    assert!(method_handle.method.access_flags.contains(AccessFlags::NATIVE));
+                    assert!(method_handle
+                        .method
+                        .access_flags
+                        .contains(AccessFlags::NATIVE));
                     (256, 0)
                 };
 

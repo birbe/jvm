@@ -9,9 +9,7 @@ use std::hash::Hasher;
 use std::sync::atomic::AtomicU64;
 
 #[no_mangle]
-pub extern "C" fn native(
-    thread: &mut Thread,
-) -> Option<Box<Operand>> {
+pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
     let jvm = thread.jvm.clone();
     let class_loader = thread.class_loader.clone();
 
@@ -37,7 +35,11 @@ pub extern "C" fn native(
                 // ("java/lang/Class", "registerNatives", "()V") => {
                 //     Operand::new_data(0)
                 // },
-                ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
+                (
+                    "java/lang/Class",
+                    "getPrimitiveClass",
+                    "(Ljava/lang/String;)Ljava/lang/Class;",
+                ) => {
                     let op = std::mem::replace(&mut args[0], Object::NULL.consume());
                     let string_ref = unsafe { thread.jvm.environment.object_from_operand(op) };
                     let string = thread.jvm.get_string(&string_ref);
@@ -85,7 +87,7 @@ pub extern "C" fn native(
                             "I",
                         )
                     }
-                        .data() as *const Class;
+                    .data() as *const Class;
 
                     jvm.new_string(&unsafe { &*class_ptr }.this_class, thread)
                         .consume()
@@ -104,7 +106,7 @@ pub extern "C" fn native(
                             "I",
                         )
                     }
-                        .data() as *const Class;
+                    .data() as *const Class;
 
                     let class = unsafe { &*class_ptr };
 
@@ -126,7 +128,9 @@ pub extern "C" fn native(
                     let fields: Vec<Object> = class
                         .fields
                         .iter()
-                        .filter(|field| !public_only || field.access_flags.contains(AccessFlags::PUBLIC))
+                        .filter(|field| {
+                            !public_only || field.access_flags.contains(AccessFlags::PUBLIC)
+                        })
                         .enumerate()
                         .map(|(slot, field)| {
                             let field_object = jvm.environment.new_object(&field_class);
@@ -144,7 +148,8 @@ pub extern "C" fn native(
                                 FieldType::Class(classpath) => &classpath,
                             };
 
-                            let declaring_class = jvm.environment.clone_reference(&object).consume();
+                            let declaring_class =
+                                jvm.environment.clone_reference(&object).consume();
                             let name = jvm.new_string(&field.name, thread).consume();
 
                             let type_class = class
@@ -157,8 +162,9 @@ pub extern "C" fn native(
                                 .clone_reference(type_class.class_instance.get().unwrap())
                                 .consume();
                             let modifiers = Operand::new_data(field.access_flags.bits() as u32);
-                            let trusted_final =
-                                Operand::new_data(field.access_flags.contains(AccessFlags::FINAL) as u32);
+                            let trusted_final = Operand::new_data(
+                                field.access_flags.contains(AccessFlags::FINAL) as u32,
+                            );
                             let slot = Operand::new_data(slot as u32);
                             let signature = jvm
                                 .new_string(
@@ -166,7 +172,8 @@ pub extern "C" fn native(
                                     thread,
                                 )
                                 .consume();
-                            let annotations = jvm.environment.new_array(ArrayType::Byte, 0).consume();
+                            let annotations =
+                                jvm.environment.new_array(ArrayType::Byte, 0).consume();
 
                             let args = Box::new([
                                 jvm.environment.clone_reference(&field_object).consume(),
@@ -213,7 +220,7 @@ pub extern "C" fn native(
                             "I",
                         )
                     }
-                        .data() as *const Class;
+                    .data() as *const Class;
 
                     Operand::new_data(unsafe { &*class_ptr }.is_primitive as u32)
                 }
@@ -261,14 +268,21 @@ pub extern "C" fn native(
                     for (index, entry) in props.iter().flatten().enumerate() {
                         let string = jvm.new_string(entry, thread).consume();
                         unsafe {
-                            jvm.environment
-                                .set_object_array_element(&properties, index as i32, string);
+                            jvm.environment.set_object_array_element(
+                                &properties,
+                                index as i32,
+                                string,
+                            );
                         }
                     }
 
                     properties.consume()
                 }
-                ("jdk/internal/util/SystemProps$Raw", "platformProperties", "()[Ljava/lang/String;") => {
+                (
+                    "jdk/internal/util/SystemProps$Raw",
+                    "platformProperties",
+                    "()[Ljava/lang/String;",
+                ) => {
                     let string = jvm
                         .bootstrap_classloader
                         .find_class(thread, "java/lang/String")
@@ -303,8 +317,9 @@ pub extern "C" fn native(
                                 clone = jvm.environment.new_object_array(class, length);
 
                                 for i in 0..length {
-                                    let element =
-                                        unsafe { jvm.environment.get_object_array_element(&src, i) };
+                                    let element = unsafe {
+                                        jvm.environment.get_object_array_element(&src, i)
+                                    };
                                     unsafe {
                                         jvm.environment.set_object_array_element(
                                             &clone,
@@ -324,7 +339,8 @@ pub extern "C" fn native(
                         clone = jvm.environment.new_array(array_type, length);
 
                         for i in 0..length {
-                            let element = unsafe { jvm.environment.get_array_element(array_type, &src, i) };
+                            let element =
+                                unsafe { jvm.environment.get_array_element(array_type, &src, i) };
                             unsafe {
                                 jvm.environment
                                     .set_array_element(array_type, &clone, i, element)
@@ -387,8 +403,9 @@ pub extern "C" fn native(
                     let array_type = match &src_class.this_class[1..] {
                         "[" => {
                             for i in 0..length {
-                                let element =
-                                    unsafe { jvm.environment.get_object_array_element(&src, i + src_pos) };
+                                let element = unsafe {
+                                    jvm.environment.get_object_array_element(&src, i + src_pos)
+                                };
                                 unsafe {
                                     jvm.environment.set_object_array_element(
                                         &dest,
@@ -411,8 +428,12 @@ pub extern "C" fn native(
                                 .get_array_element(array_type, &src, i + src_pos)
                         };
                         unsafe {
-                            jvm.environment
-                                .set_array_element(array_type, &dest, i + dest_pos, element)
+                            jvm.environment.set_array_element(
+                                array_type,
+                                &dest,
+                                i + dest_pos,
+                                element,
+                            )
                         };
                     }
 
@@ -439,11 +460,12 @@ pub extern "C" fn native(
                             "I",
                         )
                     }
-                        .data() as *const Class;
+                    .data() as *const Class;
                     let class = unsafe { &*class_ptr };
 
                     let string_obj = std::mem::replace(&mut args[2], Object::NULL.consume());
-                    let string_ref = unsafe { thread.jvm.environment.object_from_operand(string_obj) };
+                    let string_ref =
+                        unsafe { thread.jvm.environment.object_from_operand(string_obj) };
                     let string = thread.jvm.get_string(&string_ref);
 
                     let base_index = class
@@ -503,7 +525,7 @@ pub extern "C" fn native(
                                 &*field.descriptor_string,
                             )
                         }
-                            .data() as i32
+                        .data() as i32
                             == test
                         {
                             unsafe {
@@ -565,7 +587,7 @@ pub extern "C" fn native(
                                 &*field.descriptor_string,
                             )
                         }
-                            .data() as i64
+                        .data() as i64
                             == test
                         {
                             unsafe {
@@ -596,12 +618,16 @@ pub extern "C" fn native(
                     let index = args[2].data() as usize;
 
                     let test = unsafe {
-                        jvm.environment
-                            .object_from_operand(std::mem::replace(&mut args[3], Object::NULL.consume()))
+                        jvm.environment.object_from_operand(std::mem::replace(
+                            &mut args[3],
+                            Object::NULL.consume(),
+                        ))
                     };
                     let target = unsafe {
-                        jvm.environment
-                            .object_from_operand(std::mem::replace(&mut args[4], Object::NULL.consume()))
+                        jvm.environment.object_from_operand(std::mem::replace(
+                            &mut args[4],
+                            Object::NULL.consume(),
+                        ))
                     };
 
                     if obj_class.is_array {
@@ -609,8 +635,9 @@ pub extern "C" fn native(
                             jvm.environment
                                 .get_object_array_element(&object, index as i32)
                         }
-                            .consume();
-                        let current_ref = unsafe { jvm.environment.object_ref_from_operand(&current) };
+                        .consume();
+                        let current_ref =
+                            unsafe { jvm.environment.object_ref_from_operand(&current) };
 
                         if jvm.environment.object_ref_eq(&test, &current_ref) {
                             unsafe {
@@ -644,7 +671,8 @@ pub extern "C" fn native(
                                 &*field.descriptor_string,
                             )
                         };
-                        let current_ref = unsafe { jvm.environment.object_ref_from_operand(&current) };
+                        let current_ref =
+                            unsafe { jvm.environment.object_ref_from_operand(&current) };
 
                         if jvm.environment.object_ref_eq(&test, &current_ref) {
                             unsafe {
@@ -680,8 +708,11 @@ pub extern "C" fn native(
 
                     if obj_class.is_array {
                         unsafe {
-                            jvm.environment
-                                .get_array_element(ArrayType::Long, &object, index as i32)
+                            jvm.environment.get_array_element(
+                                ArrayType::Long,
+                                &object,
+                                index as i32,
+                            )
                         }
                     } else {
                         let (field, field_class) = [obj_class]
@@ -723,8 +754,12 @@ pub extern "C" fn native(
 
                     if obj_class.is_array {
                         unsafe {
-                            jvm.environment
-                                .set_array_element(ArrayType::Long, &object, index as i32, long);
+                            jvm.environment.set_array_element(
+                                ArrayType::Long,
+                                &object,
+                                index as i32,
+                                long,
+                            );
                         }
                     } else {
                         let (field, field_class) = [obj_class]
@@ -767,7 +802,7 @@ pub extern "C" fn native(
                             jvm.environment
                                 .get_object_array_element(&object, index as i32)
                         }
-                            .consume()
+                        .consume()
                     } else {
                         let (field, field_class) = [obj_class]
                             .into_iter()
@@ -787,7 +822,8 @@ pub extern "C" fn native(
                                 &*field.descriptor_string,
                             )
                         };
-                        let field_ref = unsafe { jvm.environment.object_ref_from_operand(&field_op) };
+                        let field_ref =
+                            unsafe { jvm.environment.object_ref_from_operand(&field_op) };
                         jvm.environment.clone_reference(&field_ref).consume()
                     }
                 }
@@ -850,7 +886,7 @@ pub extern "C" fn native(
                             "I",
                         )
                     }
-                        .data() as *const Class;
+                    .data() as *const Class;
 
                     let class = unsafe { &*class_ptr };
 
@@ -875,7 +911,7 @@ pub extern "C" fn native(
                             "I",
                         )
                     }
-                        .data() as *const Class;
+                    .data() as *const Class;
 
                     let class = unsafe { &*class_ptr };
 
@@ -946,15 +982,9 @@ pub extern "C" fn native(
 
                     Operand::new_data(0)
                 }
-                ("java/lang/Float", "floatToRawIntBits", "(F)I") => {
-                    args[0].copy_data()
-                }
-                ("java/lang/Double", "doubleToRawLongBits", "(D)J") => {
-                    args[0].copy_data()
-                }
-                ("java/lang/Double", "longBitsToDouble", "(J)D") => {
-                    args[0].copy_data()
-                }
+                ("java/lang/Float", "floatToRawIntBits", "(F)I") => args[0].copy_data(),
+                ("java/lang/Double", "doubleToRawLongBits", "(D)J") => args[0].copy_data(),
+                ("java/lang/Double", "longBitsToDouble", "(J)D") => args[0].copy_data(),
                 ("java/io/FileDescriptor", "initIDs", "()V") => {
                     let fd_class = jvm
                         .bootstrap_classloader
@@ -1001,8 +1031,8 @@ pub extern "C" fn native(
             }
         }
     };
-    
+
     thread.frame_stack.pop();
-    
+
     Some(Box::new(op))
 }

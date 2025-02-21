@@ -245,9 +245,13 @@ pub fn wasm_test() {
         .find_class(&mut main_thread, "java/lang/StringConcatHelper")
         .unwrap();
 
-    let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
+    let method = string
+        .get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;")
+        .unwrap();
     let method2 = main.get_method_by_name("<init>", "()V").unwrap();
-    let method3 = string.get_method_by_name("concat", "(Ljava/lang/String;)Ljava/lang/String;").unwrap();
+    let method3 = string
+        .get_method_by_name("concat", "(Ljava/lang/String;)Ljava/lang/String;")
+        .unwrap();
 
     let env = (*jvm.environment)
         .to_any()
@@ -255,9 +259,25 @@ pub fn wasm_test() {
         .unwrap();
 
     let to_jit = vec![
-        (&**string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap(), &*string),
-        (&**string_concat_helper.get_method_by_name("simpleConcat", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;").unwrap(), &*string_concat_helper),
-        (&**main.get_method_by_name("jitTest", "()I").unwrap(), &*main)
+        (
+            &**string
+                .get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;")
+                .unwrap(),
+            &*string,
+        ),
+        (
+            &**string_concat_helper
+                .get_method_by_name(
+                    "simpleConcat",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;",
+                )
+                .unwrap(),
+            &*string_concat_helper,
+        ),
+        (
+            &**main.get_method_by_name("jitTest", "()I").unwrap(),
+            &*main,
+        ),
     ];
 
     let jit = jit_module(&jvm, env, &to_jit, &mut main_thread);

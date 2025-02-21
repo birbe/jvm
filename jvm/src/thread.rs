@@ -1359,8 +1359,7 @@ impl ThreadHandle {
                 let [op] = frame.pop::<1>();
                 frame.locals[*index as usize] = op;
             }
-            Bytecode::Istore(index)
-            | Bytecode::Fstore(index) => {
+            Bytecode::Istore(index) | Bytecode::Fstore(index) => {
                 let [op] = frame.pop::<1>();
                 frame.locals[*index as usize] = op;
             }
@@ -1378,8 +1377,7 @@ impl ThreadHandle {
 
                 frame.push([Operand::new_data2((op1 << 32) | op2)]);
             }
-            Bytecode::Iload(index)
-            | Bytecode::Fload(index) => {
+            Bytecode::Iload(index) | Bytecode::Fload(index) => {
                 frame.push([frame.locals[*index as usize].copy_data()]);
             }
             Bytecode::Monitorenter | Bytecode::Monitorexit => {
