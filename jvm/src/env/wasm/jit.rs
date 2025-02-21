@@ -276,7 +276,6 @@ pub fn get_instruction_edges(
         }
         Bytecode::Lookupswitch(_, _) => unimplemented!(),
         Bytecode::Tableswitch { .. } => unimplemented!(),
-        Bytecode::Wide(_) => unimplemented!(),
         // Bytecode::Athrow => vec![],
         _ => {
             if instruction.bytecode_index < last_index {
@@ -985,9 +984,34 @@ fn translate_instructions<'method, 'module>(
             });
         }
         Bytecode::Ifne(offset) => {
+            i!(Instr::I32Const(0));
+            i!(Instr::I32Ne);
             t.branch(instruction.bytes_index, offset as i32, function, |br| {
                 Instr::BrIf(br)
             });
+        }
+        Bytecode::Iflt(offset) => {
+            i!(Instr::I32Const(0));
+            i!(Instr::I32LtS);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::I2b => {
+            i!(Instr::I32Const(0xff));
+            i!(Instr::I32And);
+            i!(Instr::I32Extend8S);
+        }
+        Bytecode::Iand => {
+            i!(Instr::I32And);
+        }
+        Bytecode::Ior => {
+            i!(Instr::I32Or);
+        }
+        Bytecode::Ishl => {
+            i!(Instr::I32Const(0b11111));
+            i!(Instr::I32And);
+            i!(Instr::I32Shl);
         }
         Bytecode::Ifeq(offset) => {
             i!(Instr::I32Eqz);
@@ -1001,8 +1025,26 @@ fn translate_instructions<'method, 'module>(
                 Instr::BrIf(br)
             });
         }
+        Bytecode::If_icmpgt(offset) => {
+            i!(Instr::I32GtS);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
         Bytecode::If_icmple(offset) => {
             i!(Instr::I32LeS);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::If_icmplt(offset) => {
+            i!(Instr::I32LtS);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::If_icmpeq(offset) => {
+            i!(Instr::I32Eq);
             t.branch(instruction.bytes_index, offset as i32, function, |br| {
                 Instr::BrIf(br)
             });
@@ -1143,10 +1185,6 @@ fn translate_instructions<'method, 'module>(
                 method.access_flags.contains(AccessFlags::STATIC),
             );
 
-            if method.access_flags.contains(AccessFlags::NATIVE) {
-                todo!()
-            }
-
             let func_id = t
                 .module
                 .env
@@ -1155,6 +1193,66 @@ fn translate_instructions<'method, 'module>(
             i!(Instr::LocalGet(t.method_signature.thread_local));
             i!(Instr::I32Const(func_id as i32));
             i!(Instr::CallIndirect { ty, table: 0 });
+        }
+        Bytecode::Arraylength => {
+            i!(Instr::RefCastNullable(HeapType::Concrete(t.module.array_object_type)));
+            i!(Instr::StructGet {
+                struct_type_index: t.module.array_object_type,
+                field_index: 2
+            });
+            i!(Instr::ArrayLen);
+        }
+        Bytecode::Getstatic(constant_index) => {
+            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+
+            let field_ref = constant.as_ref().unwrap();
+            let classpath = &field_ref.class;
+            let target_class = t.class.class_loader.find_class(t.module.thread, classpath).unwrap();
+
+            let (_, resolved_class) =
+                routine_resolve_field(&field_ref.name_and_type, &target_class).unwrap();
+
+            if resolved_class.this_class != t.class.this_class {
+                if !resolved_class.is_initialized() {
+
+                }
+            }
+
+            let (index, field) = resolved_class
+                .fields
+                .iter()
+                .filter(|field| field.access_flags.contains(AccessFlags::STATIC))
+                .enumerate()
+                .find(|(_, field)| field.name == field_ref.name_and_type.name)
+                .unwrap();
+
+            unsafe {
+                i!(Instr::I32Const(resolved_class.statics.as_mut_ptr().add(index) as i32));
+            }
+
+            if matches!(field.descriptor, FieldType::Array { .. } | FieldType::Class(_)) {
+                i!(Instr::I32Load(MemArg {
+                    memory_index: 0,
+                    offset: 0,
+                    align: 2
+                }));
+                i!(Instr::TableGet(1));
+            } else if matches!(field.descriptor, FieldType::Double | FieldType::Long) {
+                i!(Instr::I64Load(MemArg {
+                    memory_index: 0,
+                    offset: 0,
+                    align: 3
+                }));
+            } else {
+                i!(Instr::I32Load(MemArg {
+                    memory_index: 0,
+                    offset: 0,
+                    align: 2
+                }));
+            }
+        }
+        Bytecode::Pop => {
+            i!(Instr::Drop);
         }
         Bytecode::Newarray(array_type) => {
             let (storage_type, classpath) = match array_type {
@@ -1198,8 +1296,12 @@ fn translate_instructions<'method, 'module>(
         Bytecode::Baload => {
             let byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
 
+            //TODO use a splice
+            i!(Instr::LocalSet(t.locals.i32_accumulator));
+            i!(Instr::RefCastNullable(HeapType::Concrete(*byte_array)));
             i!(Instr::LocalGet(t.locals.i32_accumulator));
-            i!(Instr::ArrayGet(*byte_array));
+
+            i!(Instr::ArrayGetU(*byte_array));
         }
         Bytecode::Bastore => {
             let &byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
@@ -1221,7 +1323,7 @@ fn translate_instructions<'method, 'module>(
                     .retrieve_class(path, &*t.class.class_loader, t.module.thread)
                     .unwrap();
 
-                if !t.class.is_initialized() {
+                if !target_class.is_initialized() {
                     i!(Instr::I32Const(t.class as *const Class as i32));
                     i!(Instr::LocalGet(t.method_signature.thread_local));
                     i!(Instr::Call(t.module.jvm_functions.init_static));
@@ -1377,10 +1479,6 @@ fn translate_instructions<'method, 'module>(
             let method = method_class.get_method(&ref_.name_and_type).unwrap();
             let ty = t.module.get_method_descriptor_id(&method.descriptor, true);
 
-            if method.access_flags.contains(AccessFlags::NATIVE) {
-                todo!()
-            }
-
             let func_id = t
                 .module
                 .env
@@ -1451,26 +1549,37 @@ fn translate_instructions<'method, 'module>(
         Bytecode::Bipush(byte) => {
             i!(Instr::I32Const(byte as i32));
         }
-        Bytecode::Istore(index) | Bytecode::Istore_n(index) => {
+        Bytecode::Istore(index) => {
             let local = t.local_map.get(index as u32, LocalType::I32);
             i!(Instr::LocalSet(local));
         }
-        Bytecode::Astore(index) | Bytecode::Astore_n(index) => {
+        Bytecode::Lstore(index) => {
+            let local = t.local_map.get(index as u32, LocalType::I64);
+            i!(Instr::LocalSet(local));
+        }
+        Bytecode::Astore(index) => {
             let local = t.local_map.get(index as u32, LocalType::Ref);
             i!(Instr::LocalSet(local));
         }
-        Bytecode::Iload(index) | Bytecode::Iload_n(index) => {
+        Bytecode::Iload(index) => {
             let local = t.local_map.get(index as u32, LocalType::I32);
             i!(Instr::LocalGet(local));
         }
-        Bytecode::Aload(index) | Bytecode::Aload_n(index) => {
+        Bytecode::Aload(index) => {
             let local = t.local_map.get(index as u32, LocalType::Ref);
+            i!(Instr::LocalGet(local));
+        }
+        Bytecode::Lload(index) => {
+            let local = t.local_map.get(index as u32, LocalType::I64);
             i!(Instr::LocalGet(local));
         }
         Bytecode::Ireturn => {
             i!(Instr::Return);
         }
         Bytecode::Return => {
+            i!(Instr::Return);
+        }
+        Bytecode::Areturn => {
             i!(Instr::Return);
         }
         // _ => { i!(Instr::Nop); }
@@ -1522,9 +1631,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
     for instruction in instructions {
         match instruction.bytecode {
             Bytecode::Iload(index)
-            | Bytecode::Iload_n(index)
-            | Bytecode::Istore(index)
-            | Bytecode::Istore_n(index) => {
+            | Bytecode::Istore(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::I32
                 }) {
@@ -1533,7 +1640,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
                     locals.insert((index as u32, LocalType::I32), ValType::I32);
                 }
             }
-            Bytecode::Lload(index) | Bytecode::Lload_n(index) => {
+            Bytecode::Lload(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::I64
                 }) {
@@ -1543,9 +1650,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
                 }
             }
             Bytecode::Aload(index)
-            | Bytecode::Aload_n(index)
-            | Bytecode::Astore(index)
-            | Bytecode::Astore_n(index) => {
+            | Bytecode::Astore(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::Ref
                 }) {
@@ -1560,7 +1665,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
                     );
                 }
             }
-            Bytecode::Fstore(index) | Bytecode::Fstore_n(index) => {
+            Bytecode::Fstore(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::F32
                 }) {
@@ -1569,7 +1674,7 @@ fn analyze_locals(method_signature: &MethodSignature, instructions: &[Instructio
                     locals.insert((index as u32, LocalType::F32), ValType::F32);
                 }
             }
-            Bytecode::Dstore(index) | Bytecode::Dstore_n(index) => {
+            Bytecode::Dstore(index) => {
                 if locals.iter().any(|((e_index, local), _)| {
                     *e_index == index as u32 && *local != LocalType::F64
                 }) {
@@ -1764,12 +1869,10 @@ fn analyze_stack(
             Bytecode::Aastore => (-3, &[]),
             Bytecode::Aconst_null => (0, &[Ref]),
             Bytecode::Aload(_) => (0, &[Ref]),
-            Bytecode::Aload_n(_) => (0, &[Ref]),
             Bytecode::Anewarray(_) => (-1, &[Ref]),
             Bytecode::Areturn => (-1, &[]),
             Bytecode::Arraylength => (-1, &[Class1]),
             Bytecode::Astore(_) => (-1, &[]),
-            Bytecode::Astore_n(_) => (-1, &[]),
             Bytecode::Athrow => (-1, &[]),
             Bytecode::Baload => (-2, &[Class1]),
             Bytecode::Bastore => (-3, &[]),
@@ -1788,13 +1891,11 @@ fn analyze_stack(
             Bytecode::Dconst_n(_) => (0, &[Class2]),
             Bytecode::Ddiv => (-2, &[Class2]),
             Bytecode::Dload(_) => (0, &[Class2]),
-            Bytecode::Dload_n(_) => (0, &[Class2]),
             Bytecode::Dmul => (-2, &[Class2]),
             Bytecode::Dneg => (-1, &[Class2]),
             Bytecode::Drem => (-2, &[Class2]),
             Bytecode::Dreturn => (-1, &[]),
             Bytecode::Dstore(_) => (-1, &[]),
-            Bytecode::Dstore_n(_) => (-1, &[]),
             Bytecode::Dsub => (-2, &[Class2]),
             Bytecode::Dup => (-2, &[*stack.last().unwrap(), *stack.last().unwrap()]),
             Bytecode::Dup_x2 => todo!(),
@@ -1811,14 +1912,12 @@ fn analyze_stack(
             Bytecode::Fcmpl => (-2, &[Class1]),
             Bytecode::Fconst_n(_) => (0, &[Class1]),
             Bytecode::Fdiv => (-2, &[Class1]),
-            Bytecode::Fload(_) => (0, &[]),
-            Bytecode::Fload_n(_) => (0, &[Class1]),
+            Bytecode::Fload(_) => (0, &[Class1]),
             Bytecode::Fmul => (-2, &[Class1]),
             Bytecode::Fneg => (-1, &[Class1]),
             Bytecode::Frem => (-2, &[Class1]),
             Bytecode::Freturn => (-1, &[]),
             Bytecode::Fstore(_) => (-1, &[]),
-            Bytecode::Fstore_n(_) => (-1, &[]),
             Bytecode::Fsub => (-2, &[Class1]),
             Bytecode::Getfield(constant_index) => {
                 let constant = class.constant_pool.constants.get(&constant_index).unwrap();
@@ -1889,7 +1988,6 @@ fn analyze_stack(
 
             Bytecode::Iinc(_, _) => (0, &[]),
             Bytecode::Iload(_) => (0, &[Class1]),
-            Bytecode::Iload_n(_) => (0, &[Class1]),
             Bytecode::Imul => (-2, &[Class1]),
             Bytecode::Ineg => (-1, &[Class1]),
             Bytecode::Instanceof(_) => (-1, &[Class1]),
@@ -1932,7 +2030,6 @@ fn analyze_stack(
             Bytecode::Ishr => (-2, &[Class1]),
             Bytecode::Ishl => (-2, &[Class1]),
             Bytecode::Istore(_) => (-1, &[]),
-            Bytecode::Istore_n(_) => (-1, &[]),
             Bytecode::Isub => (-2, &[Class1]),
             Bytecode::Iushr => (-2, &[Class1]),
             Bytecode::Ixor => (-2, &[Class1]),
@@ -1967,7 +2064,6 @@ fn analyze_stack(
             Bytecode::Ldc2_w(_) => todo!(),
             Bytecode::Ldiv => (-2, &[Class2]),
             Bytecode::Lload(_) => (0, &[Class2]),
-            Bytecode::Lload_n(_) => (0, &[Class2]),
             Bytecode::Lmul => (-2, &[Class2]),
             Bytecode::Lneg => (-1, &[Class2]),
             Bytecode::Lookupswitch(_, _) => {
@@ -1981,7 +2077,6 @@ fn analyze_stack(
             Bytecode::Lshl => (-2, &[Class2]),
             Bytecode::Lshr => (-2, &[Class2]),
             Bytecode::Lstore(_) => (-1, &[]),
-            Bytecode::Lstore_n(_) => (-1, &[]),
             Bytecode::Lsub => (-2, &[Class2]),
             Bytecode::Lushr => (-2, &[Class2]),
             Bytecode::Lxor => (-2, &[Class2]),
@@ -1995,7 +2090,7 @@ fn analyze_stack(
             Bytecode::Pop2 => todo!(),
             Bytecode::Putfield(_) => (-2, &[]),
             Bytecode::Putstatic(_) => (-1, &[]),
-            Bytecode::Ret => (-0, &[]),
+            Bytecode::Ret(_) => (-0, &[]),
             Bytecode::Return => (0, &[]),
             Bytecode::Saload => (-2, &[Class1]),
             Bytecode::Sastore => (-3, &[Class1]),
@@ -2010,7 +2105,6 @@ fn analyze_stack(
                 stack.clear();
                 (0, &[])
             }
-            Bytecode::Wide(_) => todo!(),
             Bytecode::Dup_x1 => todo!(),
         };
 

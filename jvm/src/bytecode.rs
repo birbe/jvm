@@ -68,13 +68,13 @@ pub enum Bytecode {
     Aaload,                              //0x32
     Aastore,                             //0x53
     Aconst_null,                         //0x1
-    Aload(u8),                           //0x19
-    Aload_n(u8),                         //0x2a - 0x2d
+    Aload(u16),                           //0x19
+    // Aload_n(u8),                         //0x2a - 0x2d
     Anewarray(u16),                      //0xbd
     Areturn,                             //0xb0
     Arraylength,                         //0xbe
-    Astore(u8),                          //0x3a
-    Astore_n(u8),                        //0x4b - 0x4e
+    Astore(u16),                          //0x3a
+    // Astore_n(u8),                        //0x4b - 0x4e
     Athrow,                              //0xbf
     Baload,                              //0x33
     Bastore,                             //0x54
@@ -92,14 +92,14 @@ pub enum Bytecode {
     Dcmpl,                               //0x97
     Dconst_n(f64),                       //0xe - 0xf
     Ddiv,                                //0x6f
-    Dload(u8),                           //0x18
-    Dload_n(u8),                         //0x26 - 0x29
+    Dload(u16),                           //0x18
+    // Dload_n(u8),                         //0x26 - 0x29
     Dmul,                                //0x6b
     Dneg,                                //0x77
     Drem,                                //0x73
     Dreturn,                             //0xaf
-    Dstore(u8),                          //0x39
-    Dstore_n(u8),                        //0x47 - 0x4a
+    Dstore(u16),                          //0x39
+    // Dstore_n(u8),                        //0x47 - 0x4a
     Dsub,                                //0x67
     Dup,                                 //0x59
     Dup_x1,                              //0x5a
@@ -117,14 +117,14 @@ pub enum Bytecode {
     Fcmpl,                               //0x95
     Fconst_n(u8),                        //0xb - 0xd
     Fdiv,                                //0x6e
-    Fload(u8),                           //0x17
-    Fload_n(u8),                         //0x22 - 0x25
+    Fload(u16),                           //0x17
+    // Fload_n(u8),                         //0x22 - 0x25
     Fmul,                                //0x6a
     Fneg,                                //0x76
     Frem,                                //0x72
     Freturn,                             //0xae
-    Fstore(u8),                          //0x38
-    Fstore_n(u8),                        //0x43 - 0x46
+    Fstore(u16),                          //0x38
+    // Fstore_n(u8),                        //0x43 - 0x46
     Fsub,                                //0x66
     Getfield(u16),                       //0xb4
     Getstatic(u16),                      //0xb2
@@ -158,9 +158,9 @@ pub enum Bytecode {
     Ifle(i16),                           //0x9e
     Ifnonnull(i16),                      //0xc7
     Ifnull(i16),                         //0xc6
-    Iinc(u8, i8),                        //0x84
-    Iload(u8),                           //0x15
-    Iload_n(u8),                         //0x1a - 0x1d
+    Iinc(u16, i16),                        //0x84
+    Iload(u16),                           //0x15
+    // Iload_n(u8),                         //0x1a - 0x1d
     Imul,                                //0x68
     Ineg,                                //0x74
     Instanceof(u16),                     //0xc1
@@ -174,8 +174,8 @@ pub enum Bytecode {
     Ireturn,                             //0xac
     Ishl,                                //0x78
     Ishr,                                //0x7a
-    Istore(u8),                          //0x36
-    Istore_n(u8),                        //0x3b - 0x3e
+    Istore(u16),                          //0x36
+    // Istore_n(u8),                        //0x3b - 0x3e
     Isub,                                //0x64
     Iushr,                               //0x7c
     Ixor,                                //0x82
@@ -194,8 +194,8 @@ pub enum Bytecode {
     Ldc_w(u16),                          //0x13
     Ldc2_w(u16),                         //0x14
     Ldiv,                                //0x6d
-    Lload(u8),                           //0x16
-    Lload_n(u8),                         //0x1e - 0x21
+    Lload(u16),                           //0x16
+    // Lload_n(u8),                         //0x1e - 0x21
     Lmul,                                //0x69
     Lneg,                                //0x75
     Lookupswitch(i32, Vec<LookupEntry>), //0xab
@@ -204,8 +204,8 @@ pub enum Bytecode {
     Lreturn,                             //0xad
     Lshl,                                //0x79
     Lshr,                                //0x7b
-    Lstore(u8),                          //0x37
-    Lstore_n(u8),                        //0x3f - 0x42
+    Lstore(u16),                          //0x37
+    // Lstore_n(u8),                        //0x3f - 0x42
     Lsub,                                //0x65
     Lushr,                               //0x7d
     Lxor,                                //0x83
@@ -219,7 +219,7 @@ pub enum Bytecode {
     Pop2,                                //0x58
     Putfield(u16),                       //0xb5
     Putstatic(u16),                      //0xb3
-    Ret,                                 //0xa9
+    Ret(u16),                            //0xa9
     Return,                              //0xb1
     Saload,                              //0x35
     Sastore,                             //0x56
@@ -231,7 +231,6 @@ pub enum Bytecode {
         high: i32,
         offsets: Vec<i32>,
     }, //0xaa
-    Wide(Vec<u8>),                       //0xc4
 }
 
 impl Display for Bytecode {
@@ -250,13 +249,13 @@ impl Bytecode {
             0x32 => Self::Aaload,
             0x53 => Self::Aastore,
             0x1 => Self::Aconst_null,
-            0x19 => Self::Aload(reader.read_u8()?),
-            0x2a..=0x2d => Self::Aload_n(opcode - 0x2a),
+            0x19 => Self::Aload((reader.read_u8()?) as u16),
+            0x2a..=0x2d => Self::Aload((opcode - 0x2a) as u16),
             0xbd => Self::Anewarray(reader.read_u16::<BigEndian>()?),
             0xb0 => Self::Areturn,
             0xbe => Self::Arraylength,
-            0x3a => Self::Astore(reader.read_u8()?),
-            0x4b..=0x4e => Self::Astore_n(opcode - 0x4b),
+            0x3a => Self::Astore(reader.read_u8()? as u16),
+            0x4b..=0x4e => Self::Astore(opcode as u16 - 0x4b),
             0xbf => Self::Athrow,
             0x33 => Self::Baload,
             0x54 => Self::Bastore,
@@ -274,14 +273,14 @@ impl Bytecode {
             0x97 => Self::Dcmpl,
             0xe..=0xf => Self::Dconst_n(if opcode - 0x3 == 0 { 0.0 } else { 1.0 }),
             0x6f => Self::Ddiv,
-            0x18 => Self::Dload(reader.read_u8()?),
-            0x26..=0x29 => Self::Dload_n(opcode - 0x26),
+            0x18 => Self::Dload(reader.read_u8()? as u16),
+            0x26..=0x29 => Self::Dload(opcode as u16 - 0x26),
             0x6b => Self::Dmul,
             0x77 => Self::Dneg,
             0x73 => Self::Drem,
             0xaf => Self::Dreturn,
-            0x39 => Self::Dstore(reader.read_u8()?),
-            0x47..=0x4a => Self::Dstore_n(opcode - 0x47),
+            0x39 => Self::Dstore(reader.read_u8()? as u16),
+            0x47..=0x4a => Self::Dstore(opcode as u16 - 0x47),
             0x67 => Self::Dsub,
             0x59 => Self::Dup,
             0x5a => Self::Dup_x1,
@@ -299,14 +298,14 @@ impl Bytecode {
             0x95 => Self::Fcmpl,
             0xb..=0xd => Self::Fconst_n(opcode - 0xb),
             0x6e => Self::Fdiv,
-            0x17 => Self::Fload(reader.read_u8()?),
-            0x22..=0x25 => Self::Fload_n(opcode - 0x22),
+            0x17 => Self::Fload(reader.read_u8()? as u16),
+            0x22..=0x25 => Self::Fload((opcode - 0x22) as u16),
             0x6a => Self::Fmul,
             0x76 => Self::Fneg,
             0x72 => Self::Frem,
             0xae => Self::Freturn,
-            0x38 => Self::Fstore(reader.read_u8()?),
-            0x43..=0x46 => Self::Fstore_n(opcode - 0x43),
+            0x38 => Self::Fstore(reader.read_u8()? as u16),
+            0x43..=0x46 => Self::Fstore(opcode as u16 - 0x43),
             0x66 => Self::Fsub,
             0xb4 => Self::Getfield(reader.read_u16::<BigEndian>()?),
             0xb2 => Self::Getstatic(reader.read_u16::<BigEndian>()?),
@@ -340,9 +339,9 @@ impl Bytecode {
             0x9e => Self::Ifle(reader.read_i16::<BigEndian>()?),
             0xc7 => Self::Ifnonnull(reader.read_i16::<BigEndian>()?),
             0xc6 => Self::Ifnull(reader.read_i16::<BigEndian>()?),
-            0x84 => Self::Iinc(reader.read_u8()?, reader.read_i8()?),
-            0x15 => Self::Iload(reader.read_u8()?),
-            0x1a..=0x1d => Self::Iload_n(opcode - 0x1a),
+            0x84 => Self::Iinc(reader.read_u8()? as u16, reader.read_i8()? as i16),
+            0x15 => Self::Iload(reader.read_u8()? as u16),
+            0x1a..=0x1d => Self::Iload((opcode - 0x1a) as u16),
             0x68 => Self::Imul,
             0x74 => Self::Ineg,
             0xc1 => Self::Instanceof(reader.read_u16::<BigEndian>()?),
@@ -366,8 +365,8 @@ impl Bytecode {
             0xac => Self::Ireturn,
             0x78 => Self::Ishl,
             0x7a => Self::Ishr,
-            0x36 => Self::Istore(reader.read_u8()?),
-            0x3b..=0x3e => Self::Istore_n(opcode - 0x3b),
+            0x36 => Self::Istore(reader.read_u8()? as u16),
+            0x3b..=0x3e => Self::Istore(opcode as u16 - 0x3b),
             0x64 => Self::Isub,
             0x7c => Self::Iushr,
             0x82 => Self::Ixor,
@@ -386,8 +385,8 @@ impl Bytecode {
             0x13 => Self::Ldc_w(reader.read_u16::<BigEndian>()?),
             0x14 => Self::Ldc2_w(reader.read_u16::<BigEndian>()?),
             0x6d => Self::Ldiv,
-            0x16 => Self::Lload(reader.read_u8()?),
-            0x1e..=0x21 => Self::Lload_n(opcode - 0x1e),
+            0x16 => Self::Lload(reader.read_u8()? as u16),
+            0x1e..=0x21 => Self::Lload(opcode as u16 - 0x1e),
             0x69 => Self::Lmul,
             0x75 => Self::Lneg,
             0xab => {
@@ -411,8 +410,8 @@ impl Bytecode {
             0xad => Self::Lreturn,
             0x79 => Self::Lshl,
             0x7b => Self::Lshr,
-            0x37 => Self::Lstore(reader.read_u8()?),
-            0x3f..=0x42 => Self::Lstore_n(opcode - 0x3f),
+            0x37 => Self::Lstore(reader.read_u8()? as u16),
+            0x3f..=0x42 => Self::Lstore(opcode as u16 - 0x3f),
             0x65 => Self::Lsub,
             0x7d => Self::Lushr,
             0x83 => Self::Lxor,
@@ -440,7 +439,7 @@ impl Bytecode {
             0x58 => Self::Pop2,
             0xb5 => Self::Putfield(reader.read_u16::<BigEndian>()?),
             0xb3 => Self::Putstatic(reader.read_u16::<BigEndian>()?),
-            0xa9 => Self::Ret,
+            0xa9 => Self::Ret(reader.read_u8()? as u16),
             0xb1 => Self::Return,
             0x35 => Self::Saload,
             0x56 => Self::Sastore,
@@ -471,7 +470,24 @@ impl Bytecode {
                     offsets,
                 }
             }
-            0xc4 => Self::Wide(todo!()),
+            0xc4 => {
+                let opcode = reader.read_u8()?;
+                match opcode {
+                    0x15 => Self::Iload(reader.read_u16::<BigEndian>()?),
+                    0x17 => Self::Fload(reader.read_u16::<BigEndian>()?),
+                    0x19 => Self::Aload(reader.read_u16::<BigEndian>()?),
+                    0x16 => Self::Lload(reader.read_u16::<BigEndian>()?),
+                    0x18 => Self::Dload(reader.read_u16::<BigEndian>()?),
+                    0x36 => Self::Istore(reader.read_u16::<BigEndian>()?),
+                    0x38 => Self::Fstore(reader.read_u16::<BigEndian>()?),
+                    0x3a => Self::Astore(reader.read_u16::<BigEndian>()?),
+                    0x37 => Self::Lstore(reader.read_u16::<BigEndian>()?),
+                    0x39 => Self::Dstore(reader.read_u16::<BigEndian>()?),
+                    0xa9 => Self::Ret(reader.read_u8()? as u16),
+                    0x84 => Self::Iinc(reader.read_u16::<BigEndian>()?, reader.read_i16::<BigEndian>()?),
+                    _ => unreachable!("Invalid wide opcode {opcode}"),
+                }
+            },
             _ => {
                 return Err(BytecodeParseError::InvalidOpcode(
                     opcode,

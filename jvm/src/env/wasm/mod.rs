@@ -3,7 +3,6 @@ use crate::classfile::resolved::{
     AccessFlags, Attribute, Class, ClassId, FieldType, Method, Ref, ReturnType,
 };
 use crate::env::wasm::jit::JitResult;
-use crate::env::wasm::native::native_func;
 use crate::env::wasm::stub::generate_helper_wasm;
 use crate::env::wasm::stub::stub::create_stub_module;
 use crate::env::Object;
@@ -25,6 +24,7 @@ use std::sync::Arc;
 use wasm_bindgen::JsValue;
 use wasm_encoder::Module;
 use wasmparser::WasmFeatures;
+use crate::env::wasm::native::native;
 
 pub static OBJECT_REF_SLOTS: OnceCell<Mutex<RefSlots>> = OnceCell::new();
 pub static NULL_TABLE_SLOT: OnceCell<unsafe extern "C" fn(i32)> = OnceCell::new();
@@ -527,8 +527,9 @@ impl Environment for WasmEnvironment {
         let stubbable_methods = class
             .methods
             .iter()
-            .filter(|method| !method.access_flags.contains(AccessFlags::NATIVE))
+            .filter(|method| !method.access_flags.contains(AccessFlags::ABSTRACT))
             .count();
+
         let stubbable_methods_offset =
             WebAssembly::Table::grow(&func_table, stubbable_methods as u32).unwrap();
 
@@ -543,6 +544,7 @@ impl Environment for WasmEnvironment {
             "debug_framestack",
             "push_frame",
             "debug",
+            "native"
         ] {
             let key: JsValue = cross_import.into();
 
@@ -576,7 +578,7 @@ impl Environment for WasmEnvironment {
         let mut funcs_to_link: Vec<String> = class
             .methods
             .iter()
-            .filter(|method| !method.access_flags.contains(AccessFlags::NATIVE))
+            .filter(|method| !method.access_flags.contains(AccessFlags::ABSTRACT))
             .map(|method| {
                 let identifier = method.get_identifier();
 
@@ -608,7 +610,7 @@ impl Environment for WasmEnvironment {
         class
             .methods
             .iter()
-            .filter(|method| !method.access_flags.contains(AccessFlags::NATIVE))
+            .filter(|method| !method.access_flags.contains(AccessFlags::ABSTRACT))
             .enumerate()
             .for_each(|(index, method)| {
                 ptrs.insert(
@@ -629,13 +631,12 @@ impl Environment for WasmEnvironment {
     ) -> Option<Operand> {
         let operand = match &method_handle.context {
             ExecutionContext::Interpret(_) => unreachable!(), //Unused on WASM
-            ExecutionContext::Compiled => {
-                let code = method_handle.method.attributes.get("Code").unwrap();
-
-                let (max_locals, max_stack) = if let Attribute::Code(code) = code {
+            ExecutionContext::Compiled | ExecutionContext::Native => {
+                let (max_locals, max_stack) = if let Some(Attribute::Code(code)) = method_handle.method.attributes.get("Code") {
                     (code.max_locals as usize, code.max_stack as usize)
                 } else {
-                    panic!()
+                    assert!(method_handle.method.access_flags.contains(AccessFlags::NATIVE));
+                    (256, 0)
                 };
 
                 let mut locals = (0..max_locals)
@@ -695,7 +696,6 @@ impl Environment for WasmEnvironment {
 
                 out
             }
-            ExecutionContext::Native => Some(Box::new(native_func(&method_handle, thread, args))),
         };
 
         if matches!(
@@ -717,7 +717,7 @@ impl Environment for WasmEnvironment {
     ) -> MethodHandle {
         if method.access_flags.contains(AccessFlags::NATIVE) {
             return MethodHandle {
-                ptr: None,
+                ptr: Some(native),
                 context: ExecutionContext::Native,
                 class,
                 method,
@@ -847,8 +847,6 @@ impl Environment for WasmEnvironment {
     }
 
     fn clone_reference(&self, object: &Object) -> Object {
-        // unsafe { Object::from_raw(object.ptr, nothing) }
-
         unsafe {
             Object::from_raw(
                 (self.fn_clone_reference)(object.ptr as i32) as *mut (),

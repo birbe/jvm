@@ -600,6 +600,10 @@ impl JVM {
         let mut methods = self.method_handles.write();
 
         for method in &class.methods {
+            if method.access_flags.contains(AccessFlags::ABSTRACT) {
+                continue;
+            }
+
             let ref_ = Arc::new(Ref {
                 class: class.this_class.clone(),
                 name_and_type: Arc::new(NameAndType {

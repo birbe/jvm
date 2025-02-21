@@ -897,7 +897,7 @@ impl ThreadHandle {
                 return ThreadStepResult::Return(Some(JValue::Long(long.data() as Long)));
             }
             Bytecode::Bipush(value) => frame.push([Operand::new_data(*value as i32 as u32)]),
-            Bytecode::Aload_n(index) | Bytecode::Aload(index) => {
+            Bytecode::Aload(index) => {
                 let operand = &frame.locals[*index as usize];
 
                 frame.push([unsafe {
@@ -1349,7 +1349,7 @@ impl ThreadHandle {
                     pc_inc = idx.bytecode_index as i32 - instruction.bytecode_index as i32;
                 }
             }
-            Bytecode::Astore(index) | Bytecode::Astore_n(index) => {
+            Bytecode::Astore(index) => {
                 let old =
                     std::mem::replace(&mut frame.locals[*index as usize], Operand::new_ref(0 as _));
                 if old.tag() == OperandTag::Ref {
@@ -1360,13 +1360,11 @@ impl ThreadHandle {
                 frame.locals[*index as usize] = op;
             }
             Bytecode::Istore(index)
-            | Bytecode::Istore_n(index)
-            | Bytecode::Fstore(index)
-            | Bytecode::Fstore_n(index) => {
+            | Bytecode::Fstore(index) => {
                 let [op] = frame.pop::<1>();
                 frame.locals[*index as usize] = op;
             }
-            Bytecode::Lstore(index) | Bytecode::Lstore_n(index) => {
+            Bytecode::Lstore(index) => {
                 let [op] = frame.pop();
                 let long = op.data();
 
@@ -1374,15 +1372,13 @@ impl ThreadHandle {
                     Operand::new_data2(long & ((u32::MAX as u64) << 32));
                 frame.locals[*index as usize + 1] = Operand::new_data2(long & (u32::MAX as u64));
             }
-            Bytecode::Lload(index) | Bytecode::Lload_n(index) => {
+            Bytecode::Lload(index) => {
                 let op1 = frame.locals[*index as usize].data();
                 let op2 = frame.locals[*index as usize + 1].data();
 
                 frame.push([Operand::new_data2((op1 << 32) | op2)]);
             }
             Bytecode::Iload(index)
-            | Bytecode::Iload_n(index)
-            | Bytecode::Fload_n(index)
             | Bytecode::Fload(index) => {
                 frame.push([frame.locals[*index as usize].copy_data()]);
             }

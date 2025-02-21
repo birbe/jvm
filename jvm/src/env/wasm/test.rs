@@ -1,7 +1,6 @@
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::classfile::ClassFile;
 use crate::env::wasm::jit::{jit_module, translate_method_java_to_wasm};
-use crate::env::wasm::native::native_func;
 use crate::env::{Object, ToAny};
 use crate::execution::MethodHandle;
 use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
@@ -230,7 +229,7 @@ pub fn wasm_test() {
 
     let mut main_thread = jvm.create_thread(native_bootstrapper.clone());
 
-    let class = main_thread
+    let main = main_thread
         .class_loader
         .clone()
         .find_class(&mut main_thread, "Main")
@@ -240,30 +239,36 @@ pub fn wasm_test() {
         .clone()
         .find_class(&mut main_thread, "java/lang/String")
         .unwrap();
+    let string_concat_helper = main_thread
+        .class_loader
+        .clone()
+        .find_class(&mut main_thread, "java/lang/StringConcatHelper")
+        .unwrap();
 
-    // let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
-    let method = class.get_method_by_name("jitTest", "()I").unwrap();
-    let method2 = class.get_method_by_name("<init>", "()V").unwrap();
+    let method = string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap();
+    let method2 = main.get_method_by_name("<init>", "()V").unwrap();
+    let method3 = string.get_method_by_name("concat", "(Ljava/lang/String;)Ljava/lang/String;").unwrap();
 
     let env = (*jvm.environment)
         .to_any()
         .downcast_ref::<WasmEnvironment>()
         .unwrap();
 
-    // let to_jit: [(&Method, &Class); 2] = [(method, &class), (method2, &class)];
-    let to_jit: [(&Method, &Class); 1] = [(method, &class)];
-
-    let time = js_sys::Date::now();
+    let to_jit = vec![
+        (&**string.get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;").unwrap(), &*string),
+        (&**string_concat_helper.get_method_by_name("simpleConcat", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;").unwrap(), &*string_concat_helper),
+        (&**main.get_method_by_name("jitTest", "()I").unwrap(), &*main)
+    ];
 
     let jit = jit_module(&jvm, env, &to_jit, &mut main_thread);
-
-    let new_time = js_sys::Date::now();
-
-    // console_log!("Generated JIT in {}ms", (new_time - time) / 1000.0);
 
     env.link_jit(&jvm, jit);
 
     let handle = jvm.get_method("Main", "main", "()I", 0);
-    //
-    console_log!("{:?}", main_thread.invoke(&handle, Box::new([])));
+
+    let time = js_sys::Date::now();
+    let op = main_thread.invoke(&handle, Box::new([]));
+    let new_time = js_sys::Date::now();
+
+    console_log!("{op:?} in {}", new_time - time);
 }

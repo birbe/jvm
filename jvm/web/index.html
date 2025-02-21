@@ -15,12 +15,11 @@
 
         let [module, memory] = main_thread_begin();
 
-        console.log(memory);
-
         let worker = new Worker("worker.js?");
         worker.postMessage([module, memory]);
 
-        setInterval(()=>listen().then(()=>{}), 1000);
+        let worker2 = new Worker("worker_2.js?");
+        worker2.postMessage([module, memory]);
 
         // while(true) {
         //     await listen();

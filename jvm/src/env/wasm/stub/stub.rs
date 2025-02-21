@@ -353,14 +353,19 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
         EntityType::Function(interpret_func_type),
     );
 
-    let push_frame = 5;
+    let native = 5;
+    imports.import(
+        "jvm",
+        "native",
+        EntityType::Function(interpret_func_type),
+    );
+
+    let push_frame = 6;
     imports.import("jvm", "push_frame", EntityType::Function(push_frame_type));
 
-    let debug = 6;
+    let debug = 7;
     imports.import("jvm", "debug", EntityType::Function(debug_type));
-    let func_imports_len = 7;
-
-    // let func_imports_len = 6;
+    let func_imports_len = 8;
 
     let mut funcs = FunctionSection::new();
     let mut code = CodeSection::new();
@@ -501,7 +506,7 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
     let stubbable_methods: Vec<&Arc<Method>> = class
         .methods
         .iter()
-        .filter(|method| !method.access_flags.contains(AccessFlags::NATIVE))
+        .filter(|method| !method.access_flags.contains(AccessFlags::ABSTRACT))
         .collect();
 
     //Trampoline for WASM to interpreter
@@ -526,9 +531,13 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
         let frame_stack_local = sig.params.len() as u32 + 2;
         let frame_address_local = sig.params.len() as u32 + 3;
 
-        let max_locals = match method.attributes.get("Code") {
-            Some(Attribute::Code(code)) => code.max_locals,
-            _ => 256, //TODO: bad
+        let max_locals = if !method.access_flags.contains(AccessFlags::NATIVE) {
+            match method.attributes.get("Code") {
+                Some(Attribute::Code(code)) => code.max_locals,
+                _ => panic!("{method:#?}")
+            }
+        } else {
+            256
         };
 
         func.instruction(&Instruction::LocalGet(thread_local));
@@ -680,7 +689,11 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
 
         //Interpret the function
         func.instruction(&Instruction::LocalGet(sig.thread_local));
-        func.instruction(&Instruction::Call(interpret));
+        if !method.access_flags.contains(AccessFlags::NATIVE) {
+            func.instruction(&Instruction::Call(interpret));
+        } else {
+            func.instruction(&Instruction::Call(native));
+        }
 
         let temp = jlocal_box_addr_local;
 
