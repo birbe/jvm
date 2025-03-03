@@ -46,7 +46,7 @@ pub trait Environment: ToAny {
 
     fn get_object_class<'a, 'b>(&'a self, object: &'b Object) -> &'b Class;
 
-    unsafe fn get_object_field(
+    fn get_object_field(
         &self,
         object: &Object,
         class: &Class,
@@ -81,7 +81,7 @@ pub trait Environment: ToAny {
         value: Operand,
     );
 
-    unsafe fn get_array_element(
+    fn get_array_element(
         &self,
         array_type: ArrayType,
         array: &Object,
@@ -94,10 +94,13 @@ pub trait Environment: ToAny {
 
     fn new_object(&self, class: &Class) -> Object;
 
-    unsafe fn object_from_operand(&self, operand: Operand) -> Object;
-    unsafe fn object_ref_from_operand(&self, operand: &Operand) -> &Object;
+    fn object_from_operand(&self, operand: Operand) -> Object;
+    fn object_ref_from_operand(&self, operand: &Operand) -> &Object;
 
     fn object_ref_eq(&self, a: &Object, b: &Object) -> bool;
+    
+    fn submit_jit_candidate(&self, class: &Class, method: &Method, thread: &mut Thread);
+    
 }
 
 pub trait Compiler {}

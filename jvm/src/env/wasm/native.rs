@@ -6,7 +6,7 @@ use crate::thread::{Operand, RawFrame, Thread, ThreadHandle};
 use bitflags::Flags;
 use highway::HighwayHasher;
 use std::hash::Hasher;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[no_mangle]
 pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
@@ -210,17 +210,15 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                 }
                 ("java/lang/Class", "isPrimitive", "()Z") => {
                     let op = std::mem::replace(&mut args[0], Object::NULL.consume());
-                    let object = unsafe { jvm.environment.object_from_operand(op) };
+                    let object = jvm.environment.object_from_operand(op);
 
-                    let class_ptr = unsafe {
+                    let class_ptr = 
                         jvm.environment.get_object_field(
                             &object,
                             jvm.environment.get_object_class(&object),
                             "__jvm_internal_id",
                             "I",
-                        )
-                    }
-                    .data() as *const Class;
+                        ).data() as *const Class;
 
                     Operand::new_data(unsafe { &*class_ptr }.is_primitive as u32)
                 }
@@ -232,8 +230,7 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                 // ("java/lang/ClassLoader", "registerNatives", "()V") => {
                 //     Operand::new_data(0)
                 // }
-                ("sun/reflect/Reflection", "getCallerClass", "()Ljava/lang/Class;") => {
-                    console_log!("called");
+                ("jdk/internal/reflect/Reflection", "getCallerClass", "()Ljava/lang/Class;") => {
                     let lower_frame =
                         &thread.frame_stack.frames[(thread.frame_stack.frame_index - 1) as usize];
                     let class = unsafe { &*lower_frame.class };
@@ -294,12 +291,87 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                 }
                 ("java/lang/Object", "getClass", "()Ljava/lang/Class;") => {
                     let op = std::mem::replace(&mut args[0], Object::NULL.consume());
-                    let object = unsafe { jvm.environment.object_from_operand(op) };
+                    let object = jvm.environment.object_from_operand(op);
                     let class = jvm.environment.get_object_class(&object);
 
                     jvm.environment
                         .clone_reference(class.class_instance.get().unwrap())
                         .consume()
+                }
+                ("java/lang/System", "nanoTime", "()J") => {
+                    Operand::new_data2(
+                        js_sys::Date::now() as u64 * 1_000_000
+                    )
+                }
+                ("jdk/internal/misc/Unsafe", "ensureClassInitialized0", "(Ljava/lang/Class;)V") => {
+                    let op = std::mem::replace(&mut args[1], Object::NULL.consume());
+                    let object = jvm.environment.object_from_operand(op);
+
+                    let java_lang_class = jvm
+                        .bootstrap_classloader
+                        .find_class(thread, "java/lang/Class")
+                        .unwrap();
+
+                    let class_ptr = unsafe {
+                        jvm.environment.get_object_field(
+                            &object,
+                            &java_lang_class,
+                            "__jvm_internal_id",
+                            "I",
+                        )
+                    }.data() as *const Class;
+
+                    let class = unsafe { &*class_ptr };
+
+                    ThreadHandle::init_static(class, thread);
+
+                    Operand::new_data(0)
+                }
+                ("jdk/internal/reflect/Reflection", "getClassAccessFlags", "(Ljava/lang/Class;)I") => {
+                    let op = std::mem::replace(&mut args[0], Object::NULL.consume());
+                    let object = unsafe { jvm.environment.object_from_operand(op) };
+
+                    let java_lang_class = jvm
+                        .bootstrap_classloader
+                        .find_class(thread, "java/lang/Class")
+                        .unwrap();
+
+                    let class_ptr = unsafe {
+                        jvm.environment.get_object_field(
+                            &object,
+                            &java_lang_class,
+                            "__jvm_internal_id",
+                            "I",
+                        )
+                    }
+                        .data() as *const Class;
+
+                    Operand::new_data(
+                        unsafe { (*class_ptr).access_flags.bits() } as u32
+                    )
+                }
+                ("java/lang/Class", "isArray", "()Z") => {
+                    let op = std::mem::replace(&mut args[0], Object::NULL.consume());
+                    let object = jvm.environment.object_from_operand(op);
+
+                    let java_lang_class = jvm
+                        .bootstrap_classloader
+                        .find_class(thread, "java/lang/Class")
+                        .unwrap();
+
+                    let class_ptr = unsafe {
+                        jvm.environment.get_object_field(
+                            &object,
+                            &java_lang_class,
+                            "__jvm_internal_id",
+                            "I",
+                        )
+                    }
+                        .data() as *const Class;
+
+                    Operand::new_data(
+                        unsafe { (*class_ptr).is_array } as u32
+                    )
                 }
                 ("java/lang/Object", "clone", "()Ljava/lang/Object;") => {
                     let op = std::mem::replace(&mut args[0], Object::NULL.consume());
@@ -473,18 +545,17 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                         .iter()
                         .position(|field| &*field.name == &string)
                         .unwrap();
-                    let parent_fields = class
+                    let parent_fields: usize = class
                         .parents()
                         .iter()
-                        .map(|parent| &parent.fields)
-                        .flatten()
-                        .count();
+                        .map(|parent| parent.fields.len())
+                        .sum();
 
                     Operand::new_data((base_index + parent_fields) as u32)
                 }
                 ("jdk/internal/misc/Unsafe", "compareAndSetInt", "(Ljava/lang/Object;JII)Z") => {
                     let op = std::mem::replace(&mut args[1], Object::NULL.consume());
-                    let object = unsafe { jvm.environment.object_from_operand(op) };
+                    let object = jvm.environment.object_from_operand(op);
 
                     let index = args[2].data() as usize;
                     let test = args[3].data() as i32;
@@ -505,9 +576,20 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                     } else {
                         let obj_class = jvm.environment.get_object_class(&object);
 
-                        let (field, field_class) = [obj_class]
+                        let fields: Vec<_> = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
+                            .map(|class| class.fields.iter().map(move |field| field))
+                            .flatten()
+                            .enumerate().collect();
+
+                        let (field, field_class) = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
+                            .into_iter()
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
@@ -567,9 +649,11 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                     } else {
                         let obj_class = jvm.environment.get_object_class(&object);
 
-                        let (field, field_class) = [obj_class]
+                        let (field, field_class) = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
@@ -612,7 +696,7 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                     "(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z",
                 ) => {
                     let op = std::mem::replace(&mut args[1], Object::NULL.consume());
-                    let object = unsafe { jvm.environment.object_from_operand(op) };
+                    let object = jvm.environment.object_from_operand(op);
                     let obj_class = jvm.environment.get_object_class(&object);
 
                     let index = args[2].data() as usize;
@@ -653,9 +737,13 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                             Operand::new_data(0)
                         }
                     } else {
-                        let (field, field_class) = [obj_class]
+                        let (field, field_class) = obj_class
+                            .parents()
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
+                            .rev()
+                            .map(|p| &**p)
+                            .chain([obj_class])
+                            .into_iter()
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
@@ -691,6 +779,60 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                         }
                     }
                 }
+                ("java/lang/Class", "getSuperclass", "()Ljava/lang/Class;") => {
+                    let op = std::mem::replace(&mut args[0], Object::NULL.consume());
+                    let object = jvm.environment.object_from_operand(op) ;
+
+                    let class_ptr = jvm.environment.get_object_field(
+                            &object,
+                            jvm.environment.get_object_class(&object),
+                            "__jvm_internal_id",
+                            "I",
+                        ).data() as *const Class;
+
+                    let this_class = unsafe { &*class_ptr };
+
+                    if let Some(superclass) = &this_class.super_class {
+                        jvm.environment.clone_reference(superclass.class_instance.get().unwrap()).consume()
+                    } else {
+                        Operand::new_ref(std::ptr::null_mut())
+                    }
+                }
+                ("java/lang/Class", "isAssignableFrom", "(Ljava/lang/Class;)Z") => {
+                    let op = std::mem::replace(&mut args[0], Object::NULL.consume());
+                    let object = unsafe { jvm.environment.object_from_operand(op) };
+
+                    let class_ptr = unsafe {
+                        jvm.environment.get_object_field(
+                            &object,
+                            jvm.environment.get_object_class(&object),
+                            "__jvm_internal_id",
+                            "I",
+                        )
+                    }
+                        .data() as *const Class;
+
+                    let this_class = unsafe { &*class_ptr };
+
+                    let op2 = std::mem::replace(&mut args[0], Object::NULL.consume());
+                    let object2 = jvm.environment.object_from_operand(op2);
+
+                    let class2_ptr = jvm.environment.get_object_field(
+                            &object,
+                            jvm.environment.get_object_class(&object),
+                            "__jvm_internal_id",
+                            "I",
+                        ).data() as *const Class;
+
+                    let other_class = unsafe { &*class2_ptr };
+
+                    let assignable = &this_class.this_class == &other_class.this_class || other_class
+                        .parents_and_interfaces()
+                        .iter()
+                        .any(|super_| &***super_ == &*this_class);
+
+                    Operand::new_data(assignable as u32)
+                }
                 ("java/lang/Thread", "getNextThreadIdOffset", "()J") => {
                     Operand::new_data2(&jvm.thread_ids as *const AtomicU64 as u64)
                 }
@@ -715,9 +857,11 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                             )
                         }
                     } else {
-                        let (field, field_class) = [obj_class]
+                        let (field, field_class) = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
@@ -762,16 +906,17 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                             );
                         }
                     } else {
-                        let (field, field_class) = [obj_class]
+                        let (field, field_class) = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
                             .find(|(field_index, x)| *field_index == index)
                             .map(|(_, x)| x)
                             .unwrap();
-
                         unsafe {
                             jvm.environment.set_object_field(
                                 &object,
@@ -804,9 +949,11 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                         }
                         .consume()
                     } else {
-                        let (field, field_class) = [obj_class]
+                        let (field, field_class) = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
@@ -846,9 +993,11 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                                 .set_object_array_element(&object, index as i32, ref_);
                         }
                     } else {
-                        let (field, field_class) = [obj_class]
+                        let (field, field_class) = obj_class
+                            .parents()
+                            .into_iter().rev().map(|p| &**p)
+                            .chain([obj_class])
                             .into_iter()
-                            .chain(obj_class.parents().into_iter().map(|p| &**p))
                             .map(|class| class.fields.iter().map(move |field| (field, class)))
                             .flatten()
                             .enumerate()
@@ -982,6 +1131,23 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
 
                     Operand::new_data(0)
                 }
+                ("java/lang/Class", "isInterface", "()Z") => {
+                    let op = std::mem::replace(&mut args[0], Object::NULL.consume());
+                    let object = jvm.environment.object_from_operand(op);
+
+                    let class_ptr =
+                        jvm.environment.get_object_field(
+                            &object,
+                            jvm.environment.get_object_class(&object),
+                            "__jvm_internal_id",
+                            "I",
+                        )
+                        .data() as *const Class;
+
+                    Operand::new_data(
+                        unsafe { &*class_ptr }.access_flags.contains(AccessFlags::INTERFACE) as u32
+                    )
+                }
                 ("java/lang/Float", "floatToRawIntBits", "(F)I") => args[0].copy_data(),
                 ("java/lang/Double", "doubleToRawLongBits", "(D)J") => args[0].copy_data(),
                 ("java/lang/Double", "longBitsToDouble", "(J)D") => args[0].copy_data(),
@@ -1021,11 +1187,13 @@ pub extern "C" fn native(thread: &mut Thread) -> Option<Box<Operand>> {
                     Operand::new_data(0)
                 }
                 _ => {
-                    // console_log!(
-                    //     "unimplemented native method {} {:?}",
-                    //     method_handle.class.this_class,
-                    //     method_handle.method
-                    // );
+                    // if jvm.logging.load(Ordering::Relaxed) {
+                        console_log!(
+                            "unimplemented native method {} {:?}",
+                            frame.class.this_class,
+                            frame.method
+                        );
+                    // }
                     Operand::new_data(0)
                 }
             }

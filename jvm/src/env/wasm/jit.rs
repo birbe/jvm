@@ -41,7 +41,7 @@ pub fn jit_module<'m>(
     env: &WasmEnvironment,
     methods: &'m [(&Method, &Class)],
     thread: &mut Thread,
-) -> JitResult<'m> {
+) -> Result<JitResult<'m>, JITError> {
     let mut module = Module::new();
 
     let mut globals = GlobalSection::new();
@@ -82,11 +82,23 @@ pub fn jit_module<'m>(
         [],
     );
 
+    let ref_in_i32_out_func_type = types.len();
+    types.function(
+        [ValType::Ref(RefType {
+            nullable: true,
+            heap_type: HeapType::Any,
+        })],
+        [ValType::I32],
+    );
+
     let i64_in = types.len();
     types.function([ValType::I64], []);
 
     let routine_select_method = types.len();
     types.function([ValType::I32; 4], [ValType::I32]);
+
+    let routine_checkcast = types.len();
+    types.function([ValType::I32; 2], [ValType::I32]);
 
     let object_type = create_base_object_type(&mut types);
 
@@ -115,6 +127,7 @@ pub fn jit_module<'m>(
         }),
     }]);
 
+    let mut static_function_signatures: HashMap<MethodDescriptor, u32> = HashMap::new();
     let mut generated_function_signatures: HashMap<MethodDescriptor, u32> = HashMap::new();
     let mut array_storage_types: HashMap<StorageType, u32> = HashMap::new();
     let mut generated_object_recs: HashMap<String, u32> = HashMap::new();
@@ -142,6 +155,7 @@ pub fn jit_module<'m>(
     let function_table_id = imports.len();
 
     let jit_routine_select_method;
+    let jit_routine_checkcast;
 
     {
         imports.import(
@@ -172,7 +186,7 @@ pub fn jit_module<'m>(
             "memory",
             EntityType::Memory(MemoryType {
                 minimum: 1,
-                maximum: Some(16384),
+                maximum: Some(65536),
                 memory64: false,
                 shared: true,
             }),
@@ -185,9 +199,15 @@ pub fn jit_module<'m>(
             "_jit_routine_select_method",
             EntityType::Function(routine_select_method),
         );
+        jit_routine_checkcast = 2;
+        imports.import(
+            "jvm",
+            "_jit_routine_checkcast",
+            EntityType::Function(routine_checkcast),
+        );
     }
 
-    let func_imports_len = 2;
+    let func_imports_len = 3;
 
     let mut code = CodeSection::new();
     let mut funcs = FunctionSection::new();
@@ -197,9 +217,11 @@ pub fn jit_module<'m>(
         jvm_functions: JvmFuncs {
             init_static: 0,
             _jit_routine_select_method: jit_routine_select_method,
+            _jit_routine_checkcast: jit_routine_checkcast,
         },
         type_section: &mut types,
         function_signatures: &mut generated_function_signatures,
+        static_function_signatures: &mut static_function_signatures,
         array_storage_types: &array_storage_types,
         object_recs: &mut generated_object_recs,
         jvm,
@@ -207,14 +229,16 @@ pub fn jit_module<'m>(
         i32_in_func_type,
         _2_i32_in_func_type,
         ref_in_func_type,
+        ref_in_i32_out_func_type,
         array_object_type: array_type,
+        object_type,
         thread,
     };
 
     let mut funcs_out = vec![];
 
     for (method, class) in methods {
-        let func = translate_method_java_to_wasm(method, &class, &mut translation).unwrap();
+        let func = translate_method_java_to_wasm(method, &class, &mut translation)?;
 
         let key = format!("{}-{}", method.class, method.identifier);
         exports.export(&key, ExportKind::Func, funcs.len() + func_imports_len);
@@ -238,10 +262,10 @@ pub fn jit_module<'m>(
     module.section(&exports);
     module.section(&code);
 
-    JitResult {
+    Ok(JitResult {
         module,
         functions: funcs_out,
-    }
+    })
 }
 
 pub fn get_instruction_edges(
@@ -272,9 +296,9 @@ pub fn get_instruction_edges(
         | Bytecode::Ifle(offset)
         | Bytecode::Ifnonnull(offset)
         | Bytecode::Ifnull(offset) => {
-            let jump = (*mapping
+            let jump = *mapping
                 .get(&((offset as i32 + instruction.bytes_index as i32) as u32))
-                .unwrap());
+                .unwrap();
 
             if instruction.bytecode_index < last_index {
                 vec![jump, instruction.bytecode_index + 1]
@@ -282,9 +306,41 @@ pub fn get_instruction_edges(
                 vec![jump]
             }
         }
-        Bytecode::Lookupswitch(_, _) => unimplemented!(),
-        Bytecode::Tableswitch { .. } => unimplemented!(),
-        // Bytecode::Athrow => vec![],
+        Bytecode::Lookupswitch(default, ref jumps) => {
+            let mut targets = vec![
+                *mapping
+                    .get(&((default + instruction.bytes_index as i32) as u32))
+                    .unwrap()
+            ];
+
+            for jump in jumps {
+                targets.push(
+                    *mapping
+                        .get(&((jump.offset + instruction.bytes_index as i32) as u32))
+                        .unwrap()
+                );
+            }
+
+            targets
+        },
+        Bytecode::Tableswitch { default, ref offsets, .. } => {
+            let mut targets = vec![
+                *mapping
+                    .get(&((default + instruction.bytes_index as i32) as u32))
+                    .unwrap()
+            ];
+
+            for jump in offsets {
+                targets.push(
+                    *mapping
+                        .get(&((jump + instruction.bytes_index as i32) as u32))
+                        .unwrap()
+                );
+            }
+
+            targets
+        },
+        Bytecode::Athrow => vec![],
         _ => {
             if instruction.bytecode_index < last_index {
                 vec![instruction.bytecode_index + 1]
@@ -296,19 +352,22 @@ pub fn get_instruction_edges(
 }
 
 #[derive(Debug, Clone)]
-pub enum CompilationError {
+pub enum JITError {
     NoCode,
+    UnimplementedBytecode(Bytecode),
+    AnalysisFailure,
+    LinkingError(String)
 }
 
 pub fn translate_method_java_to_wasm<'a, 'b>(
     method: &Method,
     class: &Class,
     module: &'a mut ModuleTranslation<'b>,
-) -> Result<Function, CompilationError> {
+) -> Result<Function, JITError> {
     let code = if let Attribute::Code(code) = method.attributes.get("Code").unwrap() {
         code
     } else {
-        return Err(CompilationError::NoCode);
+        return Err(JITError::NoCode);
     };
 
     let mut graph = Graph::<&Instruction, u32>::new();
@@ -582,9 +641,14 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
             }),
             ValType::I32,
             ValType::I32,
+            ValType::I64,
+            ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Any,
+            }),
         ]));
 
-    let analyzed_stack = analyze_stack(&code.instructions, class, module.thread);
+    let analyzed_stack = analyze_stack(&code.instructions, class, module.thread)?;
     let mut splices = HashMap::new();
 
     for instruction in &code.instructions {
@@ -638,16 +702,19 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
                         todo!()
                     };
 
-                    panic!("Couldn't find splice target for Invokevirtual");
+                    let stack_debug: Vec<_> = analyzed_stack.iter().enumerate().collect();
+                    // panic!("Couldn't find splice target for Invokevirtual {stack_debug:#?}");
+                    return Err(JITError::AnalysisFailure);
                 }
             }
-            Bytecode::Bastore | Bytecode::Iastore => 'walk: {
+            Bytecode::Bastore | Bytecode::Iastore | Bytecode::Aastore => 'walk: {
                 let stack_length = analyzed_stack[instruction.bytecode_index as usize - 1].len();
                 let target_length = stack_length - 2;
 
                 let storage_type = match instruction.bytecode {
                     Bytecode::Bastore => StorageType::I8,
                     Bytecode::Iastore => StorageType::Val(ValType::I32),
+                    Bytecode::Aastore => StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct })),
                     _ => unreachable!()
                 };
 
@@ -661,7 +728,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
                     }
                 }
 
-                panic!("Couldn't find splice target for Invokevirtual");
+                return Err(JITError::AnalysisFailure);
             }
             _ => {}
         }
@@ -677,6 +744,9 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
             i64_accumulator: max_local + 1,
             ref_accumulator: max_local + 2,
             cfg_flag: max_local + 3,
+            i32_accumulator_2: max_local + 4,
+            i64_accumulator_2: max_local + 5,
+            ref_accumulator_2: max_local + 6,
         },
         method_signature,
         flagged_jumps,
@@ -700,7 +770,7 @@ pub fn translate_method_java_to_wasm<'a, 'b>(
         &mut function,
         0,
         &mut translating,
-    );
+    )?;
 
     function.instruction(&Instr::End);
 
@@ -719,6 +789,9 @@ struct MetaLocals {
     i64_accumulator: u32,
     ref_accumulator: u32,
     cfg_flag: u32,
+    i32_accumulator_2: u32,
+    i64_accumulator_2: u32,
+    ref_accumulator_2: u32,
 }
 
 #[derive(Debug)]
@@ -730,6 +803,7 @@ struct FlaggedJump {
 struct JvmFuncs {
     init_static: u32,
     _jit_routine_select_method: u32,
+    _jit_routine_checkcast: u32,
 }
 
 struct ModuleTranslation<'a> {
@@ -738,13 +812,16 @@ struct ModuleTranslation<'a> {
     i32_in_func_type: u32,
     _2_i32_in_func_type: u32,
     ref_in_func_type: u32,
+    ref_in_i32_out_func_type: u32,
     array_object_type: u32,
     function_signatures: &'a mut HashMap<MethodDescriptor, u32>,
+    static_function_signatures: &'a mut HashMap<MethodDescriptor, u32>,
     array_storage_types: &'a HashMap<StorageType, u32>,
     object_recs: &'a mut HashMap<String, u32>,
     jvm: &'a JVM,
     env: &'a WasmEnvironment,
     thread: &'a mut Thread,
+    object_type: u32,
 }
 
 impl<'a> ModuleTranslation<'a> {
@@ -753,9 +830,16 @@ impl<'a> ModuleTranslation<'a> {
         method_descriptor: &MethodDescriptor,
         is_static: bool,
     ) -> u32 {
-        match self.function_signatures.get(method_descriptor) {
-            None => {}
-            Some(id) => return *id,
+        if is_static {
+            match self.static_function_signatures.get(method_descriptor) {
+                None => {}
+                Some(id) => return *id,
+            }
+        } else {
+            match self.function_signatures.get(method_descriptor) {
+                None => {}
+                Some(id) => return *id,
+            }
         }
 
         let sig = MethodSignature::new_from_descriptor(method_descriptor, is_static);
@@ -763,8 +847,14 @@ impl<'a> ModuleTranslation<'a> {
         let func_id = self.type_section.len();
         self.type_section.function(sig.params, sig.return_type);
 
-        self.function_signatures
-            .insert(method_descriptor.clone(), func_id);
+        if is_static {
+            self.static_function_signatures
+                .insert(method_descriptor.clone(), func_id);
+        } else {
+            self.function_signatures
+                .insert(method_descriptor.clone(), func_id);
+        }
+
         func_id
     }
 
@@ -774,8 +864,16 @@ impl<'a> ModuleTranslation<'a> {
         }
 
         let super_id = self.get_object_type(class.super_class.as_ref().unwrap());
+
+        let parents = class.parents();
+        let recursive_fields = parents.iter().rev()
+            .map(|parent| &***parent)
+            .chain([class])
+            .map(|parent| parent.fields.iter().filter(|field| !field.access_flags.contains(AccessFlags::STATIC)))
+            .flatten();
+
+        let sub_type = sub_type_from_class(super_id, recursive_fields);
         let id = self.type_section.len();
-        let sub_type = sub_type_from_class(super_id, &class.fields);
         self.type_section.rec([sub_type]);
 
         self.object_recs.insert((*class.this_class).clone(), id);
@@ -787,7 +885,7 @@ impl<'a> ModuleTranslation<'a> {
 #[derive(Debug)]
 enum SpliceType {
     Invokevirtual(Arc<String>, Arc<Class>),
-    Arraystore(StorageType),
+    Arraystore(StorageType)
 }
 
 // #[derive(Debug)]
@@ -902,7 +1000,7 @@ fn translate_instructions<'method, 'module>(
     instruction: &Instruction,
     function: &mut Function,
     t: &mut MethodTranslation<'method, 'module>,
-) {
+) -> Result<(), JITError> {
     // match instruction.bytecode {
     //     _ => unimplemented!("{:?} unimplemented in JIT compiler", instruction.bytecode)
     // }
@@ -950,7 +1048,7 @@ fn translate_instructions<'method, 'module>(
                     .methods
                     .iter()
                     .position(|c_method| c_method.get_identifier() == &**method)
-                    .unwrap();
+                    .ok_or(JITError::NoCode)?;
 
                 i!(Instr::LocalGet(t.method_signature.thread_local));
                 i!(Instr::I32Const(method_id as i32));
@@ -997,6 +1095,81 @@ fn translate_instructions<'method, 'module>(
                 Instr::Br(br)
             });
         }
+        Bytecode::Lookupswitch(default, ref jumps) => {
+            let default_target = *t.byte_to_index_map
+                .get(&instruction.bytes_index.saturating_add_signed(default))
+                .unwrap();
+
+            let default_br = if default_target == instruction.bytecode_index + 1 {
+                0
+            } else {
+                t.br_offset_absolute(instruction.bytecode_index, default_target) + 1
+            };
+
+            let branches: Vec<u32> = jumps.iter().map(|entry| {
+                let target = *t.byte_to_index_map
+                    .get(&instruction.bytes_index.saturating_add_signed(entry.offset))
+                    .unwrap();
+
+                if target == instruction.bytecode_index + 1 {
+                    0
+                } else {
+                    t.br_offset_absolute(instruction.bytecode_index, target) + 1
+                }
+            }).collect();
+
+            i!(Instr::LocalSet(t.locals.i32_accumulator));
+
+            for (index, jump) in jumps.iter().enumerate() {
+                i!(Instr::I32Const(index as i32));
+                i!(Instr::I32Const(-1));
+
+                i!(Instr::LocalGet(t.locals.i32_accumulator));
+                i!(Instr::I32Const(jump.key));
+                i!(Instr::I32Eq);
+                i!(Instr::Select);
+                i!(Instr::LocalSet(t.locals.i32_accumulator_2));
+            }
+
+            i!(Instr::LocalGet(t.locals.i32_accumulator_2));
+            i!(Instr::Block(BlockType::FunctionType(t.module.i32_in_func_type)));
+            i!(Instr::BrTable(Cow::Owned(branches), default_br));
+            i!(Instr::End);
+        }
+        Bytecode::Tableswitch { default, low, high, ref offsets } => {
+            let default_target = *t.byte_to_index_map
+                .get(&instruction.bytes_index.saturating_add_signed(default))
+                .unwrap();
+
+            let default_br = if default_target == instruction.bytecode_index + 1 {
+                0
+            } else {
+                t.br_offset_absolute(instruction.bytecode_index, default_target) + 1
+            };
+
+            let branches: Vec<u32> = offsets.iter().map(|offset| {
+                let target = *t.byte_to_index_map
+                    .get(&instruction.bytes_index.saturating_add_signed(*offset))
+                    .unwrap();
+
+                if target == instruction.bytecode_index + 1 {
+                    0
+                } else {
+                    t.br_offset_absolute(instruction.bytecode_index, target) + 1
+                }
+            }).collect();
+
+            i!(Instr::Block(BlockType::FunctionType(t.module.i32_in_func_type)));
+
+            i!(Instr::I32Const(low));
+            i!(Instr::I32Sub);
+            i!(Instr::BrTable(Cow::Owned(branches), default_br));
+
+            i!(Instr::End);
+        }
+        Bytecode::Athrow => {
+            i!(Instr::Unreachable);
+        }
         Bytecode::Ifne(offset) => {
             i!(Instr::I32Const(0));
             i!(Instr::I32Ne);
@@ -1011,6 +1184,9 @@ fn translate_instructions<'method, 'module>(
                 Instr::BrIf(br)
             });
         }
+        Bytecode::I2l => {
+            i!(Instr::I64ExtendI32S);
+        }
         Bytecode::I2b => {
             i!(Instr::I32Const(0xff));
             i!(Instr::I32And);
@@ -1019,16 +1195,189 @@ fn translate_instructions<'method, 'module>(
         Bytecode::Iand => {
             i!(Instr::I32And);
         }
+        Bytecode::Ixor => {
+            i!(Instr::I32Xor);
+        }
         Bytecode::Ior => {
             i!(Instr::I32Or);
         }
+        Bytecode::Lshl => {
+            i!(Instr::I64ExtendI32U);
+            i!(Instr::I64Const(0b111111));
+            i!(Instr::I64And);
+            i!(Instr::I64Shl);
+        }
+        Bytecode::Lshr => {
+            i!(Instr::I64ExtendI32U);
+            i!(Instr::I64Const(0b111111));
+            i!(Instr::I64And);
+            i!(Instr::I64ShrS);
+        }
+        Bytecode::Ladd => {
+            i!(Instr::I64Add);
+        }
+        Bytecode::Lsub => {
+            i!(Instr::I64Sub);
+        }
+        Bytecode::Lushr => {
+            i!(Instr::I64ExtendI32U);
+            i!(Instr::I64Const(0b111111));
+            i!(Instr::I64And);
+            i!(Instr::I64ShrU);
+        }
         Bytecode::Ishl => {
-            i!(Instr::I32Const(0b11111));
-            i!(Instr::I32And);
+            //Pretty sure this doesn't matter
+            // i!(Instr::I32Const(0b11111));
+            // i!(Instr::I32And);
             i!(Instr::I32Shl);
+        }
+        Bytecode::Ishr => {
+            i!(Instr::I32ShrS);
+        }
+        Bytecode::Iushr => {
+            i!(Instr::I32ShrU);
         }
         Bytecode::Ifeq(offset) => {
             i!(Instr::I32Eqz);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::Ifnull(offset) => {
+            i!(Instr::RefIsNull);
+            //Doesn't use BrOnNull because that leaves the reference on the stack
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::Ifnonnull(offset) => {
+            i!(Instr::RefIsNull);
+            i!(Instr::I32Eqz);
+            //Doesn't use BrOnNull because that leaves the reference on the stack
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::Aconst_null => {
+            i!(Instr::RefNull(HeapType::Any));
+        }
+        Bytecode::Checkcast(constant_index) => {
+            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+
+            let (classpath, depth) = if let Constant::Class { path, depth } = constant {
+                (path, *depth)
+            } else {
+                panic!()
+            };
+
+            let component_class = t.class.class_loader.find_class(t.module.thread, classpath).unwrap();
+            let type_class = t.module.jvm.find_array_class(t.module.thread, component_class, depth);
+
+            i!(Instr::LocalTee(t.locals.ref_accumulator));
+
+            i!(Instr::Block(BlockType::FunctionType(t.module.ref_in_func_type)));
+            i!(Instr::BrOnNull(0));
+            i!(Instr::RefCastNullable(HeapType::Concrete(t.module.object_type)));
+            i!(Instr::StructGet { struct_type_index: t.module.object_type, field_index: 0 });
+            i!(Instr::I32Const(&*type_class as *const Class as i32));
+            i!(Instr::Call(t.module.jvm_functions._jit_routine_checkcast));
+            i!(Instr::BrIf(0));
+
+            //TODO exception
+            i!(Instr::Unreachable);
+
+            i!(Instr::End);
+            i!(Instr::LocalGet(t.locals.ref_accumulator));
+        }
+        Bytecode::Dup_x1 => {
+            let stack = &t.analyzed_stack[instruction.bytecode_index as usize - 1];
+            let a = stack[stack.len() - 1];
+            let b = stack[stack.len() - 2];
+
+            let a_local;
+            let b_local;
+
+            if a == b {
+                match a {
+                    Ref => {
+                        a_local = t.locals.ref_accumulator;
+                        b_local = t.locals.ref_accumulator_2;
+                    }
+                    Class1 => {
+                        a_local = t.locals.i32_accumulator;
+                        b_local = t.locals.i32_accumulator_2;
+                    }
+                    Class2 => {
+                        a_local = t.locals.i64_accumulator;
+                        b_local = t.locals.i64_accumulator_2;
+                    }
+                }
+            } else {
+                a_local = match a {
+                    Ref => t.locals.ref_accumulator,
+                    Class1 => t.locals.i32_accumulator,
+                    Class2 => t.locals.i64_accumulator
+                };
+                b_local = match b {
+                    Ref => t.locals.ref_accumulator,
+                    Class1 => t.locals.i32_accumulator,
+                    Class2 => t.locals.i64_accumulator
+                };
+            }
+
+            i!(Instr::LocalSet(a_local));
+            i!(Instr::LocalSet(b_local));
+            i!(Instr::LocalGet(a_local));
+            i!(Instr::LocalGet(b_local));
+            i!(Instr::LocalGet(a_local));
+        }
+        Bytecode::Instanceof(constant_index) => {
+            let constant = t.class.constant_pool.constants.get(&constant_index).unwrap();
+
+            let (classpath, depth) = if let Constant::Class { path, depth } = constant {
+                (path, *depth)
+            } else {
+                panic!()
+            };
+
+            let component_class = t.class.class_loader.find_class(t.module.thread, classpath).unwrap();
+            let type_class = t.module.jvm.find_array_class(t.module.thread, component_class, depth);
+
+            i!(Instr::Block(BlockType::FunctionType(t.module.ref_in_i32_out_func_type)));
+            i!(Instr::Block(BlockType::FunctionType(t.module.ref_in_func_type)));
+
+            i!(Instr::BrOnNull(0));
+            i!(Instr::RefCastNullable(HeapType::Concrete(t.module.object_type)));
+            i!(Instr::StructGet { struct_type_index: t.module.object_type, field_index: 0 });
+            i!(Instr::I32Const(&*type_class as *const Class as i32));
+            i!(Instr::Call(t.module.jvm_functions._jit_routine_checkcast));
+            i!(Instr::Br(1));
+
+            i!(Instr::End);
+
+            i!(Instr::I32Const(0));
+
+            i!(Instr::End);
+        }
+        Bytecode::If_acmpne(offset) => {
+            i!(Instr::LocalSet(t.locals.ref_accumulator));
+            i!(Instr::RefCastNullable(HeapType::Eq));
+            i!(Instr::LocalGet(t.locals.ref_accumulator));
+            i!(Instr::RefCastNullable(HeapType::Eq));
+
+            i!(Instr::RefEq);
+            i!(Instr::I32Eqz);
+            t.branch(instruction.bytes_index, offset as i32, function, |br| {
+                Instr::BrIf(br)
+            });
+        }
+        Bytecode::If_acmpeq(offset) => {
+            i!(Instr::LocalSet(t.locals.ref_accumulator));
+            i!(Instr::RefCastNullable(HeapType::Eq));
+            i!(Instr::LocalGet(t.locals.ref_accumulator));
+            i!(Instr::RefCastNullable(HeapType::Eq));
+
+            i!(Instr::RefEq);
             t.branch(instruction.bytes_index, offset as i32, function, |br| {
                 Instr::BrIf(br)
             });
@@ -1255,28 +1604,66 @@ fn translate_instructions<'method, 'module>(
                 ));
             }
 
-            if matches!(
-                field.descriptor,
-                FieldType::Array { .. } | FieldType::Class(_)
-            ) {
-                i!(Instr::I32Load(MemArg {
-                    memory_index: 0,
-                    offset: 0,
-                    align: 2
-                }));
-                i!(Instr::TableGet(1));
-            } else if matches!(field.descriptor, FieldType::Double | FieldType::Long) {
-                i!(Instr::I64Load(MemArg {
-                    memory_index: 0,
-                    offset: 0,
-                    align: 3
-                }));
-            } else {
-                i!(Instr::I32Load(MemArg {
-                    memory_index: 0,
-                    offset: 0,
-                    align: 2
-                }));
+            //TODO atomic statics
+            match field.descriptor {
+                FieldType::Byte => {
+                    i!(Instr::I32Load8U(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 0
+                    }));
+                }
+                FieldType::Char => {
+                    i!(Instr::I32Load16U(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 1
+                    }));
+                }
+                FieldType::Float => {
+                    i!(Instr::F32Load(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 2
+                    }));
+                }
+                FieldType::Int => {
+                    i!(Instr::I32Load(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 2
+                    }));
+                }
+                FieldType::Short => {
+                    i!(Instr::I32Load16S(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 1
+                    }));
+                }
+                FieldType::Boolean => {
+                    i!(Instr::I32Load8U(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 0
+                    }));
+                }
+                FieldType::Double
+                | FieldType::Long => {
+                    i!(Instr::I64Load(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 3
+                    }));
+                }
+                FieldType::Class(_) | FieldType::Array { .. } => {
+                    i!(Instr::I32Load(MemArg {
+                        memory_index: 0,
+                        offset: 0,
+                        align: 2
+                    }));
+                    i!(Instr::TableGet(1));
+                }
             }
         }
         Bytecode::Pop => {
@@ -1321,12 +1708,13 @@ fn translate_instructions<'method, 'module>(
 
             i!(Instr::StructNew(t.module.array_object_type));
         }
-        Bytecode::Baload | Bytecode::Iaload => {
+        Bytecode::Baload | Bytecode::Iaload | Bytecode::Aaload => {
             let array_object_type = t.module.array_object_type;
 
             let storage_type = match instruction.bytecode {
                 Bytecode::Baload => StorageType::I8,
                 Bytecode::Iaload => StorageType::Val(ValType::I32),
+                Bytecode::Aaload => StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct })),
                 _ => unreachable!()
             };
 
@@ -1344,9 +1732,16 @@ fn translate_instructions<'method, 'module>(
 
             match instruction.bytecode {
                 Bytecode::Baload => { i!(Instr::ArrayGetU(array_type)); },
-                Bytecode::Iaload => { i!(Instr::ArrayGet(array_type)); },
+                Bytecode::Aaload
+                | Bytecode::Iaload => { i!(Instr::ArrayGet(array_type)); },
                 _ => unreachable!()
             };
+        }
+        Bytecode::Aastore => {
+            let &object_array = t.module.array_storage_types.get(&StorageType::Val(ValType::Ref(RefType { nullable: true, heap_type: HeapType::Struct }))).unwrap();
+
+            i!(Instr::RefCastNullable(HeapType::Struct));
+            i!(Instr::ArraySet(object_array));
         }
         Bytecode::Bastore => {
             let &byte_array = t.module.array_storage_types.get(&StorageType::I8).unwrap();
@@ -1538,6 +1933,9 @@ fn translate_instructions<'method, 'module>(
             i!(Instr::I32Const(func_id as i32));
             i!(Instr::CallIndirect { ty, table: 0 });
         }
+        Bytecode::Monitorenter | Bytecode::Monitorexit => {
+            i!(Instr::Drop);
+        }
         Bytecode::Ldc(constant_index) => {
             let constant = t
                 .class
@@ -1593,6 +1991,9 @@ fn translate_instructions<'method, 'module>(
         Bytecode::Iconst_n_m1(int) => {
             i!(Instr::I32Const(int as i32));
         }
+        Bytecode::Lconst_n(long) => {
+            i!(Instr::I64Const(long as i64));
+        }
         Bytecode::Sipush(short) => {
             i!(Instr::I32Const(short as i32));
         }
@@ -1633,8 +2034,11 @@ fn translate_instructions<'method, 'module>(
             i!(Instr::Return);
         }
         // _ => { i!(Instr::Nop); }
-        _ => unimplemented!("{:?}", instruction.bytecode),
+        // _ => unimplemented!("{:?}", instruction.bytecode),
+        _ => return Err(JITError::UnimplementedBytecode(instruction.bytecode.clone()))
     }
+    
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1797,9 +2201,9 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
     function: &mut Function,
     absolute_offset: usize,
     translating: &mut MethodTranslation<'method, 'module>,
-) -> usize {
+) -> Result<usize, JITError> {
     if instructions.len() == 0 {
-        return 0;
+        return Ok(0);
     }
 
     let mut consumed_instructions = 0;
@@ -1808,19 +2212,19 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
         let (next_block_start, next_block_end, block_type) = match ranges.get(0).copied() {
             None => {
                 for instr in &instructions[consumed_instructions..] {
-                    translate_instructions(instr, function, translating);
+                    translate_instructions(instr, function, translating)?;
                 }
 
-                return instructions.len();
+                return Ok(instructions.len());
             }
             Some(range) => {
                 //Next block is not nested in the current one
                 if range.0 as usize > instructions.len() + absolute_offset - 1 {
                     for instr in &instructions[consumed_instructions..] {
-                        translate_instructions(instr, function, translating);
+                        translate_instructions(instr, function, translating)?;
                     }
 
-                    return instructions.len();
+                    return Ok(instructions.len());
                 }
 
                 range
@@ -1834,7 +2238,7 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
                 &instructions[index + consumed_instructions],
                 function,
                 translating,
-            );
+            )?;
         }
 
         // console_log!("written: {instrs_to_write}, next_block_start: {next_block_start}, absolute: {absolute_offset}, n-a: {}, consumed: {consumed_instructions}", next_block_start as usize - absolute_offset);
@@ -1847,14 +2251,14 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
                     .get(next_block_start as usize - absolute_offset)
                     .map(|instr| &instr.bytecode)
                 {
-                    match instr {
+                    let params_in: &[ValType] = match instr {
                         Bytecode::Ifeq(_)
                         | Bytecode::Ifne(_)
                         | Bytecode::Ifge(_)
                         | Bytecode::Ifgt(_)
                         | Bytecode::Ifle(_)
                         | Bytecode::Iflt(_) => {
-                            BlockType::FunctionType(translating.module.i32_in_func_type)
+                            &[ValType::I32]
                         }
                         Bytecode::If_icmpge(_)
                         | Bytecode::If_icmpeq(_)
@@ -1862,13 +2266,30 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
                         | Bytecode::If_icmple(_)
                         | Bytecode::If_icmpne(_)
                         | Bytecode::If_icmplt(_) => {
-                            BlockType::FunctionType(translating.module._2_i32_in_func_type)
+                            &[ValType::I32; 2]
+                        }
+                        Bytecode::Ifnull(_) | Bytecode::Ifnonnull(_) => {
+                            &[ValType::Ref(RefType { heap_type: HeapType::Any, nullable: true })]
                         }
                         Bytecode::If_acmpne(_) | Bytecode::If_acmpeq(_) => {
-                            BlockType::FunctionType(translating.module.ref_in_func_type)
+                            &[ValType::Ref(RefType { heap_type: HeapType::Any, nullable: true }); 2]
                         }
-                        _ => BlockType::Empty,
-                    }
+                        Bytecode::Lookupswitch(_, _) | Bytecode::Tableswitch { .. } => {
+                            &[ValType::I32]
+                        }
+                        _ => &[],
+                    };
+
+                    let params_out: Vec<ValType> = translating.analyzed_stack[next_block_end as usize].iter().map(|operand| match operand {
+                        Ref => ValType::Ref(RefType { heap_type: HeapType::Any, nullable: true }),
+                        Class1 => ValType::I32,
+                        Class2 => ValType::I64
+                    }).collect();
+
+                    let type_id = translating.module.type_section.len();
+                    translating.module.type_section.function(params_in.to_owned(), params_out);
+
+                    BlockType::FunctionType(type_id)
                 } else {
                     BlockType::Empty
                 };
@@ -1889,7 +2310,7 @@ fn fold<'method, 'module: 'method, 'a, 'b: 'a>(
             function,
             next_block_start as usize,
             translating,
-        );
+        )?;
 
         function.instruction(&Instr::End);
     }
@@ -1906,12 +2327,11 @@ fn analyze_stack(
     bytecode: &[Instruction],
     class: &Class,
     thread: &mut Thread,
-) -> Vec<Vec<OperandType>> {
-    let mut stack_size = 0isize;
+) -> Result<Vec<Vec<OperandType>>, JITError> {
     let mut stack = vec![];
     let mut out = vec![];
 
-    bytecode.into_iter().for_each(|instr| {
+    for instr in bytecode {
         let (change, res): (isize, &[OperandType]) = match &instr.bytecode {
             Bytecode::Aaload => (-2, &[Ref]),
             Bytecode::Aastore => (-3, &[]),
@@ -1945,11 +2365,11 @@ fn analyze_stack(
             Bytecode::Dreturn => (-1, &[]),
             Bytecode::Dstore(_) => (-1, &[]),
             Bytecode::Dsub => (-2, &[Class2]),
-            Bytecode::Dup => (-2, &[*stack.last().unwrap(), *stack.last().unwrap()]),
-            Bytecode::Dup_x2 => todo!(),
-            Bytecode::Dup2 => todo!(),
-            Bytecode::Dup2_x1 => todo!(),
-            Bytecode::Dup2_x2 => todo!(),
+            Bytecode::Dup => (-1, &[*stack.last().unwrap(), *stack.last().unwrap()]),
+            Bytecode::Dup_x2 => return Err(JITError::UnimplementedBytecode(instr.bytecode.clone())),
+            Bytecode::Dup2 => return Err(JITError::UnimplementedBytecode(instr.bytecode.clone())),
+            Bytecode::Dup2_x1 => return Err(JITError::UnimplementedBytecode(instr.bytecode.clone())),
+            Bytecode::Dup2_x2 => return Err(JITError::UnimplementedBytecode(instr.bytecode.clone())),
             Bytecode::F2d => (-1, &[Class2]),
             Bytecode::F2i => (-1, &[Class1]),
             Bytecode::F2l => (-1, &[Class2]),
@@ -2108,8 +2528,8 @@ fn analyze_stack(
 
                 (1, res)
             }
-            Bytecode::Ldc_w(constant_index) => todo!(),
-            Bytecode::Ldc2_w(_) => todo!(),
+            Bytecode::Ldc_w(constant_index) => return Err(JITError::UnimplementedBytecode(instr.bytecode.clone())),
+            Bytecode::Ldc2_w(_) => return Err(JITError::UnimplementedBytecode(instr.bytecode.clone())),
             Bytecode::Ldiv => (-2, &[Class2]),
             Bytecode::Lload(_) => (0, &[Class2]),
             Bytecode::Lmul => (-2, &[Class2]),
@@ -2128,8 +2548,8 @@ fn analyze_stack(
             Bytecode::Lsub => (-2, &[Class2]),
             Bytecode::Lushr => (-2, &[Class2]),
             Bytecode::Lxor => (-2, &[Class2]),
-            Bytecode::Monitorenter => todo!(),
-            Bytecode::Monitorexit => todo!(),
+            Bytecode::Monitorenter => (-1, &[]),
+            Bytecode::Monitorexit => (-1, &[]),
             Bytecode::Multianewarray(_, dimensions) => (1 - (*dimensions as isize), &[Ref]),
             Bytecode::New(_) => (0, &[Ref]),
             Bytecode::Newarray(_) => (-1, &[Ref]),
@@ -2138,7 +2558,7 @@ fn analyze_stack(
             Bytecode::Pop2 => todo!(),
             Bytecode::Putfield(_) => (-2, &[]),
             Bytecode::Putstatic(_) => (-1, &[]),
-            Bytecode::Ret(_) => (-0, &[]),
+            Bytecode::Ret(_) => (0, &[]),
             Bytecode::Return => (0, &[]),
             Bytecode::Saload => (-2, &[Class1]),
             Bytecode::Sastore => (-3, &[Class1]),
@@ -2147,27 +2567,30 @@ fn analyze_stack(
                 let a = stack.pop().unwrap();
                 let b = stack.pop().unwrap();
 
-                (-2, &[a, b])
+                (0, &[a, b])
             }
             Bytecode::Tableswitch { .. } => {
                 stack.clear();
                 (0, &[])
             }
-            Bytecode::Dup_x1 => todo!(),
+            Bytecode::Dup_x1 => {
+                let a = stack.pop().ok_or(JITError::AnalysisFailure)?;
+                let b = stack.pop().ok_or(JITError::AnalysisFailure)?;
+
+                (0, &[b, a, b])
+            },
         };
 
         if change < 0 {
             for _ in 0..change.abs() as usize {
                 stack.pop();
             }
-        } else {
-            stack_size += res.len() as isize;
         }
 
         stack.extend(res);
 
         out.push(stack.clone());
-    });
+    }
 
-    out
+    Ok(out)
 }

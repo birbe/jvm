@@ -4,6 +4,8 @@
 #![feature(if_let_guard)]
 #![feature(asm_experimental_arch)]
 #![feature(let_chains)]
+#![feature(formatting_options)]
+#![feature(debug_closure_helpers)]
 extern crate core;
 
 use crate::classfile::resolved::{
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
-use crate::bytecode::ArrayType;
+use crate::bytecode::{ArrayType, JValue};
 use crate::env::{Compiler, Environment, Object};
 use crate::execution::MethodHandle;
 use crate::linker::{BootstrapLoader, ClassLoader};
@@ -27,7 +29,7 @@ use highway::{HighwayHash, HighwayHasher};
 use once_cell::sync::OnceCell;
 use std::io::Write;
 use std::iter;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
@@ -83,6 +85,11 @@ pub trait ClassContext {
     fn id(&self) -> u32;
 }
 
+pub struct RuntimeHeuristics {
+    pub interpreter_invocations: AtomicU64,
+    pub instructions_executed: AtomicU64
+}
+
 pub struct JVM {
     pub stdout: Mutex<Box<dyn Write>>,
     pub threads: RwLock<Vec<Arc<Mutex<Thread>>>>,
@@ -91,8 +98,10 @@ pub struct JVM {
     pub array_classes: RwLock<HashMap<u64, Object>>,
     pub method_handles: RwLock<HashMap<u64, Arc<MethodHandle>>>,
     pub bootstrap_classloader: Arc<dyn BootstrapLoader>,
+    pub heuristics: RuntimeHeuristics,
     class_ids: AtomicU32,
     thread_ids: AtomicU64,
+    logging: AtomicBool
 }
 
 impl JVM {
@@ -109,8 +118,13 @@ impl JVM {
             array_classes: RwLock::new(HashMap::new()),
             method_handles: RwLock::new(HashMap::new()),
             bootstrap_classloader,
+            heuristics: RuntimeHeuristics {
+                interpreter_invocations: AtomicU64::new(1),
+                instructions_executed: AtomicU64::new(1),
+            },
             class_ids: AtomicU32::new(0),
             thread_ids: AtomicU64::new(0),
+            logging: AtomicBool::new(false),
         });
 
         let mut temp_thread = jvm.create_thread(jvm.bootstrap_classloader.clone());
@@ -175,9 +189,15 @@ impl JVM {
             .find_class(&mut temp_thread, "java/lang/ref/Reference")
             .unwrap();
         ThreadHandle::init_static(&ref_class, &mut temp_thread);
-
-        // temp_thread.call("java/lang/System", "initPhase1", "()V", Box::new([])).unwrap();
-
+        
+        temp_thread.call("java/lang/System", "initPhase1", "()V", Box::new([])).unwrap();
+        // temp_thread.call("java/lang/System", "initPhase2", "(ZZ)I", Box::new([
+        //     JValue::Byte(1),
+        //     JValue::Byte(1),
+        //
+        // ])).unwrap();
+        // temp_thread.call("java/lang/System", "initPhase3", "()V", Box::new([])).unwrap();
+        
         jvm
     }
 
@@ -458,6 +478,9 @@ impl JVM {
                 name: Arc::new("clone".into()),
                 attributes: HashMap::new(),
                 identifier: Arc::new(format!("clone(){}", classpath)),
+                interpreter_invocations: AtomicU64::new(0),
+                instructions_executed: AtomicU64::new(0),
+                jitted: AtomicBool::new(false),
             })],
             attributes: vec![],
             class_instance: OnceCell::new(),

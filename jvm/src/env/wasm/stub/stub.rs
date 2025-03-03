@@ -316,7 +316,7 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
         "memory",
         EntityType::Memory(MemoryType {
             minimum: 1,
-            maximum: Some(16384),
+            maximum: Some(65536),
             memory64: false,
             shared: true,
         }),
@@ -507,6 +507,8 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
 
     //Trampoline for WASM to interpreter
     for method in &stubbable_methods {
+        let is_native = method.access_flags.contains(AccessFlags::NATIVE);
+
         let sig = MethodSignature::new(&method);
         let mut func = Function::new([(4, ValType::I32)]);
 
@@ -621,52 +623,76 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
                     local_store_index += 1;
                 }
                 FieldType::Long => {
-                    func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
-                    func.instruction(&Instruction::LocalGet(index as u32));
-                    func.instruction(&Instruction::I64Const(((u32::MAX as u64) << 32) as i64));
-                    func.instruction(&Instruction::I64And);
-                    func.instruction(&Instruction::I64Store(MemArg {
-                        offset: (local_store_index * size_of::<Operand>()) as u64,
-                        align: 3,
-                        memory_index: 0,
-                    }));
+                    if !is_native {
+                        func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                        func.instruction(&Instruction::LocalGet(index as u32));
+                        func.instruction(&Instruction::I64Const(((u32::MAX as u64) << 32) as i64));
+                        func.instruction(&Instruction::I64And);
+                        func.instruction(&Instruction::I64Store(MemArg {
+                            offset: (local_store_index * size_of::<Operand>()) as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
 
-                    func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
-                    func.instruction(&Instruction::LocalGet(index as u32));
-                    func.instruction(&Instruction::I64Const(u32::MAX as i64));
-                    func.instruction(&Instruction::I64And);
-                    func.instruction(&Instruction::I64Store(MemArg {
-                        offset: ((local_store_index + 1) * size_of::<Operand>()) as u64,
-                        align: 3,
-                        memory_index: 0,
-                    }));
+                        func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                        func.instruction(&Instruction::LocalGet(index as u32));
+                        func.instruction(&Instruction::I64Const(u32::MAX as i64));
+                        func.instruction(&Instruction::I64And);
+                        func.instruction(&Instruction::I64Store(MemArg {
+                            offset: ((local_store_index + 1) * size_of::<Operand>()) as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
 
-                    local_store_index += 2;
+                        local_store_index += 2;
+                    } else {
+                        func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                        func.instruction(&Instruction::LocalGet(index as u32));
+                        func.instruction(&Instruction::I64Store(MemArg {
+                            offset: (local_store_index * size_of::<Operand>()) as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
+
+                        local_store_index += 1;
+                    }
                 }
                 FieldType::Double => {
-                    func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
-                    func.instruction(&Instruction::LocalGet(index as u32));
-                    func.instruction(&Instruction::I64ReinterpretF64);
-                    func.instruction(&Instruction::I64Const(((u32::MAX as u64) << 32) as i64));
-                    func.instruction(&Instruction::I64And);
-                    func.instruction(&Instruction::I64Store(MemArg {
-                        offset: (local_store_index * size_of::<Operand>()) as u64,
-                        align: 3,
-                        memory_index: 0,
-                    }));
+                    if !is_native {
+                        func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                        func.instruction(&Instruction::LocalGet(index as u32));
+                        func.instruction(&Instruction::I64ReinterpretF64);
+                        func.instruction(&Instruction::I64Const(((u32::MAX as u64) << 32) as i64));
+                        func.instruction(&Instruction::I64And);
+                        func.instruction(&Instruction::I64Store(MemArg {
+                            offset: (local_store_index * size_of::<Operand>()) as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
 
-                    func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
-                    func.instruction(&Instruction::LocalGet(index as u32));
-                    func.instruction(&Instruction::I64ReinterpretF64);
-                    func.instruction(&Instruction::I64Const(u32::MAX as i64));
-                    func.instruction(&Instruction::I64And);
-                    func.instruction(&Instruction::I64Store(MemArg {
-                        offset: ((local_store_index + 1) * size_of::<Operand>()) as u64,
-                        align: 3,
-                        memory_index: 0,
-                    }));
+                        func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                        func.instruction(&Instruction::LocalGet(index as u32));
+                        func.instruction(&Instruction::I64ReinterpretF64);
+                        func.instruction(&Instruction::I64Const(u32::MAX as i64));
+                        func.instruction(&Instruction::I64And);
+                        func.instruction(&Instruction::I64Store(MemArg {
+                            offset: ((local_store_index + 1) * size_of::<Operand>()) as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
 
-                    local_store_index += 2;
+                        local_store_index += 2;
+                    } else {
+                        func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
+                        func.instruction(&Instruction::LocalGet(index as u32));
+                        func.instruction(&Instruction::F64Store(MemArg {
+                            offset: (local_store_index * size_of::<Operand>()) as u64,
+                            align: 3,
+                            memory_index: 0,
+                        }));
+
+                        local_store_index += 1;
+                    }
                 }
                 FieldType::Float => {
                     func.instruction(&Instruction::LocalGet(jlocal_box_addr_local));
@@ -685,7 +711,7 @@ pub fn create_stub_module(class: &Class, func_table_offset: u32) -> StubModule {
 
         //Interpret the function
         func.instruction(&Instruction::LocalGet(sig.thread_local));
-        if !method.access_flags.contains(AccessFlags::NATIVE) {
+        if !is_native {
             func.instruction(&Instruction::Call(interpret));
         } else {
             func.instruction(&Instruction::Call(native));

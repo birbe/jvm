@@ -1,6 +1,6 @@
 use crate::classfile::resolved::{Class, Method, Ref};
 use crate::classfile::ClassFile;
-use crate::env::wasm::jit::{jit_module, translate_method_java_to_wasm};
+use crate::env::wasm::jit::{jit_module, translate_method_java_to_wasm, JITError};
 use crate::env::{Object, ToAny};
 use crate::execution::MethodHandle;
 use crate::linker::{BootstrapLoader, ClassLoader, ClassLoaderObject};
@@ -20,6 +20,7 @@ use std::hash::Hasher;
 use std::io::{Cursor, Write};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -244,6 +245,11 @@ pub fn wasm_test() {
         .clone()
         .find_class(&mut main_thread, "java/lang/StringConcatHelper")
         .unwrap();
+    let class_ = main_thread
+        .class_loader
+        .clone()
+        .find_class(&mut main_thread, "java/lang/Class")
+        .unwrap();
 
     let method = string
         .get_method_by_name("newStringUTF8NoRepl", "([BIIZ)Ljava/lang/String;")
@@ -278,17 +284,22 @@ pub fn wasm_test() {
             &**main.get_method_by_name("jitTest", "()I").unwrap(),
             &*main,
         ),
+        (
+            &**class_.get_method_by_name("<init>", "(Ljava/lang/ClassLoader;Ljava/lang/Class;)V").unwrap(),
+            &*class_,
+        )
     ];
 
-    let jit = jit_module(&jvm, env, &to_jit, &mut main_thread);
+    let jit = jit_module(&jvm, env, &to_jit, &mut main_thread).unwrap();
 
-    env.link_jit(&jvm, jit);
+    match env.link_jit(&jvm, jit) {
+        Ok(_) => {}
+        Err(JITError::LinkingError(err)) => panic!("{err}"),
+        Err(err) => {}
+    }
 
     let handle = jvm.get_method("Main", "main", "()I", 0);
 
-    let time = js_sys::Date::now();
+    jvm.logging.store(true, Ordering::SeqCst);
     let op = main_thread.invoke(&handle, Box::new([]));
-    let new_time = js_sys::Date::now();
-
-    console_log!("{op:?} in {}", new_time - time);
 }

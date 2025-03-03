@@ -20,6 +20,23 @@ pub enum ArrayType {
     Long = 11,
 }
 
+impl ArrayType {
+
+    pub fn to_string(&self) -> &str {
+        match self {
+            ArrayType::Bool => "Z",
+            ArrayType::Char => "C",
+            ArrayType::Float => "F",
+            ArrayType::Double => "D",
+            ArrayType::Byte => "B",
+            ArrayType::Short => "S",
+            ArrayType::Int => "I",
+            ArrayType::Long => "J"
+        }
+    }
+
+}
+
 #[derive(JParse, Copy, Debug, Clone, PartialEq)]
 pub struct LookupEntry {
     pub key: i32,
@@ -34,6 +51,7 @@ pub enum JValue {
     Double(f64),
     Short(i16),
     Byte(i8),
+    Boolean(bool)
 }
 
 impl JValue {
@@ -46,6 +64,7 @@ impl JValue {
             JValue::Double(double) => Operand::new_data2(u64::from_ne_bytes(double.to_ne_bytes())),
             JValue::Short(short) => Operand::new_data(short as u32),
             JValue::Byte(byte) => Operand::new_data(byte as u32),
+            JValue::Boolean(bool) => Operand::new_data(bool as u32)
         }
     }
 }

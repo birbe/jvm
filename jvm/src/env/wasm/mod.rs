@@ -2,7 +2,7 @@ use crate::bytecode::ArrayType;
 use crate::classfile::resolved::{
     AccessFlags, Attribute, Class, ClassId, FieldType, Method, Ref, ReturnType,
 };
-use crate::env::wasm::jit::JitResult;
+use crate::env::wasm::jit::{jit_module, JITError, JitResult};
 use crate::env::wasm::native::native;
 use crate::env::wasm::stub::generate_helper_wasm;
 use crate::env::wasm::stub::stub::create_stub_module;
@@ -10,7 +10,7 @@ use crate::env::Object;
 use crate::env::{nothing, Compiler, Environment, ToAny};
 use crate::execution::{ExecutionContext, MethodHandle};
 use crate::linker::{routine_select_method, ClassLoader};
-use crate::thread::{FrameStack, Operand, RawFrame, Thread, ThreadHandle};
+use crate::thread::{FrameStack, Operand, OperandTag, RawFrame, Thread, ThreadHandle};
 use crate::JVM;
 use highway::HighwayHasher;
 use js_sys::{Function, WebAssembly};
@@ -64,6 +64,15 @@ pub extern "C" fn init_static(class: &Class, thread: &mut Thread) {
 }
 
 #[no_mangle]
+pub extern "C" fn _jit_routine_checkcast(object_class: &Class, test_class: &Class) -> bool {
+    &*test_class == object_class
+        || object_class
+        .parents_and_interfaces()
+        .iter()
+        .any(|super_| &***super_ == &*test_class)
+}
+
+#[no_mangle]
 pub extern "C" fn _jit_routine_select_method(
     object_class: &Class,
     thread: &mut Thread,
@@ -91,7 +100,9 @@ pub extern "C" fn alloc_ref() -> i32 {
     assert_ne!(refs.available.as_ptr() as i32, 0);
 
     let out = if refs.available.len() == 0 {
-        refs.table.grow(1).unwrap();
+        if let Err(_) = refs.table.grow(1) {
+            panic!("Failed to grow ref table with size {}", refs.table.length());
+        }
 
         let len = refs.len;
         refs.len += 1;
@@ -110,16 +121,16 @@ pub extern "C" fn alloc_ref() -> i32 {
 pub extern "C" fn dealloc_ref(index: *mut ()) {
     let refs_lock = OBJECT_REF_SLOTS.get().unwrap();
     let mut refs = refs_lock.lock();
-
+    
     if refs.available.contains(&(index as i32)) {
         panic!("double free {}", index as u32);
     }
-
+    
     let fn_ptr = unsafe { *NULL_TABLE_SLOT.get_unchecked() };
     unsafe {
         fn_ptr(index as i32);
     };
-
+    
     if index as i32 != 0 {
         refs.available.push(index as i32);
     }
@@ -420,36 +431,34 @@ impl WasmEnvironment {
         *class_pointers.get(identifier).unwrap()
     }
 
-    fn link_jit(&self, jvm: &JVM, jit: JitResult) {
+    fn link_jit(&self, jvm: &JVM, jit: JitResult) -> Result<(), JITError> {
         let jvm_import_object = js_sys::Object::new();
 
         let meta_exports = wasm_bindgen::exports();
         let func_table = WebAssembly::Table::from(wasm_bindgen::function_table());
 
-        for cross_import in ["init_static", "_jit_routine_select_method"] {
+        for cross_import in ["init_static", "_jit_routine_select_method", "_jit_routine_checkcast"] {
             let key: JsValue = cross_import.into();
 
             js_sys::Reflect::set(
                 &jvm_import_object,
                 &key,
                 &js_sys::Reflect::get(&meta_exports, &key).unwrap(),
-            )
-            .unwrap();
+            ).unwrap();
         }
 
         js_sys::Reflect::set(
             &jvm_import_object,
             &"functions".into(),
             &wasm_bindgen::function_table(),
-        )
-        .unwrap();
+        ).unwrap();
+        
         js_sys::Reflect::set(&jvm_import_object, &"objects".into(), &self.object_table).unwrap();
         js_sys::Reflect::set(
             &jvm_import_object,
             &"memory".into(),
             &wasm_bindgen::memory(),
-        )
-        .unwrap();
+        ).unwrap();
 
         let imports = js_sys::Object::new();
 
@@ -457,33 +466,25 @@ impl WasmEnvironment {
 
         let wasm_bytes = jit.module.finish();
 
-        let mut printer = wasmprinter::Printer::new();
-        printer.print_offsets(true);
-
-        let wat = printer.print(&wasm_bytes).unwrap();
-
-        match wasmparser::Validator::new_with_features(WasmFeatures {
-            gc: true,
-            function_references: true,
-            bulk_memory: true,
-            ..Default::default()
-        })
-        .validate_all(&wasm_bytes)
-        {
-            Ok(_) => {}
-            Err(error) => {
-                console_log!("{error}\n{wat}");
-            }
-        }
-
         let uint8array = unsafe { js_sys::Uint8Array::view(&wasm_bytes) };
+        let module = WebAssembly::Module::new(&uint8array).map_err(|e| {
+            let mut printer = wasmprinter::Printer::new();
+            printer.print_offsets(true);
 
-        let module = match WebAssembly::Module::new(&uint8array) {
-            Ok(module) => module,
-            Err(err) => {
-                panic!("{wat}\n{err:?}")
-            }
-        };
+            let wat = printer.print(&wasm_bytes).unwrap();
+
+            let err = match wasmparser::Validator::new_with_features(WasmFeatures {
+                gc: true,
+                function_references: true,
+                bulk_memory: true,
+                ..Default::default()
+            }).validate_all(&wasm_bytes) {
+                Ok(_) => unreachable!(),
+                Err(error) => error,
+            };
+
+            JITError::LinkingError(format!("{err}\n{wat}"))
+        })?;
 
         let instance = WebAssembly::Instance::new(&module, &imports).unwrap();
 
@@ -491,17 +492,13 @@ impl WasmEnvironment {
 
         for (method, class, key) in jit.functions {
             let old_index = self.get_linked_function_ptr(class, method.get_identifier());
-            console_log!(
-                "linked jit func {} as {} @ {}",
-                method.name,
-                &key,
-                old_index
-            );
 
             let func = js_sys::Function::from(js_sys::Reflect::get(&exports, &key.into()).unwrap());
 
             WebAssembly::Table::set(&func_table, old_index, &func).unwrap();
         }
+        
+        Ok(())
     }
 }
 
@@ -631,7 +628,7 @@ impl Environment for WasmEnvironment {
     ) -> Option<Operand> {
         let operand = match &method_handle.context {
             ExecutionContext::Interpret(_) => unreachable!(), //Unused on WASM
-            ExecutionContext::Compiled | ExecutionContext::Native => {
+            ExecutionContext::Compiled => {
                 let (max_locals, max_stack) = if let Some(Attribute::Code(code)) =
                     method_handle.method.attributes.get("Code")
                 {
@@ -701,6 +698,15 @@ impl Environment for WasmEnvironment {
 
                 out
             }
+            ExecutionContext::Native => {
+                let frame =
+                    RawFrame::new(&method_handle.method, &method_handle.class, args, Box::new([]));
+                thread.frame_stack.push(frame);
+
+                let out = unsafe { method_handle.ptr.unwrap()(thread) };
+
+                out
+            }
         };
 
         if matches!(
@@ -754,7 +760,7 @@ impl Environment for WasmEnvironment {
         unsafe { std::mem::transmute((self.fn_get_object_class)(object.ptr as i32)) }
     }
 
-    unsafe fn get_object_field(
+    fn get_object_field(
         &self,
         object: &Object,
         class: &Class,
@@ -829,6 +835,10 @@ impl Environment for WasmEnvironment {
                 let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
                 unsafe { set(object.ptr as i32, value.data() as i32) };
             }
+            "C" => {
+                let set: unsafe fn(i32, i32) = unsafe { std::mem::transmute(*set) };
+                unsafe { set(object.ptr as i32, value.data() as i32) };
+            }
             _ => unimplemented!(
                 "field type setter {} {}",
                 &field_descriptor[0..1],
@@ -852,6 +862,13 @@ impl Environment for WasmEnvironment {
     }
 
     fn clone_reference(&self, object: &Object) -> Object {
+        // unsafe {
+        //     Object::from_raw(
+        //         object.ptr,
+        //         nothing
+        //     )
+        // }
+        
         unsafe {
             Object::from_raw(
                 (self.fn_clone_reference)(object.ptr as i32) as *mut (),
@@ -908,23 +925,25 @@ impl Environment for WasmEnvironment {
         }
     }
 
-    unsafe fn get_array_element(
+    fn get_array_element(
         &self,
         array_type: ArrayType,
         array: &Object,
         index: i32,
     ) -> Operand {
-        match array_type {
-            ArrayType::Char => {
-                Operand::new_data((self.fn_get_char_array_elem)(array.ptr as i32, index) as u32)
+        unsafe {
+            match array_type {
+                ArrayType::Char => {
+                    Operand::new_data((self.fn_get_char_array_elem)(array.ptr as i32, index) as u32)
+                }
+                ArrayType::Int => {
+                    Operand::new_data((self.fn_get_int_array_elem)(array.ptr as i32, index) as u32)
+                }
+                ArrayType::Byte => {
+                    Operand::new_data((self.fn_get_byte_array_elem)(array.ptr as i32, index) as u32)
+                }
+                _ => unimplemented!("{array_type:?}"),
             }
-            ArrayType::Int => {
-                Operand::new_data((self.fn_get_int_array_elem)(array.ptr as i32, index) as u32)
-            }
-            ArrayType::Byte => {
-                Operand::new_data((self.fn_get_byte_array_elem)(array.ptr as i32, index) as u32)
-            }
-            _ => unimplemented!("{array_type:?}"),
         }
     }
 
@@ -955,7 +974,7 @@ impl Environment for WasmEnvironment {
         unsafe { Object::from_raw(object_id as *mut (), dealloc_ref) }
     }
 
-    unsafe fn object_from_operand(&self, operand: Operand) -> Object {
+    fn object_from_operand(&self, operand: Operand) -> Object {
         Object {
             ptr: operand.ref_(),
             padding: [],
@@ -963,11 +982,27 @@ impl Environment for WasmEnvironment {
         }
     }
 
-    unsafe fn object_ref_from_operand(&self, operand: &Operand) -> &Object {
-        &*(operand as *const Operand as *const Object)
+    fn object_ref_from_operand(&self, operand: &Operand) -> &Object {
+        // assert_eq!(operand.tag(), OperandTag::Ref);
+        unsafe { &*(operand as *const Operand as *const Object) }
     }
 
     fn object_ref_eq(&self, a: &Object, b: &Object) -> bool {
         (unsafe { (self.fn_ref_eq)(a.ptr as i32, b.ptr as i32) }) != 0
+    }
+
+    fn submit_jit_candidate(&self, class: &Class, method: &Method, thread: &mut Thread) {
+        method.jitted.store(true, Ordering::Relaxed);
+        
+        console_log!("JITing {} {}", class.this_class, method.get_identifier());
+        let jvm = thread.jvm.clone();
+        let to_jit = [(method, class)];
+        let jit = jit_module(&jvm, self, &to_jit, thread).and_then(|result| self.link_jit(&jvm, result));
+
+        match jit {
+            Ok(_) => console_log!("JIT succeeded"),
+            Err(JITError::LinkingError(comp)) => console_log!("{comp}"),
+            Err(err) => console_log!("Failed to jit method {err:?}")
+        }
     }
 }

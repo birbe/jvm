@@ -12,7 +12,7 @@ use crate::classfile::{
 use bitflags::{bitflags, Flags};
 use std::alloc::{alloc, Layout};
 
-use crate::bytecode::BytecodeParseError;
+use crate::bytecode::{ArrayType, BytecodeParseError};
 use crate::env::Object;
 use crate::linker::{ClassLoader, ClassLoaderObject};
 use crate::thread::{Operand, Thread};
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 bitflags! {
@@ -458,7 +458,7 @@ impl TryFrom<&str> for MethodDescriptor {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Method {
     pub access_flags: AccessFlags,
     pub name: Arc<String>,
@@ -466,6 +466,9 @@ pub struct Method {
     pub attributes: HashMap<String, Attribute>,
     pub class: Arc<String>,
     pub(crate) identifier: Arc<String>,
+    pub interpreter_invocations: AtomicU64,
+    pub instructions_executed: AtomicU64,
+    pub jitted: AtomicBool
 }
 
 impl Method {
@@ -520,6 +523,9 @@ impl Method {
                 .collect::<Result<HashMap<String, Attribute>, ClassDeserializationError>>()?,
             class,
             identifier: Arc::new(format!("{}{}", method_name, descriptor_string)),
+            interpreter_invocations: AtomicU64::new(0),
+            instructions_executed: AtomicU64::new(0),
+            jitted: AtomicBool::new(false),
         })
     }
 

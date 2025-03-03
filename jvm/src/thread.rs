@@ -17,7 +17,7 @@ use std::ops::{BitAnd, BitOr, BitXor, Deref, DerefMut, Neg};
 use std::pin::Pin;
 
 use crate::env::Object;
-use crate::execution::MethodHandle;
+use crate::execution::{debug_object, MethodHandle};
 use once_cell::sync::OnceCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -138,8 +138,8 @@ pub struct OperandData {
 
 #[repr(C)]
 pub union Operand {
-    pub objectref: OperandRef,
-    pub data: OperandData,
+    objectref: OperandRef,
+    data: OperandData,
 }
 
 impl Drop for Operand {
@@ -188,12 +188,14 @@ impl Operand {
     }
 
     pub fn copy_data(&self) -> Self {
-        assert_ne!(unsafe { self.data.tag }, OperandTag::Ref);
+        assert_ne!(unsafe { self.tag() }, OperandTag::Ref);
 
         unsafe { std::ptr::read(self as *const Self) }
     }
 
     pub fn ref_(&self) -> *mut () {
+        // assert_eq!(self.tag(), OperandTag::Ref);
+
         unsafe { self.objectref.ref_ }
     }
 
@@ -306,14 +308,6 @@ impl<'jvm> FrameStack {
     pub fn push(&mut self, frame: RawFrame) {
         self.frame_index += 1;
 
-        // if self.frame_index as usize >= self.frames.len() {
-        //     for frame in &self.frames[..] {
-        //         console_log!("{} {}", unsafe { &(*frame.class).this_class }, unsafe {
-        //             &(*frame.method).name
-        //         });
-        //     }
-        // }
-
         self.frames[self.frame_index as usize] = frame;
     }
 
@@ -346,8 +340,8 @@ pub struct Thread {
     pub class_loader: Arc<dyn ClassLoader>,
     pub id: u32,
     pub killed: bool,
-    pub instructions_executed: AtomicU64,
     pub thread_obj: OnceCell<Object>,
+    pub instructions_executed: AtomicU64
 }
 
 impl Thread {
@@ -451,9 +445,7 @@ impl ThreadHandle {
                 FieldType::Long => JValue::Long(unsafe { return_value.data.data } as i64),
                 FieldType::Short => JValue::Short(unsafe { return_value.data.data } as i16),
                 FieldType::Boolean => JValue::Int(unsafe { return_value.data.data } as i32),
-                FieldType::Class(_) | FieldType::Array { .. } => JValue::Reference(unsafe {
-                    self.jvm.environment.object_from_operand(return_value)
-                }),
+                FieldType::Class(_) | FieldType::Array { .. } => JValue::Reference(self.jvm.environment.object_from_operand(return_value)),
             }),
             (_, _) => None,
         };
@@ -463,9 +455,25 @@ impl ThreadHandle {
 
     #[no_mangle]
     pub extern "C" fn interpret(thread: &mut Thread) -> Box<Operand> {
-        let raw_frame = thread.frame_stack.get_top();
-        let raw_frame = unsafe { &mut *raw_frame };
-
+        // let raw_frame = thread.frame_stack.get_top();
+        let raw_frame = unsafe { &mut *thread.frame_stack.frames.as_mut_ptr().add(thread.frame_stack.frame_index as usize) };
+        
+        let total_invocations = thread.jvm.heuristics.interpreter_invocations.fetch_add(1, Ordering::Relaxed);
+        let total_instructions = thread.jvm.heuristics.instructions_executed.fetch_add(0, Ordering::Relaxed);
+        let method_invocations = unsafe { (*raw_frame.method).interpreter_invocations.fetch_add(1, Ordering::Relaxed) } << 10;
+        let instrs_executed = unsafe { (*raw_frame.method).instructions_executed.fetch_add(0, Ordering::Relaxed) } << 10;
+        let jitted = unsafe { (*raw_frame.method).jitted.load(Ordering::Relaxed) };
+        
+        //5 / 1024 ~= 0.01% of all methods invoked or at least 0.5% of all instructions executed
+        if !jitted && ((method_invocations / total_invocations) >= 10 || (instrs_executed / total_instructions) >= 10) && total_instructions >= 2500 && total_invocations >= 2000 {
+            let jvm = thread.jvm.clone();
+            jvm.environment.submit_jit_candidate(
+                unsafe { &*raw_frame.class },
+                unsafe { &*raw_frame.method },
+                thread
+            );
+        }
+        
         loop {
             match Self::step(raw_frame, thread) {
                 ThreadStepResult::Ok => {}
@@ -533,12 +541,16 @@ impl ThreadHandle {
 
         let class = frame.class;
         let method = frame.method;
+        
+        method.instructions_executed.fetch_add(1, Ordering::Relaxed);
 
         let code = if let Some(Attribute::Code(code)) = method.attributes.get("Code") {
             code
         } else {
             panic!()
         };
+
+        let jvm = thread.jvm.clone();
 
         let pc = *frame.program_counter;
         let mut pc_inc = 1;
@@ -547,43 +559,55 @@ impl ThreadHandle {
         let bytes_index = instruction.bytes_index;
         let bytecode = &instruction.bytecode;
 
-        let locals: Vec<String> = frame
-            .locals
-            .iter()
-            .map(|local| match local.tag() {
-                OperandTag::Ref => format!("@{}", local.ref_() as usize as u64),
-                OperandTag::Data | OperandTag::Data2 => format!("{}", local.data() as i32),
-            })
-            .collect();
-        let stack: Vec<String> = (&frame.stack[..*frame.stack_length])
-            .iter()
-            .map(|local| match local.tag() {
-                OperandTag::Ref => format!("@{}", local.ref_() as usize as u64),
-                OperandTag::Data | OperandTag::Data2 => format!("{}", local.data() as i32),
-            })
-            .collect();
+        if thread.jvm.logging.load(Ordering::SeqCst)
+        {
+            thread.jvm.logging.store(false, Ordering::SeqCst);
+            let locals: Vec<String> = frame
+                .locals
+                .iter()
+                .map(|local| {
+                    match local.tag() {
+                        OperandTag::Ref => {
+                            // let obj = jvm.environment.object_ref_from_operand(local);
 
-        if &*class.this_class != "java/lang/Class" && &*method.name != "<init>" {
+                            // debug_object(obj, thread)
+                            format!("{}", local.ref_() as i32)
+                        },
+                        OperandTag::Data | OperandTag::Data2 => format!("{}", local.data() as i32),
+                    }
+                })
+                .collect();
+            let stack: Vec<String> = (&frame.stack[..*frame.stack_length])
+                .iter()
+                .map(|local| match local.tag() {
+                    OperandTag::Ref => {
+                        // let obj = jvm.environment.object_ref_from_operand(local);
+
+                        // debug_object(obj, thread)
+                        format!("{}", local.ref_() as i32)
+                    },
+                    OperandTag::Data | OperandTag::Data2 => format!("{}", local.data() as i32),
+                })
+                .collect();
+
             let instr_count = thread.instructions_executed.load(Ordering::Acquire);
 
-            // if instr_count > 69000 {
-            //     let mut stdout = thread.jvm.stdout.lock();
-            //     write!(&mut stdout, "{}",
-            //            format!(
-            //                "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
-            //                format!("{:?}", bytecode),
-            //                class.this_class,
-            //                method.identifier,
-            //                pc,
-            //                locals.join(", "),
-            //                stack.join(", "),
-            //                instr_count,
-            //            )
-            //     ).unwrap();
-            // }
-        }
+            let mut stdout = thread.jvm.stdout.lock();
+            write!(&mut stdout, "{}",
+                   format!(
+                       "{:<20} | {:<30} | {:<15} | {:<6} | [{}] | [{}] | {}",
+                       format!("{:?}", bytecode),
+                       class.this_class,
+                       method.identifier,
+                       pc,
+                       locals.join(", "),
+                       stack.join(", "),
+                       instr_count,
+                   )
+            ).unwrap();
 
-        let jvm = thread.jvm.clone();
+            thread.jvm.logging.store(true, Ordering::SeqCst);
+        }
 
         match bytecode {
             Bytecode::Invokestatic(constant_index) => {
@@ -1182,7 +1206,14 @@ impl ThreadHandle {
 
                 let value = value.data() as i32;
 
-                frame.push([Operand::new_data((value as f32).to_bits() as u32)])
+                frame.push([Operand::new_data((value as f32).to_bits())])
+            }
+            Bytecode::I2d => {
+                let [value] = frame.pop();
+
+                let value = value.data() as i32;
+
+                frame.push([Operand::new_data2((value as f64).to_bits())])
             }
             Bytecode::F2i => {
                 let [value] = frame.pop();
@@ -1203,7 +1234,34 @@ impl ThreadHandle {
 
                 let value = f64::from_bits(value.data());
 
-                frame.push([Operand::new_data2(value as u64)])
+                if value.is_nan() {
+                    frame.push([Operand::new_data2(0)]);
+                } else if !value.is_infinite() && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+                    frame.push([Operand::new_data2(value as i64 as u64)])
+                } else {
+                    if value.is_sign_positive() {
+                        frame.push([Operand::new_data2(i64::MAX as u64)]);
+                    } else {
+                        frame.push([Operand::new_data2(i64::MIN as u64)]);
+                    };
+                }
+            }
+            Bytecode::D2i => {
+                let [value] = frame.pop();
+
+                let value = f64::from_bits(value.data());
+
+                if value.is_nan() {
+                    frame.push([Operand::new_data(0)]);
+                } else if !value.is_infinite() && value >= i32::MIN as f64 && value <= i32::MAX as f64 {
+                    frame.push([Operand::new_data(value as i64 as i32 as u32)])
+                } else {
+                    if value.is_sign_positive() {
+                        frame.push([Operand::new_data(i32::MAX as u32)]);
+                    } else {
+                        frame.push([Operand::new_data(i32::MIN as u32)]);
+                    };
+                }
             }
             Bytecode::Fmul => {
                 let [a, b] = frame.pop();
@@ -1371,7 +1429,21 @@ impl ThreadHandle {
                     Operand::new_data2(long & ((u32::MAX as u64) << 32));
                 frame.locals[*index as usize + 1] = Operand::new_data2(long & (u32::MAX as u64));
             }
+            Bytecode::Dstore(index) => {
+                let [op] = frame.pop();
+                let double = op.data();
+
+                frame.locals[*index as usize] =
+                    Operand::new_data2(double & ((u32::MAX as u64) << 32));
+                frame.locals[*index as usize + 1] = Operand::new_data2(double & (u32::MAX as u64));
+            }
             Bytecode::Lload(index) => {
+                let op1 = frame.locals[*index as usize].data();
+                let op2 = frame.locals[*index as usize + 1].data();
+
+                frame.push([Operand::new_data2((op1 << 32) | op2)]);
+            }
+            Bytecode::Dload(index) => {
                 let op1 = frame.locals[*index as usize].data();
                 let op2 = frame.locals[*index as usize + 1].data();
 
@@ -1421,13 +1493,37 @@ impl ThreadHandle {
                     ((a.data() as i64) - (b.data() as i64)) as u64,
                 )]);
             }
+            Bytecode::Dcmpl | Bytecode::Dcmpg => {
+                let [a, b] = frame.pop();
+
+                let a = f64::from_bits(a.data());
+                let b = f64::from_bits(b.data());
+                
+                let nan_out = if matches!(bytecode, Bytecode::Dcmpg) {
+                    1
+                } else {
+                    -1i32 as u32
+                };
+                
+                let cmp = (matches!(bytecode, Bytecode::Dcmpl) &&  a < b) || (matches!(bytecode, Bytecode::Dcmpg) &&  a > b); 
+
+                frame.push([Operand::new_data(if cmp {
+                    1
+                } else if a == b {
+                    0
+                } else if a < b {
+                    -1i32 as u32
+                } else {
+                    nan_out
+                })]);
+            }
             Bytecode::Lcmp => {
                 let [a, b] = frame.pop();
 
                 let a = a.data() as i64;
                 let b = b.data() as i64;
 
-                let result: i64 = if a > b {
+                let result: i32 = if a > b {
                     1
                 } else if a == b {
                     0
@@ -1435,7 +1531,7 @@ impl ThreadHandle {
                     -1
                 };
 
-                frame.push([Operand::new_data2(result as u64)]);
+                frame.push([Operand::new_data(result as u32)]);
             }
             Bytecode::Iushr => {
                 let [a, b] = frame.pop();
@@ -1447,6 +1543,12 @@ impl ThreadHandle {
                 let [a, b] = frame.pop();
                 frame.push([Operand::new_data2(
                     ((a.data() as i64) << ((b.data() as i32 as i64) & 0b111111)) as u64,
+                )]);
+            }
+            Bytecode::Lushr => {
+                let [a, b] = frame.pop();
+                frame.push([Operand::new_data2(
+                    a.data() >> ((b.data() as i32 as u64) & 0b111111),
                 )]);
             }
             Bytecode::Lshr => {
@@ -2160,6 +2262,7 @@ impl ThreadHandle {
         }
 
         thread.instructions_executed.fetch_add(1, Ordering::Relaxed);
+        thread.jvm.heuristics.instructions_executed.fetch_add(1, Ordering::Relaxed);
 
         *frame.program_counter = frame.program_counter.checked_add_signed(pc_inc).unwrap();
 
